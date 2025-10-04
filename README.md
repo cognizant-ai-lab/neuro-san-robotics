@@ -1,66 +1,79 @@
 # neuro-san-robotics
 Neuro San Robotics
 
+## Setup
 
-unitree sdk setup
+### Clone the repo
 
-```bash
-brew install cmake
+```shell
+git clone https://github.com/cognizant-ai-lab/neuro-san-robotics.git
+```
 
-# make a dir
-mkdir caily
+### Set up the python env
+```shell
+# Navigate to the newly cloned repo
+cd neuro-san-robotics
 
-# go to the dir
-cd caily
-
-# create venv
+# Create a dedicated Python virtual environment:
 python -m venv .venv
 
-# source from venv
-source .venv/bin/activate
+# Activate the virtual environment:
+source venv/bin/activate && export PYTHONPATH=`pwd`
 
-# clone them both there
+# Install the requirements:
+pip install -r requirements.txt
+```
+
+### Set up Unitree's SDK
+
+```shell
+# Go to the project directly if you're not already there
+cd neuro-san-robotics
+
+# Install cmake
+brew install cmake
+
+# Clone these 2 repos within the neuro-san-robotics dir
 git clone https://github.com/unitreerobotics/unitree_sdk2_python
 git clone https://github.com/eclipse-cyclonedds/cyclonedds -b releases/0.10.x
 
-# go to cyclonedds and create dirs to build
+# Go to cyclonedds and create dirs to build
 cd cyclonedds && mkdir build install && cd build
 
-# build cyclonedds
+# Build cyclonedds
 cmake .. -DCMAKE_INSTALL_PREFIX=../install
 
-# install cyclonedds
+# Install cyclonedds
 cmake --build . --target install
 
-# back to cyclonedds/
+# Back to cyclonedds/
 cd ..
 
-# export env variable
+# Export env variable
 export CYCLONEDDS_HOME="$(pwd)/install"
 
-# install cyclonedds
-cd cyclonedds; python -m pip install cyclonedds --no-binary cyclonedds
+# Install cyclonedds
+python -m pip install cyclonedds --no-binary cyclonedds
 
-# back to caily/
+# Back to the project root
 cd ..
 
-# go to unitree_sdk_python
+# Go to unitree_sdk_python
 cd unitree_sdk2_python
 
-# install unitree_sdk_python
+# Install unitree_sdk_python
 python -m pip install -e .
 
-# back to caily
+# Back to the project root
 cd ..
 ```
 
+## Test
 
-test hello_world:
-use the same venv
+Runt the `hello_world` test:
+
 ```bash
-
 cd unitree_sdk_python
 python ./example/helloworld/subscriber.py
 python ./example/helloworld/publisher.py
-
 ```
