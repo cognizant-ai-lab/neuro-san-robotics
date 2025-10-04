@@ -1,0 +1,10 @@
+# Neuro SAN
+neuro-san==0.5.62
+nsflow==0.5.20
+
+# To use a .env file for environment variables
+python-dotenv==1.0.1
+
+# For asynchronous file operations
+aiofiles>=24.1.0
+
