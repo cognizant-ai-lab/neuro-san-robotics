@@ -1,5 +1,5 @@
 # neuro-san-robotics
-Neuro San Robotics
+Neuro SAN Robotics
 
 ## Setup
 
@@ -48,10 +48,11 @@ which python
 python --version
 ```
 
-#### Install the requirements
+#### Install the repo's requirements
+
+Install `neuro-san` and the other requirements:
 
 ```shell
-# Install the requirements:
 pip install -r requirements.txt
 ```
 
@@ -157,8 +158,8 @@ Run the `hello_world` test:
 
 In one terminal, run the subscriber:
 ```bash
-# Navigate to the project
-cd  ~/workspace/neuro-san-robotics
+# Navigate to the project's repo
+cd neuro-san-robotics
 
 # Activate the virtual environment
 source venv/bin/activate && export PYTHONPATH=`pwd`
@@ -172,8 +173,8 @@ python ./example/helloworld/subscriber.py
 
 In another terminal, run the publisher:
 ```bash
-# Navigate to the project
-cd  ~/workspace/neuro-san-robotics
+# Navigate to the project's repo
+cd neuro-san-robotics
 
 # Activate the virtual environment
 source venv/bin/activate && export PYTHONPATH=`pwd`
