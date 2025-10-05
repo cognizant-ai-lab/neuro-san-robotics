@@ -10,16 +10,47 @@ git clone https://github.com/cognizant-ai-lab/neuro-san-robotics.git
 ```
 
 ### Set up the python env
+
+#### Install PyEnv
+
+You'll need Python 3.11, NOT later. You can use `pyenv` to manage your Python versions.
+```shell
+# Install pyenv
+brew install pyenv
+
+# Or update it
+brew update
+brew upgrade pyenv
+
+# Check the latest version of Python 3.11
+pyenv install --list | grep " 3\.11"
+
+# Install Python 3.11. Latest version at the time of writing is 3.11.13
+pyenv install 3.11.13
+```
+
+#### Create a virtual environment
+
 ```shell
 # Navigate to the newly cloned repo
 cd neuro-san-robotics
 
-# Create a dedicated Python virtual environment:
-python -m venv .venv
+# Create a virtual environment for Python 3.11
+$HOME/.pyenv/versions/3.11.13/bin/python -m venv ./venv
 
 # Activate the virtual environment:
-source venv/bin/activate && export PYTHONPATH=`pwd`
+source venv/bin/activate && export PYTHONPATH=`pwd` 
 
+# Check you're using the right Python executable
+which python
+
+# Check the version. Must be 3.11.x
+python --version
+```
+
+#### Install the requirements
+
+```shell
 # Install the requirements:
 pip install -r requirements.txt
 ```
@@ -118,18 +149,40 @@ If you run into the following error:
 Failed to build cyclonedds
 ```
 
-You're not the only one.
-- Happens with macOS Sonoma and Sequoia
-- cmake 4.1.1 and 4.1.2
-
-Investigation in progress. To be continued.
+That's because you're using Python 3.12.x or 3.13. You need to downgrade to Python 3.11.x.
 
 ## Test
 
 Run the `hello_world` test:
 
+In one terminal, run the subscriber:
 ```bash
-cd unitree_sdk_python
+# Navigate to the project
+cd  ~/workspace/neuro-san-robotics
+
+# Activate the virtual environment
+source venv/bin/activate && export PYTHONPATH=`pwd`
+
+# Navigate to the unitree_sdk2_python directory
+cd  unitree_sdk2_python
+
+# Run the subscriber
 python ./example/helloworld/subscriber.py
+```
+
+In another terminal, run the publisher:
+```bash
+# Navigate to the project
+cd  ~/workspace/neuro-san-robotics
+
+# Activate the virtual environment
+source venv/bin/activate && export PYTHONPATH=`pwd`
+
+# Navigate to the unitree_sdk2_python directory
+cd  unitree_sdk2_python
+
+# Run the publisher
 python ./example/helloworld/publisher.py
 ```
+
+For more information look at the [Unitree SDK2 Python documentation](https://github.com/unitreerobotics/unitree_sdk2_python).
