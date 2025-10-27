@@ -1,0 +1,94 @@
+
+# Copyright (C) 2023-2025 Cognizant Digital Business, Evolutionary AI.
+# All Rights Reserved.
+# Issued under the Academic Public License.
+#
+# You can be released from the terms, and requirements of the Academic Public
+# License by purchasing a commercial license.
+# Purchase of a commercial license is mandatory for any use of the
+# neuro-san SDK Software in commercial settings.
+#
+# END COPYRIGHT
+
+# The schema specifications for this file are documented here:
+# https://github.com/cognizant-ai-lab/neuro-san/blob/main/docs/agent_hocon_reference.md
+
+{
+    # Optional metadata describing this agent network
+    "metadata": {
+        "description": "Simple agent network to make the dog look alive"
+        "tags": ["unitree"],
+        "rai_scores": {
+            # These are not real scores, they are just an example
+            "bogosity": 0.9,
+            "safety": 0.8,    
+        }
+    },
+    "llm_config": {
+        "model_name": "gpt-4o",
+    },
+    "tools": [
+        # This first agent definition is regarded as the "Front Man", which
+        # does all the talking to the outside world/client.
+        #
+        # Some disqualifications from being a front man:
+        #   1) Cannot use a CodedTool "class" definition
+        #   2) Cannot use a Tool "toolbox" definition
+        #
+        # Besides the first agent being the front man, these tool definitions
+        # do not have to be in any particular order. How they are linked and
+        # call each other is defined within their own specs.
+        # This could be a graph, potentially even with cycles.
+        {
+            "name": "robot_manager",
+
+            "function": {
+
+                # The description acts as an initial prompt.
+                "description": """
+I can take user commands and control a robot.
+""",
+                # This parameters section isn't strictly needed if the agent network
+                # is not expected to be called as an external agent.
+                # This one is used with math_guy_passthrough, so we need to add this.
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "description": "A description of the action that we expect the robot to do."
+                        }
+                    },
+                    "required": ["action"]
+                },
+                }
+            "instructions": """
+You are an interface for a robot.
+Always call the robot_macros tool with the action string to have robot perform the actions.
+Based on user query, call the robot_macros with the following json:
+Here's the list of actions: ["stand_up"]
+"""
+            "tools": ["robot_macros"]
+        },
+
+        # The unigo2 is a low-level CodedTool and does not call anyone else.
+        # He is called by the front-man.
+        {
+            "name": "robot_macros",
+            "function": {
+                "description": "Issues commands to the robot.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "description": "The single-word name of the action to perform"
+                        }
+                    },
+                    "required": ["action"]
+                }
+            },
+            "class": "robot_macros.RobotMacros"
+        }
+    ]
+}
