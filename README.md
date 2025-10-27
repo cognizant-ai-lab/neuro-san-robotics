@@ -187,3 +187,60 @@ python ./example/helloworld/publisher.py
 ```
 
 For more information look at the [Unitree SDK2 Python documentation](https://github.com/unitreerobotics/unitree_sdk2_python).
+
+---
+
+## How to run neuro-san agents on Cailey
+
+**Step1:** 
+- Set env variables:
+```bash
+export AGENT_TOOL_PATH="coded_tools"
+export AGENT_MANIFEST_FILE="registries/manifest.hocon"
+```
+
+- Optionally set update period
+```bash
+export AGENT_MANIFEST_UPDATE_PERIOD_SECONDS=5
+```
+
+**Step2:** Interaction:
+
+- Direct interaction
+  ```bash
+  python -m neuro_san.client.agent_cli --connection direct --agent "unigo2"
+  ```
+
+**OR**
+
+- Server and client setup
+
+  On one terminal, start neuro_san server
+  ```bash
+  python -m neuro_san.service.main_loop.server_main_loop
+  ```
+
+  And on another terminal run the CLI client
+  ```bash
+  python -m neuro_san.client.agent_cli --connection http --agent "unigo2"
+  ```
+
+**Step 3**:
+- Sample expected interaction
+```
+Please enter your response ('quit' to terminate):
+hello
+Sending user_input hello
+
+Response from robot_manager:
+Hello! How can I assist you today?
+Please enter your response ('quit' to terminate):
+stand up
+Sending user_input stand up
+[13:44:25] Stand up
+
+Response from robot_manager:
+The robot has stood up. How else can I assist you today?
+Please enter your response ('quit' to terminate):
+quit
+```
