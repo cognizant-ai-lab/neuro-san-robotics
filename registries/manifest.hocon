@@ -9,3 +9,4 @@
 #
 # END COPYRIGHT
 "unigo2.hocon" = {"serve": True, "public": True}
+"conscious_agent.hocon" = {"serve": True, "public": False}
