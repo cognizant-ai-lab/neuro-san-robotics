@@ -17,10 +17,13 @@ Usage:
   python3 go2_tts.py -V fa "سلام! من آماده هستم."
 """
 
-import argparse
+# import argparse
 import shutil
 import subprocess
-import sys
+# import sys
+from typing import Any, Dict
+import logging
+from neuro_san.interfaces.coded_tool import CodedTool
 
 def _has(cmd: str) -> bool:
     return shutil.which(cmd) is not None
@@ -71,15 +74,38 @@ def say(text: str, rate: int = 180, volume: float = 1.0, voice: str = "en-us") -
     # If aplay exists, espeak-ng will still speak; aplay only needed for WAV route.
     subprocess.run(cmd, check=True)
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("text", help="What the Go2 should say", nargs="+")
-    p.add_argument("-r", "--rate", type=int, default=180, help="Words per minute (default 180)")
-    p.add_argument("-v", "--volume", type=float, default=1.0, help="Volume 0.0–1.0 (default 1.0)")
-    p.add_argument("-V", "--voice", default="en-us",
-                   help="Voice/language (e.g., en-us, en-gb, fa). Substring match for pyttsx3.")
-    args = p.parse_args()
-    say(" ".join(args.text), rate=args.rate, volume=args.volume, voice=args.voice)
+class Go2TTSTool(CodedTool):
+    """
+    CodedTool wrapper for Unitree Go2 offline TTS.
+    Usage (invoke):
+        {"action": "say", "text": "Hello!", "rate": 170, "volume": 0.9, "voice": "en-us"}
+    All parameters are optional except "text".
+    """
+    async def async_invoke(self, args: Dict[str, Any], sly_data: Dict[str, Any]) -> Any:
 
-if __name__ == "__main__":
-    main()
+        text = args.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return "Missing required 'text' (string) for TTS"
+        rate = int(args.get("rate", 180))
+        volume = float(args.get("volume", 1.0))
+        voice = args.get("voice", "en-sc")
+        try:
+            say(text, rate=rate, volume=volume, voice=voice)
+            logging.info(f"===== GO2 TTS say (rate={rate}, volume={volume}, voice={voice}) -> {text!r}")
+            return f"TTS OK: {text}"
+        except Exception as e:
+            logging.exception("TTS failed")
+            return f"TTS error: {e}"
+
+# def main():
+#     p = argparse.ArgumentParser()
+#     p.add_argument("text", help="What the Go2 should say", nargs="+")
+#     p.add_argument("-r", "--rate", type=int, default=180, help="Words per minute (default 180)")
+#     p.add_argument("-v", "--volume", type=float, default=1.0, help="Volume 0.0–1.0 (default 1.0)")
+#     p.add_argument("-V", "--voice", default="en-us",
+#                    help="Voice/language (e.g., en-us, en-gb, fa). Substring match for pyttsx3.")
+#     args = p.parse_args()
+#     say(" ".join(args.text), rate=args.rate, volume=args.volume, voice=args.voice)
+#
+# if __name__ == "__main__":
+#     main()
