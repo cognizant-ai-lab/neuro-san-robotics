@@ -1,5 +1,7 @@
 # Neuro SAN
-neuro-san==0.5.68
+# neuro-san==0.5.68
+# Note: Install neuro-san from source by disabling ddgs because there's an unsolvable dependency 'primp' that gets stuck on the pip install
+
 nsflow==0.5.20
 
 # To use a .env file for environment variables
@@ -7,4 +9,3 @@ python-dotenv==1.0.1
 
 # For asynchronous file operations
 aiofiles>=24.1.0
-
