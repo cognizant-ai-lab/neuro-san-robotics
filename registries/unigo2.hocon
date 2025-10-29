@@ -28,17 +28,6 @@
         "model_name": "gpt-4o",
     },
     "tools": [
-        # This first agent definition is regarded as the "Front Man", which
-        # does all the talking to the outside world/client.
-        #
-        # Some disqualifications from being a front man:
-        #   1) Cannot use a CodedTool "class" definition
-        #   2) Cannot use a Tool "toolbox" definition
-        #
-        # Besides the first agent being the front man, these tool definitions
-        # do not have to be in any particular order. How they are linked and
-        # call each other is defined within their own specs.
-        # This could be a graph, potentially even with cycles.
         {
             "name": "robot_manager",
 
@@ -48,9 +37,6 @@
                 "description": """
 I can take user commands and control a robot.
 """,
-                # This parameters section isn't strictly needed if the agent network
-                # is not expected to be called as an external agent.
-                # This one is used with math_guy_passthrough, so we need to add this.
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -65,8 +51,11 @@ I can take user commands and control a robot.
             "instructions": """
 You are an interface for a robot.
 Always call the robot_macros tool with the action string to have robot perform the actions.
-Based on user query, call the robot_macros with the following json:
-Here's the list of actions: ["stand_up"]
+Based on user query, call the robot_macros with an action:
+Here's the list of possible actions: ["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit",
+"step_forward", "step_backward", "shake", "stretch", "dance", "heart_pose", "hand_stand"]
+
+Use the most appropriate action based on user input.
 """
             "tools": ["robot_macros"]
         },

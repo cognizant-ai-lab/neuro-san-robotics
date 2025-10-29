@@ -67,6 +67,14 @@ cd neuro-san-robotics
 # Install cmake
 brew install cmake
 
+# If you face any issues
+# Note: ubuntu 20.04 and later have cmake by default.
+# However, just to be sure, do this step before building cyclonedds on linux
+# sudo apt install -y cmake build-essential git libssl-dev libxml2-dev flex bison
+# And optional ROS2 integration packages
+# sudo apt install -y libice-dev libsm-dev libx11-dev
+
+
 # Clone these 2 repos within the neuro-san-robotics dir
 git clone https://github.com/unitreerobotics/unitree_sdk2_python
 git clone https://github.com/eclipse-cyclonedds/cyclonedds -b releases/0.10.x
@@ -76,6 +84,20 @@ cd cyclonedds && mkdir build install && cd build
 
 # Build cyclonedds
 cmake .. -DCMAKE_INSTALL_PREFIX=../install
+
+# If you face issues with cmak installation on linux
+# Note for ubuntu 20.04 or later
+# Make sure CMake finds the correct system toolchain (not a Homebrew one):
+#cmake .. -DCMAKE_INSTALL_PREFIX=../install -DBUILD_EXAMPLES=OFF
+
+#If you’re on Jetson (ARM), you may also want to disable testing tools:
+# cmake .. -DCMAKE_INSTALL_PREFIX=../install -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF
+
+# Sometimes the system’s libc6-dev and flex/bison are ARM builds that mismatch with host compiler expectations.
+# If that’s the case, you can skip building ddsperf altogether (it’s just a benchmark tool, not needed for runtime).
+# In your CMake command:
+# cmake .. -DCMAKE_INSTALL_PREFIX=../install -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DBUILD_DDSPERF=OFF
+# This will still install CycloneDDS core libraries — without building the ddsperf tool.
 
 # Install cyclonedds
 cmake --build . --target install

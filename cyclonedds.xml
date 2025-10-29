@@ -1,0 +1,10 @@
+<CycloneDDS>
+  <Domain id="any">
+    <General>
+      <AllowMulticast>true</AllowMulticast>
+      <Interfaces>
+        <NetworkInterface autodetermine="false" name="eth0" />
+      </Interfaces>
+    </General>
+  </Domain>
+</CycloneDDS>
