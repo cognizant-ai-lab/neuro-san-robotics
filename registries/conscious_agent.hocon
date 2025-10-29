@@ -57,7 +57,9 @@ These could be topics you've used before, or new ones, expanding the list of top
 If there are no new facts to add to memory, for example, if the user is simply asking a question, or when they are being silent,
 then make sure to call your reorganize_memory tool every once in a while.
 If you choose to do anything, call your robot_macros tool with one of the following actions:
-['stand_up', 'lie_down', 'look_left', 'look_right', 'step_forward', 'shake', 'roll_over']
+["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit",
+"step_forward", "step_backward", "shake", "stretch", "dance", "heart_pose", "hand_stand"]
+
             """,
             "allow": {
                 "to_upstream": {
