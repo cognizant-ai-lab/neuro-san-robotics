@@ -192,17 +192,36 @@ def handle_user_input(json, *_):
     socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
 
 
-def cleanup():
+cleaned_up = False
+
+
+def cleanup(from_request=False):
     """Tear things down on exit."""
+    global cleaned_up
+    if cleaned_up:
+        return
+    cleaned_up = True
+    
     print("Bye!")
     tear_down_conscious_assistant(conscious_session)
-    socketio.stop()
+    
+    if from_request:
+        try:
+            from flask import has_request_context
+            if has_request_context():
+                func = request.environ.get('werkzeug.server.shutdown')
+                if func:
+                    func()
+                else:
+                    app.logger.warning("Werkzeug shutdown function not available")
+        except Exception as e:
+            app.logger.warning(f"Server shutdown failed: {e}")
 
 
-@app.route("/shutdown")
+@app.route("/shutdown", methods=["POST"])
 def shutdown():
     """Shut down process."""
-    cleanup()
+    cleanup(from_request=True)
     return "Capture ended"
 
 
