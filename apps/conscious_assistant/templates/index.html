@@ -30,9 +30,14 @@
             </div>
             <form id="user-input-section" autocomplete="off">
                 <textarea id="user-input" rows="3" placeholder="Communicate with the conscious robot... (type 'exit' to disconnect)" aria-label="Type your message"></textarea>
-                <button type="button" id="send-button" onclick="sendUserInput()">
-                    <span class="button-text">Send</span>
-                </button>
+                <div class="button-group">
+                    <button type="button" id="mic-button" onclick="toggleSpeechRecognition()" aria-label="Voice input">
+                        <span class="mic-icon">🎤</span>
+                    </button>
+                    <button type="button" id="send-button" onclick="sendUserInput()">
+                        <span class="button-text">Send</span>
+                    </button>
+                </div>
             </form>
         </section>
 
@@ -57,6 +62,67 @@
         var thoughtsInitialized = false;
         var speechInitialized = false;
         var userInputInitialized = false;
+        var recognition = null;
+        var isRecording = false;
+
+        // Initialize Speech Recognition
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+            var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.continuous = false;
+            recognition.interimResults = true;
+            recognition.lang = 'en-US';
+
+            recognition.onstart = function() {
+                isRecording = true;
+                document.getElementById('mic-button').classList.add('recording');
+                console.log('Speech recognition started');
+            };
+
+            recognition.onresult = function(event) {
+                var transcript = '';
+                for (var i = event.resultIndex; i < event.results.length; i++) {
+                    transcript += event.results[i][0].transcript;
+                }
+                document.getElementById('user-input').value = transcript;
+            };
+
+            recognition.onerror = function(event) {
+                console.error('Speech recognition error:', event.error);
+                isRecording = false;
+                document.getElementById('mic-button').classList.remove('recording');
+                if (event.error === 'not-allowed') {
+                    alert('Microphone access denied. Please allow microphone access in your browser settings.');
+                }
+            };
+
+            recognition.onend = function() {
+                isRecording = false;
+                document.getElementById('mic-button').classList.remove('recording');
+                console.log('Speech recognition ended');
+            };
+        } else {
+            // Hide mic button if speech recognition is not supported
+            document.addEventListener('DOMContentLoaded', function() {
+                var micButton = document.getElementById('mic-button');
+                if (micButton) {
+                    micButton.style.display = 'none';
+                }
+            });
+        }
+
+        function toggleSpeechRecognition() {
+            if (!recognition) {
+                alert('Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.');
+                return;
+            }
+
+            if (isRecording) {
+                recognition.stop();
+            } else {
+                recognition.start();
+            }
+        }
 
         socket.on('connect', function() {
             console.log('Websocket connected!');
