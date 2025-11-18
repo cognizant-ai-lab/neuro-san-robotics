@@ -31,7 +31,7 @@
             <form id="user-input-section" autocomplete="off">
                 <textarea id="user-input" rows="3" placeholder="Communicate with the conscious robot... (type 'exit' to disconnect)" aria-label="Type your message"></textarea>
                 <div class="button-group">
-                    <button type="button" id="mic-button" onclick="toggleSpeechRecognition()" aria-label="Voice input">
+                    <button type="button" id="mic-button" aria-label="Voice input">
                         <span class="mic-icon">🎤</span>
                     </button>
                     <button type="button" id="send-button" onclick="sendUserInput()">
@@ -62,117 +62,15 @@
         var thoughtsInitialized = false;
         var speechInitialized = false;
         var userInputInitialized = false;
-        var recognition = null;
         var isRecording = false;
-        var isStarting = false;
         var micPermissionGranted = false;
         
-        // Whisper fallback variables
-        var useWhisperFallback = false;
+        // Whisper (OpenAI) speech recognition variables
         var mediaRecorder = null;
         var audioChunks = [];
         var whisperStream = null;
         var isTranscribing = false;
-
-        // Initialize Speech Recognition
-        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-            var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            recognition = new SpeechRecognition();
-            recognition.continuous = true;  // Keep listening until explicitly stopped
-            recognition.interimResults = true;
-            recognition.lang = 'en-US';
-            recognition.maxAlternatives = 1;
-
-            recognition.onstart = function() {
-                isRecording = true;
-                isStarting = false;
-                document.getElementById('mic-button').classList.add('recording');
-                console.log('Speech recognition started');
-            };
-
-            recognition.onaudiostart = function() {
-                console.log('Audio capture started');
-            };
-
-            recognition.onspeechstart = function() {
-                console.log('Speech detected');
-            };
-
-            recognition.onresult = function(event) {
-                var transcript = '';
-                for (var i = event.resultIndex; i < event.results.length; i++) {
-                    if (event.results[i].isFinal) {
-                        transcript += event.results[i][0].transcript;
-                    } else {
-                        // Show interim results in real-time
-                        transcript += event.results[i][0].transcript;
-                    }
-                }
-                document.getElementById('user-input').value = transcript;
-            };
-
-            recognition.onspeechend = function() {
-                console.log('Speech ended');
-            };
-
-            recognition.onaudioend = function() {
-                console.log('Audio capture ended');
-            };
-
-            recognition.onerror = function(event) {
-                console.error('Speech recognition error:', event.error);
-                isRecording = false;
-                isStarting = false;
-                document.getElementById('mic-button').classList.remove('recording');
-                
-                // Auto-fallback to Whisper on network errors or if Brave browser
-                var isBrave = navigator.brave && typeof navigator.brave.isBrave === 'function';
-                if (event.error === 'network' || event.error === 'service-not-allowed' || isBrave) {
-                    console.log('Web Speech API failed, enabling Whisper fallback');
-                    useWhisperFallback = true;
-                    alert('Browser speech recognition unavailable. Switching to OpenAI Whisper fallback.\n\nNote: Requires OPENAI_API_KEY environment variable to be set on the server.');
-                    return;
-                }
-                
-                // Comprehensive error handling for other errors
-                var errorMessage = '';
-                switch(event.error) {
-                    case 'not-allowed':
-                        errorMessage = 'Microphone access denied. Please allow microphone access in your browser settings.';
-                        break;
-                    case 'audio-capture':
-                        errorMessage = 'No microphone detected or microphone is blocked. Please check your microphone connection and browser settings.';
-                        break;
-                    case 'aborted':
-                        console.log('Speech recognition aborted (likely due to quick start/stop)');
-                        return;
-                    case 'no-speech':
-                        console.log('No speech detected');
-                        return;
-                    default:
-                        errorMessage = 'Speech recognition error: ' + event.error;
-                }
-                
-                if (errorMessage) {
-                    alert(errorMessage);
-                }
-            };
-
-            recognition.onend = function() {
-                isRecording = false;
-                isStarting = false;
-                document.getElementById('mic-button').classList.remove('recording');
-                console.log('Speech recognition ended');
-            };
-        } else {
-            // Hide mic button if speech recognition is not supported
-            document.addEventListener('DOMContentLoaded', function() {
-                var micButton = document.getElementById('mic-button');
-                if (micButton) {
-                    micButton.style.display = 'none';
-                }
-            });
-        }
+        var AUTO_SEND = true;  // Auto-send transcription when recording stops
 
         // Pre-warm microphone permission on first use
         async function ensureMicPermission() {
@@ -182,7 +80,6 @@
             
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                // Stop the stream immediately, we just needed the permission
                 stream.getTracks().forEach(track => track.stop());
                 micPermissionGranted = true;
                 console.log('Microphone permission granted');
@@ -194,8 +91,13 @@
             }
         }
 
-        // Whisper fallback: Start recording with MediaRecorder
+        // Start recording with MediaRecorder (OpenAI Whisper)
         async function startWhisperRecording() {
+            if (isRecording || isTranscribing) {
+                console.log('Already recording or transcribing, ignoring start request');
+                return;
+            }
+            
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 whisperStream = stream;
@@ -253,8 +155,20 @@
                         }
                         
                         const data = await response.json();
-                        document.getElementById('user-input').value = data.text;
-                        console.log('Transcription successful:', data.text);
+                        const text = (data.text || '').trim();
+                        
+                        if (text) {
+                            document.getElementById('user-input').value = text;
+                            console.log('Transcription successful:', text);
+                            
+                            // Auto-send if enabled
+                            if (AUTO_SEND) {
+                                sendUserInput();
+                            }
+                        } else {
+                            console.log('No speech detected in transcription');
+                            alert('No speech detected. Please try again.');
+                        }
                     } catch (err) {
                         console.error('Transcription error:', err);
                         alert('Transcription failed: ' + err.message + '\n\nMake sure OPENAI_API_KEY is set on the server.');
@@ -276,7 +190,7 @@
             }
         }
 
-        // Whisper fallback: Stop recording
+        // Stop recording
         function stopWhisperRecording() {
             if (mediaRecorder && mediaRecorder.state !== 'inactive') {
                 mediaRecorder.stop();
@@ -286,62 +200,37 @@
             }
         }
 
-        async function toggleSpeechRecognition() {
-            // Use Whisper fallback if enabled or if Web Speech API is not available
-            if (useWhisperFallback || !recognition) {
+        // Setup mic button push-to-talk event handlers
+        document.addEventListener('DOMContentLoaded', function() {
+            const micButton = document.getElementById('mic-button');
+            
+            async function startIfPossible(e) {
+                e.preventDefault();
+                if (!isRecording && !isTranscribing) {
+                    const hasPermission = await ensureMicPermission();
+                    if (hasPermission) {
+                        await startWhisperRecording();
+                    }
+                }
+            }
+            
+            function stopIfRecording(e) {
+                e.preventDefault();
                 if (isRecording) {
                     stopWhisperRecording();
-                } else {
-                    if (isTranscribing) {
-                        console.log('Already transcribing, ignoring start request');
-                        return;
-                    }
-                    const hasPermission = await ensureMicPermission();
-                    if (!hasPermission) {
-                        return;
-                    }
-                    await startWhisperRecording();
-                }
-                return;
-            }
-
-            // Use Web Speech API
-            if (isRecording) {
-                try {
-                    recognition.stop();
-                } catch (err) {
-                    console.error('Error stopping recognition:', err);
-                    isRecording = false;
-                    isStarting = false;
-                    document.getElementById('mic-button').classList.remove('recording');
-                }
-            } else {
-                // Prevent multiple simultaneous starts
-                if (isStarting) {
-                    console.log('Recognition is already starting, ignoring duplicate start request');
-                    return;
-                }
-                
-                // Ensure microphone permission before starting
-                const hasPermission = await ensureMicPermission();
-                if (!hasPermission) {
-                    return;
-                }
-                
-                isStarting = true;
-                try {
-                    recognition.start();
-                } catch (err) {
-                    console.error('Error starting recognition:', err);
-                    isStarting = false;
-                    if (err.name === 'InvalidStateError') {
-                        console.log('Recognition already started, ignoring');
-                    } else {
-                        alert('Failed to start speech recognition: ' + err.message);
-                    }
                 }
             }
-        }
+            
+            // Mouse events
+            micButton.addEventListener('mousedown', startIfPossible);
+            micButton.addEventListener('mouseup', stopIfRecording);
+            micButton.addEventListener('mouseleave', stopIfRecording);
+            
+            // Touch events for mobile
+            micButton.addEventListener('touchstart', startIfPossible, {passive: false});
+            micButton.addEventListener('touchend', stopIfRecording);
+            micButton.addEventListener('touchcancel', stopIfRecording);
+        });
 
         // Spacebar hotkey for speech input (hold to talk, release to stop)
         var spacebarPressed = false;
@@ -354,7 +243,7 @@
                 spacebarPressed = true;
                 spacebarStartTime = Date.now();
                 
-                if (!isRecording && !isStarting && !isTranscribing) {
+                if (!isRecording && !isTranscribing) {
                     // Use async function to handle permission check
                     (async function() {
                         const hasPermission = await ensureMicPermission();
@@ -363,22 +252,7 @@
                             return;
                         }
                         
-                        // Use Whisper fallback if enabled or if Web Speech API is not available
-                        if (useWhisperFallback || !recognition) {
-                            await startWhisperRecording();
-                        } else {
-                            isStarting = true;
-                            try {
-                                recognition.start();
-                            } catch (err) {
-                                console.error('Error starting recognition via spacebar:', err);
-                                isStarting = false;
-                                spacebarPressed = false;
-                                if (err.name !== 'InvalidStateError') {
-                                    alert('Failed to start speech recognition: ' + err.message);
-                                }
-                            }
-                        }
+                        await startWhisperRecording();
                     })();
                 }
             }
@@ -386,22 +260,13 @@
 
         document.addEventListener('keyup', function(e) {
             // Stop recording when spacebar is released
-            // Add grace period to avoid immediate stop from quick key press
             if (e.code === 'Space' && spacebarPressed) {
                 e.preventDefault();
                 var pressDuration = Date.now() - spacebarStartTime;
                 
                 // Only stop if key was held for at least 150ms to avoid accidental quick taps
                 if (pressDuration >= 150 && isRecording) {
-                    if (useWhisperFallback || !recognition) {
-                        stopWhisperRecording();
-                    } else {
-                        try {
-                            recognition.stop();
-                        } catch (err) {
-                            console.error('Error stopping recognition via spacebar:', err);
-                        }
-                    }
+                    stopWhisperRecording();
                 }
                 
                 spacebarPressed = false;
