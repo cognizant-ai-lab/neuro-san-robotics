@@ -124,6 +124,31 @@
             }
         }
 
+        // Spacebar hotkey for speech input (hold to talk, release to stop)
+        var spacebarPressed = false;
+        
+        document.addEventListener('keydown', function(e) {
+            // Only activate if spacebar is pressed and textarea is NOT focused
+            if (e.code === 'Space' && document.activeElement.id !== 'user-input' && !spacebarPressed) {
+                e.preventDefault();
+                spacebarPressed = true;
+                if (recognition && !isRecording) {
+                    recognition.start();
+                }
+            }
+        });
+
+        document.addEventListener('keyup', function(e) {
+            // Stop recording when spacebar is released
+            if (e.code === 'Space' && spacebarPressed) {
+                e.preventDefault();
+                spacebarPressed = false;
+                if (recognition && isRecording) {
+                    recognition.stop();
+                }
+            }
+        });
+
         socket.on('connect', function() {
             console.log('Websocket connected!');
         });
