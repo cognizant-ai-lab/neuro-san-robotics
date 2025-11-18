@@ -329,10 +329,6 @@
             thoughtsDiv.classList.toggle('collapsed');
             toggleText.innerText = thoughtsDiv.classList.contains('collapsed') ? 'Show Thoughts' : 'Hide Thoughts';
         });
-
-        window.addEventListener('beforeunload', function () {
-            navigator.sendBeacon('/shutdown');
-        });
     </script>
 </body>
 </html>
