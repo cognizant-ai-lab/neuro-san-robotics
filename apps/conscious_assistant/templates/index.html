@@ -64,40 +64,91 @@
         var userInputInitialized = false;
         var recognition = null;
         var isRecording = false;
+        var isStarting = false;
+        var micPermissionGranted = false;
 
         // Initialize Speech Recognition
         if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
             var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             recognition = new SpeechRecognition();
-            recognition.continuous = false;
+            recognition.continuous = true;  // Keep listening until explicitly stopped
             recognition.interimResults = true;
             recognition.lang = 'en-US';
+            recognition.maxAlternatives = 1;
 
             recognition.onstart = function() {
                 isRecording = true;
+                isStarting = false;
                 document.getElementById('mic-button').classList.add('recording');
                 console.log('Speech recognition started');
+            };
+
+            recognition.onaudiostart = function() {
+                console.log('Audio capture started');
+            };
+
+            recognition.onspeechstart = function() {
+                console.log('Speech detected');
             };
 
             recognition.onresult = function(event) {
                 var transcript = '';
                 for (var i = event.resultIndex; i < event.results.length; i++) {
-                    transcript += event.results[i][0].transcript;
+                    if (event.results[i].isFinal) {
+                        transcript += event.results[i][0].transcript;
+                    } else {
+                        // Show interim results in real-time
+                        transcript += event.results[i][0].transcript;
+                    }
                 }
                 document.getElementById('user-input').value = transcript;
+            };
+
+            recognition.onspeechend = function() {
+                console.log('Speech ended');
+            };
+
+            recognition.onaudioend = function() {
+                console.log('Audio capture ended');
             };
 
             recognition.onerror = function(event) {
                 console.error('Speech recognition error:', event.error);
                 isRecording = false;
+                isStarting = false;
                 document.getElementById('mic-button').classList.remove('recording');
-                if (event.error === 'not-allowed') {
-                    alert('Microphone access denied. Please allow microphone access in your browser settings.');
+                
+                // Comprehensive error handling
+                var errorMessage = '';
+                switch(event.error) {
+                    case 'not-allowed':
+                    case 'service-not-allowed':
+                        errorMessage = 'Microphone access denied. Please allow microphone access in your browser settings.';
+                        break;
+                    case 'audio-capture':
+                        errorMessage = 'No microphone detected or microphone is blocked. Please check your microphone connection and browser settings.';
+                        break;
+                    case 'network':
+                        errorMessage = 'Network error with speech recognition service. Please check your internet connection.';
+                        break;
+                    case 'aborted':
+                        console.log('Speech recognition aborted (likely due to quick start/stop)');
+                        return; // Don't show alert for aborted
+                    case 'no-speech':
+                        console.log('No speech detected');
+                        return; // Don't show alert for no-speech
+                    default:
+                        errorMessage = 'Speech recognition error: ' + event.error;
+                }
+                
+                if (errorMessage) {
+                    alert(errorMessage);
                 }
             };
 
             recognition.onend = function() {
                 isRecording = false;
+                isStarting = false;
                 document.getElementById('mic-button').classList.remove('recording');
                 console.log('Speech recognition ended');
             };
@@ -111,41 +162,122 @@
             });
         }
 
-        function toggleSpeechRecognition() {
+        // Pre-warm microphone permission on first use
+        async function ensureMicPermission() {
+            if (micPermissionGranted) {
+                return true;
+            }
+            
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // Stop the stream immediately, we just needed the permission
+                stream.getTracks().forEach(track => track.stop());
+                micPermissionGranted = true;
+                console.log('Microphone permission granted');
+                return true;
+            } catch (err) {
+                console.error('Microphone permission denied:', err);
+                alert('Microphone access is required for voice input. Please allow microphone access in your browser settings.');
+                return false;
+            }
+        }
+
+        async function toggleSpeechRecognition() {
             if (!recognition) {
                 alert('Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.');
                 return;
             }
 
             if (isRecording) {
-                recognition.stop();
+                try {
+                    recognition.stop();
+                } catch (err) {
+                    console.error('Error stopping recognition:', err);
+                    isRecording = false;
+                    isStarting = false;
+                    document.getElementById('mic-button').classList.remove('recording');
+                }
             } else {
-                recognition.start();
+                // Prevent multiple simultaneous starts
+                if (isStarting) {
+                    console.log('Recognition is already starting, ignoring duplicate start request');
+                    return;
+                }
+                
+                // Ensure microphone permission before starting
+                const hasPermission = await ensureMicPermission();
+                if (!hasPermission) {
+                    return;
+                }
+                
+                isStarting = true;
+                try {
+                    recognition.start();
+                } catch (err) {
+                    console.error('Error starting recognition:', err);
+                    isStarting = false;
+                    if (err.name === 'InvalidStateError') {
+                        console.log('Recognition already started, ignoring');
+                    } else {
+                        alert('Failed to start speech recognition: ' + err.message);
+                    }
+                }
             }
         }
 
         // Spacebar hotkey for speech input (hold to talk, release to stop)
         var spacebarPressed = false;
+        var spacebarStartTime = 0;
         
         document.addEventListener('keydown', function(e) {
             // Only activate if spacebar is pressed and textarea is NOT focused
             if (e.code === 'Space' && document.activeElement.id !== 'user-input' && !spacebarPressed) {
                 e.preventDefault();
                 spacebarPressed = true;
-                if (recognition && !isRecording) {
-                    recognition.start();
+                spacebarStartTime = Date.now();
+                
+                if (recognition && !isRecording && !isStarting) {
+                    // Use async function to handle permission check
+                    (async function() {
+                        const hasPermission = await ensureMicPermission();
+                        if (!hasPermission) {
+                            spacebarPressed = false;
+                            return;
+                        }
+                        
+                        isStarting = true;
+                        try {
+                            recognition.start();
+                        } catch (err) {
+                            console.error('Error starting recognition via spacebar:', err);
+                            isStarting = false;
+                            spacebarPressed = false;
+                            if (err.name !== 'InvalidStateError') {
+                                alert('Failed to start speech recognition: ' + err.message);
+                            }
+                        }
+                    })();
                 }
             }
         });
 
         document.addEventListener('keyup', function(e) {
             // Stop recording when spacebar is released
+            // Add grace period to avoid immediate stop from quick key press
             if (e.code === 'Space' && spacebarPressed) {
                 e.preventDefault();
-                spacebarPressed = false;
-                if (recognition && isRecording) {
-                    recognition.stop();
+                var pressDuration = Date.now() - spacebarStartTime;
+                
+                // Only stop if key was held for at least 150ms to avoid accidental quick taps
+                if (pressDuration >= 150 && recognition && isRecording) {
+                    try {
+                        recognition.stop();
+                    } catch (err) {
+                        console.error('Error stopping recognition via spacebar:', err);
+                    }
                 }
+                
+                spacebarPressed = false;
             }
         });
 
