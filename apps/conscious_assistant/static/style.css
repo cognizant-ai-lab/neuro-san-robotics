@@ -334,6 +334,13 @@ textarea:focus {
     animation: recordingPulse 1.5s ease-in-out infinite;
 }
 
+#mic-button.transcribing {
+    background: linear-gradient(135deg, #ffa500 0%, #ff8c00 100%);
+    box-shadow: 0 0 30px rgba(255, 165, 0, 0.6);
+    animation: transcribingPulse 1s ease-in-out infinite;
+    cursor: wait;
+}
+
 @keyframes recordingPulse {
     0%, 100% {
         box-shadow: 0 0 20px rgba(255, 0, 102, 0.6);
@@ -342,6 +349,17 @@ textarea:focus {
     50% {
         box-shadow: 0 0 40px rgba(255, 0, 102, 0.8);
         transform: scale(1.05);
+    }
+}
+
+@keyframes transcribingPulse {
+    0%, 100% {
+        box-shadow: 0 0 20px rgba(255, 165, 0, 0.6);
+        transform: scale(1) rotate(0deg);
+    }
+    50% {
+        box-shadow: 0 0 40px rgba(255, 165, 0, 0.8);
+        transform: scale(1.05) rotate(5deg);
     }
 }
 

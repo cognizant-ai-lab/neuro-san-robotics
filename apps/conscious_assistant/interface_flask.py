@@ -2,13 +2,16 @@ import atexit
 import os
 import queue
 import re
+import tempfile
 import time
 from datetime import datetime
 
 # pylint: disable=import-error
 import schedule
 from flask import Flask
+from flask import jsonify
 from flask import render_template
+from flask import request
 from flask_socketio import SocketIO
 
 from apps.conscious_assistant.conscious_assistant import conscious_thinker
@@ -104,6 +107,77 @@ def on_connect():
 def index():
     """Return the html."""
     return render_template("index.html")
+
+
+@app.route("/api/transcribe", methods=["POST"])
+def transcribe_audio():
+    """
+    Transcribe audio using OpenAI Whisper API.
+    
+    Expects a multipart/form-data POST with an 'audio' file.
+    Returns JSON with 'text' field containing the transcription.
+    """
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_api_key:
+        return jsonify({
+            "error": "OpenAI API key not configured. Please set OPENAI_API_KEY environment variable."
+        }), 503
+    
+    if "audio" not in request.files:
+        return jsonify({"error": "No audio file provided"}), 400
+    
+    audio_file = request.files["audio"]
+    if audio_file.filename == "":
+        return jsonify({"error": "Empty audio file"}), 400
+    
+    MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
+    audio_file.seek(0, os.SEEK_END)
+    file_size = audio_file.tell()
+    audio_file.seek(0)
+    
+    if file_size > MAX_FILE_SIZE:
+        return jsonify({"error": f"Audio file too large. Maximum size is 25MB, got {file_size / 1024 / 1024:.1f}MB"}), 413
+    
+    if file_size == 0:
+        return jsonify({"error": "Audio file is empty"}), 400
+    
+    temp_file = None
+    try:
+        suffix = ".webm"  # Default to webm
+        if audio_file.filename.endswith(".wav"):
+            suffix = ".wav"
+        elif audio_file.filename.endswith(".mp3"):
+            suffix = ".mp3"
+        elif audio_file.filename.endswith(".m4a"):
+            suffix = ".m4a"
+        
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        audio_file.save(temp_file.name)
+        temp_file.close()
+        
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=openai_api_key)
+            
+            with open(temp_file.name, "rb") as f:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                    language="en"  # Optimize for English
+                )
+            
+            return jsonify({"text": transcript.text})
+        
+        except Exception as e:
+            print(f"OpenAI API error: {e}")
+            return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
+    
+    finally:
+        if temp_file and os.path.exists(temp_file.name):
+            try:
+                os.unlink(temp_file.name)
+            except Exception as e:
+                print(f"Failed to delete temp file: {e}")
 
 
 @socketio.on("user_input", namespace="/chat")

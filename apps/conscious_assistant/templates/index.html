@@ -66,6 +66,13 @@
         var isRecording = false;
         var isStarting = false;
         var micPermissionGranted = false;
+        
+        // Whisper fallback variables
+        var useWhisperFallback = false;
+        var mediaRecorder = null;
+        var audioChunks = [];
+        var whisperStream = null;
+        var isTranscribing = false;
 
         // Initialize Speech Recognition
         if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
@@ -118,25 +125,30 @@
                 isStarting = false;
                 document.getElementById('mic-button').classList.remove('recording');
                 
-                // Comprehensive error handling
+                // Auto-fallback to Whisper on network errors or if Brave browser
+                var isBrave = navigator.brave && typeof navigator.brave.isBrave === 'function';
+                if (event.error === 'network' || event.error === 'service-not-allowed' || isBrave) {
+                    console.log('Web Speech API failed, enabling Whisper fallback');
+                    useWhisperFallback = true;
+                    alert('Browser speech recognition unavailable. Switching to OpenAI Whisper fallback.\n\nNote: Requires OPENAI_API_KEY environment variable to be set on the server.');
+                    return;
+                }
+                
+                // Comprehensive error handling for other errors
                 var errorMessage = '';
                 switch(event.error) {
                     case 'not-allowed':
-                    case 'service-not-allowed':
                         errorMessage = 'Microphone access denied. Please allow microphone access in your browser settings.';
                         break;
                     case 'audio-capture':
                         errorMessage = 'No microphone detected or microphone is blocked. Please check your microphone connection and browser settings.';
                         break;
-                    case 'network':
-                        errorMessage = 'Network error with speech recognition service. Please check your internet connection.';
-                        break;
                     case 'aborted':
                         console.log('Speech recognition aborted (likely due to quick start/stop)');
-                        return; // Don't show alert for aborted
+                        return;
                     case 'no-speech':
                         console.log('No speech detected');
-                        return; // Don't show alert for no-speech
+                        return;
                     default:
                         errorMessage = 'Speech recognition error: ' + event.error;
                 }
@@ -182,12 +194,118 @@
             }
         }
 
+        // Whisper fallback: Start recording with MediaRecorder
+        async function startWhisperRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                whisperStream = stream;
+                audioChunks = [];
+                
+                // Try to use webm/opus format (supported by Chrome/Brave)
+                let mimeType = 'audio/webm;codecs=opus';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'audio/webm';
+                    if (!MediaRecorder.isTypeSupported(mimeType)) {
+                        mimeType = 'audio/mp4';
+                        if (!MediaRecorder.isTypeSupported(mimeType)) {
+                            mimeType = '';
+                        }
+                    }
+                }
+                
+                const options = mimeType ? { mimeType: mimeType } : {};
+                mediaRecorder = new MediaRecorder(stream, options);
+                
+                mediaRecorder.ondataavailable = function(event) {
+                    if (event.data.size > 0) {
+                        audioChunks.push(event.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = async function() {
+                    console.log('MediaRecorder stopped, transcribing...');
+                    isTranscribing = true;
+                    document.getElementById('mic-button').classList.add('transcribing');
+                    
+                    // Stop all tracks
+                    if (whisperStream) {
+                        whisperStream.getTracks().forEach(track => track.stop());
+                        whisperStream = null;
+                    }
+                    
+                    // Create blob from chunks
+                    const audioBlob = new Blob(audioChunks, { type: mimeType || 'audio/webm' });
+                    audioChunks = [];
+                    
+                    // Send to server for transcription
+                    try {
+                        const formData = new FormData();
+                        formData.append('audio', audioBlob, 'speech.webm');
+                        
+                        const response = await fetch('/api/transcribe', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        
+                        if (!response.ok) {
+                            const errorData = await response.json();
+                            throw new Error(errorData.error || 'Transcription failed');
+                        }
+                        
+                        const data = await response.json();
+                        document.getElementById('user-input').value = data.text;
+                        console.log('Transcription successful:', data.text);
+                    } catch (err) {
+                        console.error('Transcription error:', err);
+                        alert('Transcription failed: ' + err.message + '\n\nMake sure OPENAI_API_KEY is set on the server.');
+                    } finally {
+                        isTranscribing = false;
+                        document.getElementById('mic-button').classList.remove('transcribing');
+                    }
+                };
+                
+                mediaRecorder.start();
+                isRecording = true;
+                document.getElementById('mic-button').classList.add('recording');
+                console.log('Whisper recording started');
+                
+            } catch (err) {
+                console.error('Failed to start Whisper recording:', err);
+                alert('Failed to start recording: ' + err.message);
+                isRecording = false;
+            }
+        }
+
+        // Whisper fallback: Stop recording
+        function stopWhisperRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                isRecording = false;
+                document.getElementById('mic-button').classList.remove('recording');
+                console.log('Stopping Whisper recording...');
+            }
+        }
+
         async function toggleSpeechRecognition() {
-            if (!recognition) {
-                alert('Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.');
+            // Use Whisper fallback if enabled or if Web Speech API is not available
+            if (useWhisperFallback || !recognition) {
+                if (isRecording) {
+                    stopWhisperRecording();
+                } else {
+                    if (isTranscribing) {
+                        console.log('Already transcribing, ignoring start request');
+                        return;
+                    }
+                    const hasPermission = await ensureMicPermission();
+                    if (!hasPermission) {
+                        return;
+                    }
+                    await startWhisperRecording();
+                }
                 return;
             }
 
+            // Use Web Speech API
             if (isRecording) {
                 try {
                     recognition.stop();
@@ -236,7 +354,7 @@
                 spacebarPressed = true;
                 spacebarStartTime = Date.now();
                 
-                if (recognition && !isRecording && !isStarting) {
+                if (!isRecording && !isStarting && !isTranscribing) {
                     // Use async function to handle permission check
                     (async function() {
                         const hasPermission = await ensureMicPermission();
@@ -245,15 +363,20 @@
                             return;
                         }
                         
-                        isStarting = true;
-                        try {
-                            recognition.start();
-                        } catch (err) {
-                            console.error('Error starting recognition via spacebar:', err);
-                            isStarting = false;
-                            spacebarPressed = false;
-                            if (err.name !== 'InvalidStateError') {
-                                alert('Failed to start speech recognition: ' + err.message);
+                        // Use Whisper fallback if enabled or if Web Speech API is not available
+                        if (useWhisperFallback || !recognition) {
+                            await startWhisperRecording();
+                        } else {
+                            isStarting = true;
+                            try {
+                                recognition.start();
+                            } catch (err) {
+                                console.error('Error starting recognition via spacebar:', err);
+                                isStarting = false;
+                                spacebarPressed = false;
+                                if (err.name !== 'InvalidStateError') {
+                                    alert('Failed to start speech recognition: ' + err.message);
+                                }
                             }
                         }
                     })();
@@ -269,11 +392,15 @@
                 var pressDuration = Date.now() - spacebarStartTime;
                 
                 // Only stop if key was held for at least 150ms to avoid accidental quick taps
-                if (pressDuration >= 150 && recognition && isRecording) {
-                    try {
-                        recognition.stop();
-                    } catch (err) {
-                        console.error('Error stopping recognition via spacebar:', err);
+                if (pressDuration >= 150 && isRecording) {
+                    if (useWhisperFallback || !recognition) {
+                        stopWhisperRecording();
+                    } else {
+                        try {
+                            recognition.stop();
+                        } catch (err) {
+                            console.error('Error stopping recognition via spacebar:', err);
+                        }
                     }
                 }
                 
