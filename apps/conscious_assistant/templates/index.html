@@ -118,7 +118,10 @@
                 isStarting = false;
                 document.getElementById('mic-button').classList.remove('recording');
                 
-                // Comprehensive error handling
+                // Detect if running in Brave browser
+                var isBrave = navigator.brave && typeof navigator.brave.isBrave === 'function';
+                
+                // Comprehensive error handling with browser-specific guidance
                 var errorMessage = '';
                 switch(event.error) {
                     case 'not-allowed':
@@ -129,7 +132,21 @@
                         errorMessage = 'No microphone detected or microphone is blocked. Please check your microphone connection and browser settings.';
                         break;
                     case 'network':
-                        errorMessage = 'Network error with speech recognition service. Please check your internet connection.';
+                        if (isBrave) {
+                            errorMessage = 'Brave browser blocks Google\'s speech recognition service by default.\n\n' +
+                                         'To fix this:\n' +
+                                         '1. Click the lion icon (Brave Shields) in the address bar\n' +
+                                         '2. Toggle Shields to "Down" for this site\n' +
+                                         '3. Reload the page and try again\n\n' +
+                                         'Or use Chrome/Edge for speech input.';
+                        } else {
+                            errorMessage = 'Network error with speech recognition service.\n\n' +
+                                         'This could be caused by:\n' +
+                                         '• Ad-blockers or privacy extensions blocking Google\'s speech service\n' +
+                                         '• VPN or corporate proxy blocking the connection\n' +
+                                         '• Internet connection issues\n\n' +
+                                         'Try temporarily disabling extensions or use Chrome/Edge.';
+                        }
                         break;
                     case 'aborted':
                         console.log('Speech recognition aborted (likely due to quick start/stop)');
