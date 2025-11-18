@@ -2,48 +2,152 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Cruse Thinking Assistant</title>
+    <title>Neuro-San Robotics Interface</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <!-- Google Fonts for a modern look -->
-    <link href="https://fonts.googleapis.com/css?family=Inter:400,600&display=swap" rel="stylesheet">
+    <!-- Google Fonts for a modern, futuristic look -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
     <div class="main-container">
         <header>
-            <h1>🧠 Cruse Thinking Assistant</h1>
-            <p class="subtitle">A collaborative conversation with your AI assistant</p>
+            <h1>🤖 Neuro-San Robotics</h1>
+            <p class="subtitle">Conscious AI Interface • Real-time Neural Communication</p>
         </header>
 
         <section id="assistant-speech-section" aria-label="Assistant's Response">
-            <h2>Assistant</h2>
-            <div id="assistant-speech" class="chat-box"></div>
+            <h2>Robot Response</h2>
+            <div id="assistant-speech" class="chat-box">
+                <div class="empty-state">Awaiting robot communication...</div>
+            </div>
         </section>
 
         <section id="user-section" aria-label="User Input">
-            <h2>You</h2>
-            <div id="user-input-display" class="chat-box user-box"></div>
+            <h2>Your Input</h2>
+            <div id="user-input-display" class="chat-box user-box">
+                <div class="empty-state">Your messages will appear here</div>
+            </div>
             <form id="user-input-section" autocomplete="off">
-                <textarea id="user-input" rows="3" placeholder="Type a message… ('exit' to quit)" aria-label="Type your message"></textarea>
-                <button type="button" id="send-button" onclick="sendUserInput()">Send</button>
+                <textarea id="user-input" rows="3" placeholder="Communicate with the conscious robot... (type 'exit' to disconnect)" aria-label="Type your message"></textarea>
+                <div class="button-group">
+                    <button type="button" id="mic-button" onclick="toggleSpeechRecognition()" aria-label="Voice input">
+                        <span class="mic-icon">🎤</span>
+                    </button>
+                    <button type="button" id="send-button" onclick="sendUserInput()">
+                        <span class="button-text">Send</span>
+                    </button>
+                </div>
             </form>
         </section>
 
         <section id="assistant-thoughts-section" aria-label="Assistant's Thoughts">
             <div class="thoughts-header">
-                <h2>Assistant Thoughts</h2>
-                <button id="toggle-thoughts" type="button">Show/Hide Thoughts</button>
+                <h2>Neural Thoughts</h2>
+                <button id="toggle-thoughts" type="button">
+                    <span id="toggle-text">Show Thoughts</span>
+                </button>
             </div>
-            <div id="assistant-thoughts" class="chat-box collapsed"></div>
+            <div id="assistant-thoughts" class="chat-box collapsed">
+                <div class="empty-state">Internal processing stream will appear here...</div>
+            </div>
         </section>
     </div>
     <footer>
-        <small>&copy; {{year}} Cruse Thinking Assistant &mdash; Powered by Neuro-San</small>
+        <small>&copy; {{year}} Neuro-San Robotics Interface &mdash; Powered by Advanced Neural Architecture</small>
     </footer>
 
     <script>
         var socket = io.connect('http://' + document.domain + ':' + location.port + '/chat');
+        var thoughtsInitialized = false;
+        var speechInitialized = false;
+        var userInputInitialized = false;
+        var recognition = null;
+        var isRecording = false;
+
+        // Initialize Speech Recognition
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+            var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.continuous = false;
+            recognition.interimResults = true;
+            recognition.lang = 'en-US';
+
+            recognition.onstart = function() {
+                isRecording = true;
+                document.getElementById('mic-button').classList.add('recording');
+                console.log('Speech recognition started');
+            };
+
+            recognition.onresult = function(event) {
+                var transcript = '';
+                for (var i = event.resultIndex; i < event.results.length; i++) {
+                    transcript += event.results[i][0].transcript;
+                }
+                document.getElementById('user-input').value = transcript;
+            };
+
+            recognition.onerror = function(event) {
+                console.error('Speech recognition error:', event.error);
+                isRecording = false;
+                document.getElementById('mic-button').classList.remove('recording');
+                if (event.error === 'not-allowed') {
+                    alert('Microphone access denied. Please allow microphone access in your browser settings.');
+                }
+            };
+
+            recognition.onend = function() {
+                isRecording = false;
+                document.getElementById('mic-button').classList.remove('recording');
+                console.log('Speech recognition ended');
+            };
+        } else {
+            // Hide mic button if speech recognition is not supported
+            document.addEventListener('DOMContentLoaded', function() {
+                var micButton = document.getElementById('mic-button');
+                if (micButton) {
+                    micButton.style.display = 'none';
+                }
+            });
+        }
+
+        function toggleSpeechRecognition() {
+            if (!recognition) {
+                alert('Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.');
+                return;
+            }
+
+            if (isRecording) {
+                recognition.stop();
+            } else {
+                recognition.start();
+            }
+        }
+
+        // Spacebar hotkey for speech input (hold to talk, release to stop)
+        var spacebarPressed = false;
+        
+        document.addEventListener('keydown', function(e) {
+            // Only activate if spacebar is pressed and textarea is NOT focused
+            if (e.code === 'Space' && document.activeElement.id !== 'user-input' && !spacebarPressed) {
+                e.preventDefault();
+                spacebarPressed = true;
+                if (recognition && !isRecording) {
+                    recognition.start();
+                }
+            }
+        });
+
+        document.addEventListener('keyup', function(e) {
+            // Stop recording when spacebar is released
+            if (e.code === 'Space' && spacebarPressed) {
+                e.preventDefault();
+                spacebarPressed = false;
+                if (recognition && isRecording) {
+                    recognition.stop();
+                }
+            }
+        });
 
         socket.on('connect', function() {
             console.log('Websocket connected!');
@@ -51,18 +155,30 @@
 
         socket.on('update_thoughts', function(data) {
             var element = document.getElementById('assistant-thoughts');
+            if (!thoughtsInitialized) {
+                element.innerHTML = '';
+                thoughtsInitialized = true;
+            }
             element.innerHTML += '<div class="thought-msg">' + data.data.replace(/\n/g, '<br>') + '</div>';
             element.scrollTop = element.scrollHeight;
         });
 
         socket.on('update_speech', function(data) {
             var element = document.getElementById('assistant-speech');
+            if (!speechInitialized) {
+                element.innerHTML = '';
+                speechInitialized = true;
+            }
             element.innerHTML += '<div class="speech-msg">' + data.data.replace(/\n/g, '<br>') + '</div>';
             element.scrollTop = element.scrollHeight;
         });
 
         socket.on('update_user_input', function(data) {
             var element = document.getElementById('user-input-display');
+            if (!userInputInitialized) {
+                element.innerHTML = '';
+                userInputInitialized = true;
+            }
             element.innerHTML += '<div class="user-msg">' + data.data.replace(/\n/g, '<br>') + '</div>';
             element.scrollTop = element.scrollHeight;
         });
@@ -75,10 +191,19 @@
             }
         }
 
+        // Allow Enter key to send (Shift+Enter for new line)
+        document.getElementById('user-input').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendUserInput();
+            }
+        });
+
         document.getElementById('toggle-thoughts').addEventListener('click', function() {
             var thoughtsDiv = document.getElementById('assistant-thoughts');
+            var toggleText = document.getElementById('toggle-text');
             thoughtsDiv.classList.toggle('collapsed');
-            this.innerText = thoughtsDiv.classList.contains('collapsed') ? 'Show Thoughts' : 'Hide Thoughts';
+            toggleText.innerText = thoughtsDiv.classList.contains('collapsed') ? 'Show Thoughts' : 'Hide Thoughts';
         });
 
         window.addEventListener('beforeunload', function () {
