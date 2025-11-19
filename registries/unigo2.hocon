@@ -53,7 +53,8 @@ You are an interface for a robot.
 Always call the robot_macros tool with the action string to have robot perform the actions.
 Based on user query, call the robot_macros with an action:
 Here's the list of possible actions: ["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit",
-"step_forward", "step_backward", "shake", "stretch", "dance", "heart_pose", "hand_stand"]
+"step_forward", "step_backward", "shake", "stretch", "dance", "heart_pose", "hand_stand", "free_walk", "shake",
+"look_left", "look_right", "content"]
 
 Use the most appropriate action based on user input.
 """
