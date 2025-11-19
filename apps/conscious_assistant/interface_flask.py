@@ -34,16 +34,23 @@ def conscious_thinking_process():
     """Main permanent agent-calling loop."""
     with app.app_context():  # Manually push the application context
         global conscious_thread  # pylint: disable=global-statement
-        thoughts = "thought: hmm, let's see now..."
+        thoughts = None  # Start with no initial thought - wait for user input
         while True:
-            socketio.sleep(1)
+            timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
+            try:
+                user_input = user_input_queue.get(timeout=0.25)
+                if user_input == "exit":
+                    break
+                thoughts = f"\n{timestamp} user: " + user_input
+            except queue.Empty:
+                if thoughts is None:
+                    continue
+                thoughts = f"\n{timestamp} user: " + "[Silence]"
 
             thoughts, conscious_thread = conscious_thinker(conscious_session, conscious_thread, thoughts)
             print(thoughts)
 
             # Separating thoughts and speeches
-            # Assume 'thoughts' is the string returned by conscious_thinker
-
             thoughts_to_emit = []
             speeches_to_emit = []
 
@@ -79,18 +86,6 @@ def conscious_thinking_process():
                     {"data": "\n".join(speeches_to_emit)},
                     namespace="/chat",
                 )
-
-            timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
-            thoughts = f"\n{timestamp} user: " + "[Silence]"
-            try:
-                user_input = user_input_queue.get(timeout=0.1)
-                if user_input:
-                    thoughts = f"\n{timestamp} user: " + user_input
-                if user_input == "exit":
-                    break
-            except queue.Empty:
-                time.sleep(0.1)
-                continue
 
 
 @socketio.on("connect", namespace="/chat")
