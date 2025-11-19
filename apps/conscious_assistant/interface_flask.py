@@ -18,6 +18,8 @@ from apps.conscious_assistant.conscious_assistant import conscious_thinker
 from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
 from apps.conscious_assistant.conscious_assistant import tear_down_conscious_assistant
 
+THINKING_INTERVAL = 30.0
+
 os.environ["AGENT_MANIFEST_FILE"] = "registries/manifest.hocon"
 os.environ["AGENT_TOOL_PATH"] = "coded_tools"
 app = Flask(__name__)
@@ -39,7 +41,7 @@ def conscious_thinking_process():
             timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
             try:
                 # Wait up to 30 seconds for user input
-                user_input = user_input_queue.get(timeout=30.0)
+                user_input = user_input_queue.get(timeout=THINKING_INTERVAL)
                 if user_input == "exit":
                     break
                 thoughts = f"\n{timestamp} user: " + user_input
