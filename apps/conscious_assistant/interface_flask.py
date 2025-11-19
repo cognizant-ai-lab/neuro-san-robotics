@@ -38,7 +38,8 @@ def conscious_thinking_process():
         while True:
             timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
             try:
-                user_input = user_input_queue.get(timeout=0.25)
+                # Wait up to 30 seconds for user input
+                user_input = user_input_queue.get(timeout=30.0)
                 if user_input == "exit":
                     break
                 thoughts = f"\n{timestamp} user: " + user_input
