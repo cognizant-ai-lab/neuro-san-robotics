@@ -86,7 +86,7 @@ If you choose to do anything, call your robot_macros tool with one of the follow
                     "required": ["text"]
                 }
             },
-            "class": "unigo2.go2_tts.Go2TTSTool"
+            "class": "unigo2.tts_go2.Go2TTSTool"
         }
         # The unigo2 is a low-level CodedTool and does not call anyone else.
         # He is called by the front-man.

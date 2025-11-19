@@ -40,7 +40,7 @@ def _linux_say_via_espeak_aplay(
     text: str,
     rate: int = 180,
     volume: float = 1.0,
-    voice: str = "en-us",
+    voice: str = "us-mbrola-1",
     alsa_device: str | None = None,
 ) -> None:
     """
@@ -264,12 +264,50 @@ class Go2TTSTool(CodedTool):
             return f"TTS error: {e}"
 
 
+def list_voices() -> None:
+    """
+    Print available voices for the current platform.
+    - On Linux: uses `espeak-ng --voices`
+    - On macOS: uses pyttsx3’s installed voices
+    """
+    system = platform.system()
+
+    if system == "Linux":
+        if shutil.which("espeak-ng"):
+            print("Available eSpeak-NG voices (Linux):")
+            print("  Common examples: en-us, en-gb, en-sc, de, fr, es, fa, hi")
+            print("  Full list:")
+            subprocess.run(["espeak-ng", "--voices"], check=False)
+        else:
+            print("espeak-ng not found. Install with:")
+            print("  sudo apt-get update && sudo apt-get install -y espeak-ng")
+    elif system == "Darwin":
+        try:
+            import pyttsx3  # type: ignore
+        except ImportError:
+            print("pyttsx3 not installed. On macOS, run:")
+            print("  pip3 install --user pyttsx3")
+            return
+
+        engine = pyttsx3.init()
+        print("Available macOS / pyttsx3 voices:")
+        for v in engine.getProperty("voices"):
+            print(f"  id={v.id!r}, name={v.name!r}, lang={getattr(v, 'languages', '')}")
+    else:
+        print(f"Voice listing not implemented for OS={system}")
+
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Offline TTS for Unitree Go2 (Linux/espeak-ng) and macOS (pyttsx3).",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     parser.add_argument(
         "text",
-        nargs="*",  # 0 or more words (now optional)
-        help="What the Go2 should say. If omitted, defaults to 'Hello from Unitree!'.",
+        nargs="*",
+        help=(
+            "What the Go2 should say.\n"
+            "If omitted, defaults to: 'Hello from Unitree!'\n"
+        ),
     )
     parser.add_argument(
         "-r", "--rate",
@@ -285,20 +323,33 @@ def main() -> None:
     )
     parser.add_argument(
         "-V", "--voice",
-        default="en-us",
-        help="Voice/language (e.g., en-us, en-gb, fa). "
-             "Substring match for pyttsx3 on macOS; espeak-ng voice on Linux.",
+        default="en-us+f3",
+        help=(
+            "Voice / language.\n"
+            "  Linux (espeak-ng): examples → en-us, en-gb, en-sc, de, fr, es, fa, hi\n"
+            "  macOS (pyttsx3)  : matched as a substring of installed voice name/id\n"
+            "Default: en-gb+f1"
+        ),
     )
     parser.add_argument(
         "-D", "--device",
         default=None,
-        help="ALSA device on Linux (e.g., hw:0,0). "
-             "If omitted, uses GO2_TTS_DEVICE or hw:0,0.",
+        help="ALSA device on Linux (e.g., plughw:0,0). "
+             "If omitted, uses GO2_TTS_DEVICE or plughw:0,0.",
+    )
+    parser.add_argument(
+        "--list-voices",
+        action="store_true",
+        help="List available voices for this OS and exit.",
     )
 
     args = parser.parse_args()
 
-    # If user passed words, join them; otherwise use default text
+    if args.list_voices:
+        list_voices()
+        return
+
+    # Default text if none provided
     if args.text:
         text = " ".join(args.text)
     else:
@@ -315,4 +366,13 @@ def main() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    # Male / Female voices on the Unitree (Linux / eSpeak-NG)
+    # eSpeak-NG uses voice variants:
+    # +m1..+m7 → different male variants
+    # +f1..+f4 → different female variants
+    # You combine them with the base voice code:
+    # en-us+m1 → US English, male 1
+    # en-us+m3 → US English, deeper / different male
+    # en-us+f1 → US English, female 1
+    # en-us+f3 → US English, different female
     main()
