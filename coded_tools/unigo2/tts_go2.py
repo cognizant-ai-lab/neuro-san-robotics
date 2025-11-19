@@ -46,8 +46,8 @@ def _linux_say_via_espeak_aplay(
     """
     Linux path: espeak-ng --stdout | aplay -D <alsa_device>
 
-    - This matches your working bash script path.
-    - Default ALSA device is hw:0,0 (USB speaker on Unitree Go2).
+    - Uses ALSA plug devices so the USB card can accept mono 22050 Hz.
+    - Default device: plughw:0,0 (matches USB speaker on Unitree Go2).
     """
 
     if not _has("espeak-ng"):
@@ -56,14 +56,10 @@ def _linux_say_via_espeak_aplay(
             "  sudo apt-get update && sudo apt-get install -y espeak-ng alsa-utils"
         )
 
-    if alsa_device is None:
-        # Environment override, otherwise default to the working Go2 device.
-        alsa_device = os.environ.get("GO2_TTS_DEVICE", "hw:0,0")
-
     # Map volume (0.0–1.0) to espeak-ng amplitude (0–200)
     amp = max(0, min(200, int(round(float(volume) * 200))))
 
-    # Build espeak-ng command
+    # Base espeak-ng command (produces WAV on stdout)
     espeak_cmd = [
         "espeak-ng",
         "--stdout",               # write WAV to stdout
@@ -74,28 +70,63 @@ def _linux_say_via_espeak_aplay(
         espeak_cmd += ["-v", voice]
     espeak_cmd.append(text)
 
-    logging.info(
-        "GO2_TTS: Linux espeak-ng pipeline: %s | aplay -D %s",
-        " ".join(espeak_cmd),
-        alsa_device,
-    )
-
     if not _has("aplay"):
-        # No aplay: let espeak-ng talk via default ALSA device (less controlled).
+        # No aplay: let espeak-ng use its default ALSA/Pulse path.
+        logging.info("GO2_TTS: aplay not found, running espeak-ng directly: %s", " ".join(espeak_cmd))
         subprocess.run(espeak_cmd, check=True)
         return
 
-    # Pipe espeak-ng audio into aplay on the chosen ALSA device
-    aplay_cmd = ["aplay", "-D", alsa_device]
+    # Build a list of devices to try, in order
+    devices_to_try: list[str] = []
 
-    p1 = subprocess.Popen(espeak_cmd, stdout=subprocess.PIPE)
-    try:
-        subprocess.run(aplay_cmd, stdin=p1.stdout, check=True)
-    finally:
-        if p1.stdout:
-            p1.stdout.close()
-        p1.wait()
+    # 1) Explicit function arg
+    if alsa_device:
+        devices_to_try.append(alsa_device)
 
+    # 2) Environment override
+    env_dev = os.environ.get("GO2_TTS_DEVICE")
+    if env_dev and env_dev not in devices_to_try:
+        devices_to_try.append(env_dev)
+
+    # 3) Best default for Unitree Go2 USB speaker (format-converting)
+    if "plughw:0,0" not in devices_to_try:
+        devices_to_try.append("plughw:0,0")
+
+    # 4) Last-resort fallbacks (might still fail, but we log them)
+    for d in ("hw:0,0", "default"):
+        if d not in devices_to_try:
+            devices_to_try.append(d)
+
+    last_error: Exception | None = None
+
+    for dev in devices_to_try:
+        aplay_cmd = ["aplay", "-D", dev]
+
+        logging.info(
+            "GO2_TTS: Linux espeak-ng pipeline: %s | %s",
+            " ".join(espeak_cmd),
+            " ".join(aplay_cmd),
+        )
+
+        # Fresh espeak process for each attempt
+        p1 = subprocess.Popen(espeak_cmd, stdout=subprocess.PIPE)
+        try:
+            subprocess.run(aplay_cmd, stdin=p1.stdout, check=True)
+            # Success
+            if p1.stdout:
+                p1.stdout.close()
+            p1.wait()
+            return
+        except subprocess.CalledProcessError as e:
+            last_error = e
+            logging.warning("GO2_TTS: aplay failed on device %s: %s", dev, e)
+        finally:
+            if p1.stdout:
+                p1.stdout.close()
+            p1.wait()
+
+    # If we get here, all devices failed
+    raise RuntimeError(f"TTS playback failed on all ALSA devices tried: {devices_to_try}") from last_error
 
 def _mac_say_via_pyttsx3(
     text: str,
