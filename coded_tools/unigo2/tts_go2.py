@@ -40,7 +40,7 @@ def _linux_say_via_espeak_aplay(
     text: str,
     rate: int = 180,
     volume: float = 1.0,
-    voice: str = "us-mbrola-1",
+    voice: str = "en-us+f1",
     alsa_device: str | None = None,
 ) -> None:
     """
@@ -132,7 +132,7 @@ def _mac_say_via_pyttsx3(
     text: str,
     rate: int = 180,
     volume: float = 1.0,
-    voice: str = "en-us",
+    voice: str = "en-us+f1",
 ) -> None:
     """
     macOS path: use pyttsx3 (NSSpeechSynthesizer backend).
@@ -166,7 +166,7 @@ def say(
     text: str,
     rate: int = 180,
     volume: float = 1.0,
-    voice: str = "en-us",
+    voice: str = "en-us+f1",
     alsa_device: str | None = None,
 ) -> None:
     """
