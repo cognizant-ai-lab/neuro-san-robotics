@@ -2,3 +2,4 @@ schedule~=1.2.2
 flask
 flask_socketio
 openai>=1.0.0
+pyttsx3
