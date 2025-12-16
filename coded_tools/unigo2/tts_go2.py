@@ -38,9 +38,9 @@ def _has(cmd: str) -> bool:
 
 def _linux_say_via_espeak_aplay(
     text: str,
-    rate: int = 180,
+    rate: int = 150,
     volume: float = 1.0,
-    voice: str = "en-us+f1",
+    voice: str = "en-us+f3",
     alsa_device: str | None = None,
 ) -> None:
     """
@@ -130,9 +130,9 @@ def _linux_say_via_espeak_aplay(
 
 def _mac_say_via_pyttsx3(
     text: str,
-    rate: int = 180,
+    rate: int = 150,
     volume: float = 1.0,
-    voice: str = "en-us+f1",
+    voice: str = "en-us+f3",
 ) -> None:
     """
     macOS path: use pyttsx3 (NSSpeechSynthesizer backend).
@@ -164,9 +164,9 @@ def _mac_say_via_pyttsx3(
 
 def say(
     text: str,
-    rate: int = 180,
+    rate: int = 150,
     volume: float = 1.0,
-    voice: str = "en-us+f1",
+    voice: str = "en-us+f3",
     alsa_device: str | None = None,
 ) -> None:
     """
@@ -237,7 +237,7 @@ class Go2TTSTool(CodedTool):
         if not isinstance(text, str) or not text.strip():
             return "Missing required 'text' (string) for TTS"
 
-        rate = int(args.get("rate", 180))
+        rate = int(args.get("rate", 150))
         volume = float(args.get("volume", 1.0))
         voice = args.get("voice", "en-us")  # default more standard than en-sc
         alsa_device = args.get("alsa_device") or os.environ.get("GO2_TTS_DEVICE")
