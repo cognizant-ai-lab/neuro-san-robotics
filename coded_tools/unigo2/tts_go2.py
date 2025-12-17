@@ -39,6 +39,13 @@ PIPER_CONFIG = os.environ.get(
 
 DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "plughw:0,0")
 
+# ALSA mixer control name for volume (common names: "Master", "PCM", "Speaker")
+# Set via env var if the default doesn't work on your hardware
+ALSA_MIXER_CONTROL = os.environ.get("GO2_ALSA_MIXER", "Master")
+
+# Default volume percentage to set before each playback (0-100)
+DEFAULT_VOLUME_PERCENT = int(os.environ.get("GO2_TTS_VOLUME", "100"))
+
 
 # ---------------------------------------------------------------------
 # Utilities
@@ -46,6 +53,46 @@ DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "plughw:0,0")
 
 def _has(cmd: str) -> bool:
     return shutil.which(cmd) is not None
+
+
+def _set_alsa_volume(volume_percent: int = DEFAULT_VOLUME_PERCENT) -> None:
+    """
+    Set ALSA mixer volume before playback to ensure consistent volume.
+    
+    This helps prevent volume drift that can occur on some systems where
+    other processes may adjust mixer levels between playbacks.
+    
+    Args:
+        volume_percent: Volume level 0-100 (default from GO2_TTS_VOLUME env var)
+    """
+    if not _has("amixer"):
+        logging.debug("amixer not found, skipping volume set")
+        return
+    
+    volume_percent = max(0, min(100, volume_percent))
+    
+    # Try common mixer control names
+    controls_to_try = [ALSA_MIXER_CONTROL]
+    if ALSA_MIXER_CONTROL != "Master":
+        controls_to_try.append("Master")
+    if ALSA_MIXER_CONTROL != "PCM":
+        controls_to_try.append("PCM")
+    
+    for control in controls_to_try:
+        try:
+            result = subprocess.run(
+                ["amixer", "set", control, f"{volume_percent}%"],
+                capture_output=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                logging.debug("Set %s volume to %d%%", control, volume_percent)
+                return
+        except Exception as e:
+            logging.debug("Failed to set %s volume: %s", control, e)
+            continue
+    
+    logging.debug("Could not set ALSA volume (tried: %s)", controls_to_try)
 
 
 # ---------------------------------------------------------------------
@@ -69,6 +116,11 @@ def _linux_say_via_piper(
 
     device = alsa_device or DEFAULT_ALSA_DEVICE
 
+    # Set ALSA volume before playback to ensure consistent volume
+    # This prevents volume drift that can occur on some systems
+    volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
+    _set_alsa_volume(volume_percent)
+
     piper_cmd = [
         "piper",
         "-m", PIPER_MODEL,
@@ -81,10 +133,11 @@ def _linux_say_via_piper(
         "-D", device,
         "-r", "22050",
         "-f", "S16_LE",
+        "-c", "1",  # Mono output (Piper outputs mono audio)
         "-t", "raw",
     ]
 
-    logging.info("GO2_TTS: Piper -> aplay (%s)", device)
+    logging.info("GO2_TTS: Piper -> aplay (%s) at %d%% volume", device, volume_percent)
 
     # IMPORTANT: newline + communicate()
     piper_proc = subprocess.Popen(
