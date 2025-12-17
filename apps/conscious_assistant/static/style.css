@@ -300,6 +300,11 @@ h2 {
     border-color: rgba(0, 255, 128, 0.2);
 }
 
+.chat-history-box {
+    max-height: 450px;
+    min-height: 200px;
+}
+
 .speech-msg {
     background: linear-gradient(135deg, rgba(0, 191, 255, 0.15), rgba(138, 43, 226, 0.15));
     color: #d0e8ff;

@@ -17,17 +17,10 @@
 
     <div class="page-layout">
         <div class="main-container">
-            <section id="assistant-speech-section" aria-label="Assistant's Response">
-                <h2>CAIL-E Response</h2>
-                <div id="assistant-speech" class="chat-box">
-                    <div class="empty-state">Awaiting CAIL-E communication...</div>
-                </div>
-            </section>
-
-            <section id="user-section" aria-label="User Input">
-                <h2>Your Input</h2>
-                <div id="user-input-display" class="chat-box user-box">
-                    <div class="empty-state">Your messages will appear here</div>
+            <section id="chat-history-section" aria-label="Chat History">
+                <h2>Chat History</h2>
+                <div id="chat-history" class="chat-box chat-history-box">
+                    <div class="empty-state">Your conversation with CAIL-E will appear here...</div>
                 </div>
                 <form id="user-input-section" autocomplete="off">
                     <textarea id="user-input" rows="3" placeholder="Communicate with CAIL-E the conscious dog... (type 'exit' to disconnect)" aria-label="Type your message"></textarea>
@@ -62,8 +55,7 @@
     <script>
         var socket = io.connect('http://' + document.domain + ':' + location.port + '/chat');
         var thoughtsInitialized = false;
-        var speechInitialized = false;
-        var userInputInitialized = false;
+        var chatHistoryInitialized = false;
         var isRecording = false;
         var micPermissionGranted = false;
         
@@ -290,20 +282,20 @@
         });
 
         socket.on('update_speech', function(data) {
-            var element = document.getElementById('assistant-speech');
-            if (!speechInitialized) {
+            var element = document.getElementById('chat-history');
+            if (!chatHistoryInitialized) {
                 element.innerHTML = '';
-                speechInitialized = true;
+                chatHistoryInitialized = true;
             }
             element.innerHTML += '<div class="speech-msg">' + data.data.replace(/\n/g, '<br>') + '</div>';
             element.scrollTop = element.scrollHeight;
         });
 
         socket.on('update_user_input', function(data) {
-            var element = document.getElementById('user-input-display');
-            if (!userInputInitialized) {
+            var element = document.getElementById('chat-history');
+            if (!chatHistoryInitialized) {
                 element.innerHTML = '';
-                userInputInitialized = true;
+                chatHistoryInitialized = true;
             }
             element.innerHTML += '<div class="user-msg">' + data.data.replace(/\n/g, '<br>') + '</div>';
             element.scrollTop = element.scrollHeight;
