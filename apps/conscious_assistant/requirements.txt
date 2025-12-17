@@ -1,5 +1,16 @@
-schedule~=1.2.2
-flask
-flask_socketio
-openai>=1.0.0
-pyttsx3
+# Core scheduling
+schedule~=1.2
+
+# Web server
+flask>=2.3,<3.0
+flask-socketio>=5.3,<6.0
+
+# OpenAI SDK (new API, stable)
+openai>=1.3,<2.0
+
+# Text-to-speech
+pyttsx3>=2.90 ; sys_platform == "darwin"
+piper-tts>=1.2 ; sys_platform == "linux"
+
+# Optional but recommended for Flask-SocketIO
+eventlet>=0.33,<1.0
