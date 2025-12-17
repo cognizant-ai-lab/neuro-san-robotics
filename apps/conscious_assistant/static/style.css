@@ -34,9 +34,22 @@ body::before {
     50% { opacity: 0.8; transform: scale(1.1); }
 }
 
+/* Two-column page layout */
+.page-layout {
+    display: flex;
+    gap: 24px;
+    max-width: 1400px;
+    margin: 0 auto 20px auto;
+    padding: 0 20px;
+    position: relative;
+    z-index: 1;
+    align-items: stretch;
+}
+
 .main-container {
+    flex: 1;
+    min-width: 0;
     max-width: 900px;
-    margin: 40px auto 20px auto;
     background: rgba(20, 25, 45, 0.7);
     backdrop-filter: blur(20px);
     border-radius: 24px;
@@ -47,13 +60,75 @@ body::before {
         inset 0 1px 0 rgba(255, 255, 255, 0.05);
     padding: 40px 36px 32px 36px;
     position: relative;
-    z-index: 1;
     animation: containerFadeIn 0.6s ease-out;
 }
 
 @keyframes containerFadeIn {
     from { opacity: 0; transform: translateY(20px); }
     to { opacity: 1; transform: translateY(0); }
+}
+
+/* Thoughts Sidebar */
+.thoughts-sidebar {
+    width: 320px;
+    flex-shrink: 0;
+    background: rgba(20, 25, 45, 0.7);
+    backdrop-filter: blur(20px);
+    border-radius: 24px;
+    border: 1px solid rgba(255, 215, 0, 0.15);
+    box-shadow: 
+        0 8px 32px 0 rgba(0, 0, 0, 0.4),
+        0 0 40px rgba(255, 215, 0, 0.05),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    padding: 24px 20px;
+    display: flex;
+    flex-direction: column;
+    animation: containerFadeIn 0.6s ease-out 0.2s backwards;
+    transition: all 0.3s ease;
+}
+
+.thoughts-sidebar::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 60%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #ffd700, #ffaa00, #ffd700, transparent);
+    border-radius: 2px;
+    animation: glowPulse 3s ease-in-out infinite;
+}
+
+.thoughts-sidebar.collapsed {
+    width: 60px;
+    padding: 24px 10px;
+    overflow: hidden;
+}
+
+.thoughts-sidebar.collapsed .thoughts-header h2,
+.thoughts-sidebar.collapsed #assistant-thoughts {
+    display: none;
+}
+
+.thoughts-sidebar.collapsed .thoughts-header {
+    flex-direction: column;
+    gap: 0;
+}
+
+.thoughts-sidebar.collapsed #toggle-thoughts {
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    padding: 12px 8px;
+    font-size: 0.75em;
+}
+
+.thoughts-sidebar #assistant-thoughts {
+    flex: 1;
+    min-height: 0;
+    max-height: 280px;
+    margin-bottom: 0;
+    overflow-y: auto;
 }
 
 /* Glowing accent line at top */
@@ -73,6 +148,32 @@ body::before {
 @keyframes glowPulse {
     0%, 100% { opacity: 0.5; }
     50% { opacity: 1; }
+}
+
+/* Full-width site header */
+.site-header {
+    text-align: center;
+    padding: 30px 20px 20px 20px;
+    margin-bottom: 20px;
+    position: relative;
+    z-index: 1;
+    background: rgba(20, 25, 45, 0.7);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid rgba(0, 255, 255, 0.1);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.site-header::before {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 80%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #00bfff, #00ffff, #00bfff, transparent);
+    border-radius: 2px;
+    animation: glowPulse 3s ease-in-out infinite;
 }
 
 header {
@@ -134,14 +235,7 @@ h2 {
     gap: 10px;
 }
 
-h2::before {
-    content: '';
-    width: 4px;
-    height: 20px;
-    background: linear-gradient(180deg, #00ffff, #00bfff);
-    border-radius: 2px;
-    box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
-}
+/* Block quote bars removed per user request */
 
 .thoughts-header {
     display: flex;
@@ -253,9 +347,7 @@ h2::before {
     50% { box-shadow: 0 2px 8px rgba(255, 215, 0, 0.3), 0 0 20px rgba(255, 215, 0, 0.1); }
 }
 
-#assistant-thoughts.collapsed {
-    display: none;
-}
+/* Legacy collapsed state - now handled by sidebar collapse */
 
 #user-input-section {
     display: flex;
@@ -424,11 +516,57 @@ footer {
     z-index: 1;
 }
 
-/* Responsive Design for Mobile */
+/* Responsive Design for Tablet and Mobile */
+@media (max-width: 1200px) {
+    .page-layout {
+        flex-direction: column;
+        padding: 0 16px;
+        gap: 20px;
+    }
+    
+    .main-container {
+        max-width: 100%;
+    }
+    
+    .thoughts-sidebar {
+        width: 100%;
+        position: relative;
+        top: 0;
+        max-height: none;
+        order: 1;
+    }
+    
+    .thoughts-sidebar #assistant-thoughts {
+        max-height: 300px;
+    }
+    
+    .thoughts-sidebar.collapsed {
+        width: 100%;
+        padding: 16px 20px;
+    }
+    
+    .thoughts-sidebar.collapsed .thoughts-header {
+        flex-direction: row;
+    }
+    
+    .thoughts-sidebar.collapsed #toggle-thoughts {
+        writing-mode: horizontal-tb;
+        padding: 8px 14px;
+    }
+}
+
 @media (max-width: 900px) {
+    .page-layout {
+        margin: 20px auto 10px auto;
+    }
+    
     .main-container {
         padding: 24px 20px 20px 20px;
-        margin: 20px 16px 10px 16px;
+        border-radius: 20px;
+    }
+    
+    .thoughts-sidebar {
+        padding: 20px 16px;
         border-radius: 20px;
     }
     
