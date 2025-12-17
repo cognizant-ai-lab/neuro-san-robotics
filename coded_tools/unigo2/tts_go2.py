@@ -57,10 +57,6 @@ def _linux_say_via_piper(
     volume: float = 1.0,
     alsa_device: str | None = None,
 ) -> None:
-    """
-    Piper TTS -> raw PCM -> aplay
-    """
-
     if not _has("piper"):
         raise RuntimeError("piper binary not found on PATH")
 
@@ -90,26 +86,28 @@ def _linux_say_via_piper(
 
     logging.info("GO2_TTS: Piper -> aplay (%s)", device)
 
-    p1 = subprocess.Popen(
+    # IMPORTANT: newline + communicate()
+    piper_proc = subprocess.Popen(
         piper_cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
 
-    try:
-        assert p1.stdin is not None
-        p1.stdin.write(text.encode("utf-8"))
-        p1.stdin.close()
+    piper_input = (text.strip() + "\n").encode("utf-8")
 
-        subprocess.run(
-            aplay_cmd,
-            stdin=p1.stdout,
-            check=True,
+    stdout, stderr = piper_proc.communicate(input=piper_input)
+
+    if piper_proc.returncode != 0:
+        raise RuntimeError(
+            f"Piper failed (rc={piper_proc.returncode}): {stderr.decode(errors='ignore')}"
         )
-    finally:
-        if p1.stdout:
-            p1.stdout.close()
-        p1.wait()
+
+    subprocess.run(
+        aplay_cmd,
+        input=stdout,
+        check=True,
+    )
 
 
 # ---------------------------------------------------------------------
