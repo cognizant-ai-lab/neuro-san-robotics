@@ -198,6 +198,17 @@ header h1 {
     background-clip: text;
     text-shadow: 0 0 30px rgba(0, 255, 255, 0.3);
     animation: titleGlow 4s ease-in-out infinite;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+}
+
+.header-icon {
+    height: 48px;
+    width: auto;
+    vertical-align: middle;
+    filter: drop-shadow(0 0 10px rgba(0, 255, 255, 0.3));
 }
 
 @keyframes titleGlow {
