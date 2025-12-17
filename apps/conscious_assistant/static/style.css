@@ -43,7 +43,7 @@ body::before {
     padding: 0 20px;
     position: relative;
     z-index: 1;
-    align-items: flex-start;
+    align-items: stretch;
 }
 
 .main-container {
@@ -81,9 +81,6 @@ body::before {
         0 0 40px rgba(255, 215, 0, 0.05),
         inset 0 1px 0 rgba(255, 255, 255, 0.05);
     padding: 24px 20px;
-    position: sticky;
-    top: 40px;
-    max-height: calc(100vh - 80px);
     display: flex;
     flex-direction: column;
     animation: containerFadeIn 0.6s ease-out 0.2s backwards;
@@ -212,14 +209,7 @@ h2 {
     gap: 10px;
 }
 
-h2::before {
-    content: '';
-    width: 4px;
-    height: 20px;
-    background: linear-gradient(180deg, #00ffff, #00bfff);
-    border-radius: 2px;
-    box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
-}
+/* Block quote bars removed per user request */
 
 .thoughts-header {
     display: flex;
