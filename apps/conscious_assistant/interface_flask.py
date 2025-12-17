@@ -1,8 +1,10 @@
 import atexit
+import logging
 import os
 import queue
 import re
 import tempfile
+import threading
 import time
 from datetime import datetime
 
@@ -18,6 +20,15 @@ from apps.conscious_assistant.conscious_assistant import conscious_thinker
 from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
 from apps.conscious_assistant.conscious_assistant import tear_down_conscious_assistant
 
+# Import TTS function for hardwired speech
+try:
+    from coded_tools.unigo2.tts_go2 import say as tts_say
+    TTS_AVAILABLE = True
+except ImportError:
+    logging.warning("TTS module not available - speech will be text-only")
+    TTS_AVAILABLE = False
+    tts_say = None
+
 THINKING_INTERVAL = 30.0
 
 os.environ["AGENT_MANIFEST_FILE"] = "registries/manifest.hocon"
@@ -28,6 +39,79 @@ socketio = SocketIO(app)
 thread_started = False  # pylint: disable=invalid-name
 
 user_input_queue = queue.Queue()
+
+# Speech queue for TTS - allows non-blocking speech processing
+speech_queue = queue.Queue()
+
+
+def sanitize_speech_text(text: str) -> str:
+    """
+    Remove tool-trace garbage from speech text.
+    
+    Sometimes the agent embeds function call traces like:
+    'functions.say_out_loud ...: <text>'
+    
+    This function strips those out to get clean speech text.
+    """
+    if not text:
+        return ""
+    
+    # Remove lines that look like function call traces
+    lines = text.split('\n')
+    clean_lines = []
+    for line in lines:
+        # Skip lines that look like function calls
+        if re.match(r'^functions\.\w+', line.strip()):
+            continue
+        # Skip lines that look like tool invocations
+        if re.match(r'^(CALL_TOOL|TOOL_CALL|call)\s*:', line.strip(), re.IGNORECASE):
+            continue
+        clean_lines.append(line)
+    
+    return '\n'.join(clean_lines).strip()
+
+
+def speak_text(text: str) -> None:
+    """
+    Speak the given text using TTS.
+    
+    This is the hardwired TTS function that gets called automatically
+    whenever a 'say:' block is detected, ensuring speech always happens
+    regardless of whether the agent's tool call worked.
+    """
+    if not TTS_AVAILABLE or tts_say is None:
+        logging.info("TTS not available, skipping speech: %s", text[:50])
+        return
+    
+    clean_text = sanitize_speech_text(text)
+    if not clean_text:
+        logging.info("No text to speak after sanitization")
+        return
+    
+    try:
+        logging.info("Speaking: %s", clean_text[:50])
+        tts_say(clean_text)
+    except Exception as e:
+        logging.exception("TTS failed for text: %s", clean_text[:50])
+
+
+def speech_worker():
+    """Background worker that processes the speech queue."""
+    while True:
+        try:
+            text = speech_queue.get(timeout=1.0)
+            if text is None:  # Shutdown signal
+                break
+            speak_text(text)
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logging.exception("Speech worker error")
+
+
+# Start speech worker thread
+speech_thread = threading.Thread(target=speech_worker, daemon=True)
+speech_thread.start()
 
 conscious_session, conscious_thread = set_up_conscious_assistant()
 
@@ -89,6 +173,9 @@ def conscious_thinking_process():
                     {"data": "\n".join(speeches_to_emit)},
                     namespace="/chat",
                 )
+                # Hardwired TTS: Queue each speech block for audio playback
+                for speech_text in speeches_to_emit:
+                    speech_queue.put(speech_text)
 
 
 @socketio.on("connect", namespace="/chat")
