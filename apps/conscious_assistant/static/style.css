@@ -39,7 +39,7 @@ body::before {
     display: flex;
     gap: 24px;
     max-width: 1400px;
-    margin: 40px auto 20px auto;
+    margin: 0 auto 20px auto;
     padding: 0 20px;
     position: relative;
     z-index: 1;
@@ -148,6 +148,32 @@ body::before {
 @keyframes glowPulse {
     0%, 100% { opacity: 0.5; }
     50% { opacity: 1; }
+}
+
+/* Full-width site header */
+.site-header {
+    text-align: center;
+    padding: 30px 20px 20px 20px;
+    margin-bottom: 20px;
+    position: relative;
+    z-index: 1;
+    background: rgba(20, 25, 45, 0.7);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid rgba(0, 255, 255, 0.1);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.site-header::before {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 80%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #00bfff, #00ffff, #00bfff, transparent);
+    border-radius: 2px;
+    animation: glowPulse 3s ease-in-out infinite;
 }
 
 header {
