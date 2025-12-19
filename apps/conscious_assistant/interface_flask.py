@@ -98,22 +98,20 @@ def speak_text(text: str) -> None:
 def speech_worker():
     """Background worker that processes the speech queue."""
     while True:
+        got_item = False
         try:
             text = speech_queue.get(timeout=1.0)
-            if text is None:  # Shutdown signal
-                speech_queue.task_done()
+            got_item = True
+            if text is None:
                 break
             speak_text(text)
-            speech_queue.task_done()
         except queue.Empty:
             continue
         except Exception as e:
             logging.exception("Speech worker error")
-            # Still mark task as done even on error to prevent blocking
-            try:
+        finally:
+            if got_item:
                 speech_queue.task_done()
-            except ValueError:
-                pass  # task_done() called too many times
 
 
 # Start speech worker thread

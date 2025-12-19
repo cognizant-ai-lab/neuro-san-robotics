@@ -83,7 +83,7 @@ If you choose to perform a physical action, call your robot_macros tool with one
                     }
                 }
             },
-            "tools": ["say_out_loud", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros"]
+            "tools": ["commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros"]
         },
         # The unigo2.go2_tts is a text to speach CodedTool and does not call anyone else.
         # He is called by the front-man.

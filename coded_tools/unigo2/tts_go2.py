@@ -13,6 +13,7 @@ Tested with Piper CLI requiring:
 """
 
 import argparse
+import fcntl
 import logging
 import os
 import platform
@@ -234,6 +235,9 @@ def _mac_say_via_pyttsx3(
 # Public API
 # ---------------------------------------------------------------------
 
+TTS_LOCK_FILE = "/tmp/go2_tts.lock"
+
+
 def say(
     text: str,
     rate: int = 150,
@@ -243,26 +247,31 @@ def say(
 ) -> None:
     system = platform.system()
 
-    if system == "Linux":
+    with open(TTS_LOCK_FILE, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            _linux_say_via_piper(text, volume=volume, alsa_device=alsa_device)
-            return
-        except Exception as e:
-            logging.exception("Piper failed, falling back to espeak-ng")
-            _linux_say_via_espeak(
-                text,
-                rate=rate,
-                volume=volume,
-                voice=voice,
-                alsa_device=alsa_device,
-            )
-            return
+            if system == "Linux":
+                try:
+                    _linux_say_via_piper(text, volume=volume, alsa_device=alsa_device)
+                    return
+                except Exception as e:
+                    logging.exception("Piper failed, falling back to espeak-ng")
+                    _linux_say_via_espeak(
+                        text,
+                        rate=rate,
+                        volume=volume,
+                        voice=voice,
+                        alsa_device=alsa_device,
+                    )
+                    return
 
-    if system == "Darwin":
-        _mac_say_via_pyttsx3(text, rate, volume, voice)
-        return
+            if system == "Darwin":
+                _mac_say_via_pyttsx3(text, rate, volume, voice)
+                return
 
-    raise RuntimeError(f"TTS not supported on OS={system}")
+            raise RuntimeError(f"TTS not supported on OS={system}")
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------------
