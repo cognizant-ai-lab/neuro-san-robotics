@@ -101,12 +101,19 @@ def speech_worker():
         try:
             text = speech_queue.get(timeout=1.0)
             if text is None:  # Shutdown signal
+                speech_queue.task_done()
                 break
             speak_text(text)
+            speech_queue.task_done()
         except queue.Empty:
             continue
         except Exception as e:
             logging.exception("Speech worker error")
+            # Still mark task as done even on error to prevent blocking
+            try:
+                speech_queue.task_done()
+            except ValueError:
+                pass  # task_done() called too many times
 
 
 # Start speech worker thread
@@ -176,6 +183,13 @@ def conscious_thinking_process():
                 # Hardwired TTS: Queue each speech block for audio playback
                 for speech_text in speeches_to_emit:
                     speech_queue.put(speech_text)
+                
+                # Wait for all speech to complete before continuing to next turn
+                # This prevents the agent from starting a new conversation turn
+                # while the robot is still speaking the previous response
+                logging.info("Waiting for TTS playback to complete...")
+                speech_queue.join()
+                logging.info("TTS playback complete, ready for next turn")
 
 
 @socketio.on("connect", namespace="/chat")
