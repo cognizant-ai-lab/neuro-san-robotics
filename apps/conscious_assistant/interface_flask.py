@@ -104,7 +104,9 @@ def speech_worker():
             got_item = True
             if text is None:
                 break
+            logging.info("Speech worker: starting TTS for text: %s...", text[:50] if text else "")
             speak_text(text)
+            logging.info("Speech worker: TTS completed")
         except queue.Empty:
             continue
         except Exception as e:
@@ -112,6 +114,7 @@ def speech_worker():
         finally:
             if got_item:
                 speech_queue.task_done()
+                logging.info("Speech worker: task_done() called")
 
 
 # Start speech worker thread

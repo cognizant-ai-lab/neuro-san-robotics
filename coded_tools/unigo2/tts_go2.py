@@ -6,7 +6,8 @@ Linux / Unitree Go2:
 - FALLBACK: espeak-ng -> ALSA via aplay
 
 macOS:
-- pyttsx3 (NSSpeechSynthesizer backend)
+- Native 'say' command (truly blocking, prevents audio overlap)
+- Set GO2_MAC_VOICE env var to specify voice (e.g., "Samantha")
 
 Tested with Piper CLI requiring:
   piper -m MODEL -c CONFIG --output-raw | aplay
@@ -204,31 +205,23 @@ def _linux_say_via_espeak(
 
 
 # ---------------------------------------------------------------------
-# macOS: pyttsx3
+# macOS: native 'say' command (preferred - truly blocking)
 # ---------------------------------------------------------------------
 
-def _mac_say_via_pyttsx3(
+MAC_VOICE = os.environ.get("GO2_MAC_VOICE", "")
+
+
+def _mac_say_via_subprocess(
     text: str,
-    rate: int,
-    volume: float,
-    voice: str,
+    rate: int = 150,
 ) -> None:
-    try:
-        import pyttsx3  # type: ignore
-    except ImportError as e:
-        raise RuntimeError("pyttsx3 not installed") from e
-
-    engine = pyttsx3.init()
-    engine.setProperty("rate", rate)
-    engine.setProperty("volume", max(0.0, min(1.0, volume)))
-
-    for v in engine.getProperty("voices"):
-        if voice.lower() in (v.name.lower() + " " + v.id.lower()):
-            engine.setProperty("voice", v.id)
-            break
-
-    engine.say(text)
-    engine.runAndWait()
+    cmd = ["say"]
+    if MAC_VOICE:
+        cmd.extend(["-v", MAC_VOICE])
+    cmd.extend(["-r", str(rate)])
+    logging.info("GO2_TTS: macOS say command starting (rate=%d)", rate)
+    subprocess.run(cmd, input=text, text=True, check=True)
+    logging.info("GO2_TTS: macOS say command completed")
 
 
 # ---------------------------------------------------------------------
@@ -266,7 +259,7 @@ def say(
                     return
 
             if system == "Darwin":
-                _mac_say_via_pyttsx3(text, rate, volume, voice)
+                _mac_say_via_subprocess(text, rate)
                 return
 
             raise RuntimeError(f"TTS not supported on OS={system}")
