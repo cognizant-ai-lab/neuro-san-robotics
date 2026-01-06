@@ -43,7 +43,38 @@ ACKNOWLEDGMENT_PHRASES = [
     "Understood",
     "Working on it",
     "Let me see",
-    "Give me a second"
+    "Give me a second",
+    "Right away",
+    "On it",
+    "You got it",
+    "Absolutely",
+    "Let me think",
+    "Hold on",
+    "Just a sec",
+    "Coming right up",
+    "Perfect",
+    "I hear you"
+    "Hmm"
+    "Uh-huh",
+    "Oh - okay",
+    "Alright",
+    "Thinking..."
+    "Give me a sec",
+    "Um",
+    "Let me check with my agents...",
+    "One minute please",
+    "I'm a bit hungry",
+    "Haven't had my coffee yet today",
+    "Just a moment please",
+    "Let me grab my thinking cap",
+    "My LLM is warming up",
+    "Loading neural pathways",
+    "Consulting my artificial brain",
+    "I'm just a dog, but ok.",
+    "Beep boop beep",
+    "Bark"
+    "Woof woof",
+    "Bark bark",
 ]
 
 os.environ["AGENT_MANIFEST_FILE"] = "registries/manifest.hocon"
