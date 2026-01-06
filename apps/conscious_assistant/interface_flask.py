@@ -30,7 +30,28 @@ except ImportError:
     TTS_AVAILABLE = False
     tts_say = None
 
+# Import robot macros for motion during acknowledgment
+try:
+    from coded_tools.unigo2.go2_macros import Go2Macros
+    ROBOT_AVAILABLE = True
+except ImportError:
+    logging.warning("Go2Macros not available - robot motions disabled")
+    ROBOT_AVAILABLE = False
+    Go2Macros = None
+
 THINKING_INTERVAL = 30.0
+
+# Robot motion configuration
+ROBOT_MOTION_PROBABILITY = 0.5  # 50% chance of performing robot motion
+ALLOWED_ROBOT_ACTIONS = [
+    "look_left",
+    "look_right",
+    "sit",
+    "rise_sit",
+    "step_backward",
+    "step_forward",
+    "stretch"
+]
 
 # Acknowledgment phrases to speak immediately when user input is received
 ACKNOWLEDGMENT_PHRASES = [
@@ -53,12 +74,12 @@ ACKNOWLEDGMENT_PHRASES = [
     "Just a sec",
     "Coming right up",
     "Perfect",
-    "I hear you"
-    "Hmm"
+    "I hear you",
+    "Hmm",
     "Uh-huh",
     "Oh - okay",
     "Alright",
-    "Thinking..."
+    "Thinking...",
     "Give me a sec",
     "Um",
     "Let me check with my agents...",
@@ -72,7 +93,7 @@ ACKNOWLEDGMENT_PHRASES = [
     "Consulting my artificial brain",
     "I'm just a dog, but ok.",
     "Beep boop beep",
-    "Bark"
+    "Bark",
     "Woof woof",
     "Bark bark",
 ]
@@ -120,7 +141,7 @@ def sanitize_speech_text(text: str) -> str:
 def speak_text(text: str) -> None:
     """
     Speak the given text using TTS.
-    
+
     This is the hardwired TTS function that gets called automatically
     whenever a 'say:' block is detected, ensuring speech always happens
     regardless of whether the agent's tool call worked.
@@ -128,17 +149,68 @@ def speak_text(text: str) -> None:
     if not TTS_AVAILABLE or tts_say is None:
         logging.info("TTS not available, skipping speech: %s", text[:50])
         return
-    
+
     clean_text = sanitize_speech_text(text)
     if not clean_text:
         logging.info("No text to speak after sanitization")
         return
-    
+
     try:
         logging.info("Speaking: %s", clean_text[:50])
         tts_say(clean_text)
     except Exception as e:
         logging.exception("TTS failed for text: %s", clean_text[:50])
+
+
+def perform_random_robot_motion() -> None:
+    """
+    Perform 1 or 2 random robot motions from the allowed actions list.
+
+    This function is called during user input acknowledgment to make the robot
+    appear more engaged and responsive while the agent is processing.
+    """
+    if not ROBOT_AVAILABLE or Go2Macros is None:
+        logging.info("Robot not available, skipping motion")
+        return
+
+    # Check probability - only perform motion 50% of the time (or as configured)
+    if random.random() > ROBOT_MOTION_PROBABILITY:
+        logging.info("Skipping robot motion this time (probability check)")
+        return
+
+    try:
+        go2 = Go2Macros()
+
+        # Randomly decide whether to do 1 or 2 actions
+        num_actions = random.choice([1, 2])
+        actions = random.sample(ALLOWED_ROBOT_ACTIONS, num_actions)
+
+        logging.info("Performing robot motion(s): %s", actions)
+
+        for action in actions:
+            if action == "look_left":
+                go2.look_left()
+            elif action == "look_right":
+                go2.look_right()
+            elif action == "sit":
+                go2.sit()
+            elif action == "rise_sit":
+                go2.rise_sit()
+            elif action == "step_backward":
+                go2.step_backward()
+            elif action == "step_forward":
+                go2.step_forward()
+            elif action == "stretch":
+                go2.stretch()
+
+            # Small delay between actions if doing 2
+            if num_actions == 2 and action != actions[-1]:
+                time.sleep(0.5)
+
+        logging.info("Robot motion(s) completed")
+
+    except Exception as e:
+        logging.exception("Robot motion failed")
 
 
 def speech_worker():
@@ -194,6 +266,11 @@ def conscious_thinking_process():
                     {"data": acknowledgment},
                     namespace="/chat",
                 )
+
+                # Perform robot motion during the waiting time (50% chance)
+                # This happens while the speech is playing, filling the gap
+                perform_random_robot_motion()
+
                 # Wait for acknowledgment to finish speaking
                 speech_queue.join()
                 logging.info("Acknowledgment speech complete, proceeding with agent")
