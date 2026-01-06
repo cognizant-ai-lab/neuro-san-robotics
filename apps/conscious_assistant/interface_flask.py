@@ -50,7 +50,7 @@ ALLOWED_ROBOT_ACTIONS = [
     "rise_sit",
     "step_backward",
     "step_forward",
-    "stretch"
+    "stretch"      
 ]
 
 # Acknowledgment phrases to speak immediately when user input is received
@@ -181,33 +181,27 @@ def perform_random_robot_motion() -> None:
     try:
         go2 = Go2Macros()
 
-        # Randomly decide whether to do 1 or 2 actions
-        num_actions = random.choice([1, 2])
-        actions = random.sample(ALLOWED_ROBOT_ACTIONS, num_actions)
+        # Randomly select 1 action
+        action = random.choice(ALLOWED_ROBOT_ACTIONS)
 
-        logging.info("Performing robot motion(s): %s", actions)
+        logging.info("Performing robot motion: %s", action)
 
-        for action in actions:
-            if action == "look_left":
-                go2.look_left()
-            elif action == "look_right":
-                go2.look_right()
-            elif action == "sit":
-                go2.sit()
-            elif action == "rise_sit":
-                go2.rise_sit()
-            elif action == "step_backward":
-                go2.step_backward()
-            elif action == "step_forward":
-                go2.step_forward()
-            elif action == "stretch":
-                go2.stretch()
+        if action == "look_left":
+            go2.look_left()
+        elif action == "look_right":
+            go2.look_right()
+        elif action == "sit":
+            go2.sit()
+        elif action == "rise_sit":
+            go2.rise_sit()
+        elif action == "step_backward":
+            go2.step_backward()
+        elif action == "step_forward":
+            go2.step_forward()
+        elif action == "stretch":
+            go2.stretch()
 
-            # Small delay between actions if doing 2
-            if num_actions == 2 and action != actions[-1]:
-                time.sleep(0.5)
-
-        logging.info("Robot motion(s) completed")
+        logging.info("Robot motion completed")
 
     except Exception as e:
         logging.exception("Robot motion failed")
