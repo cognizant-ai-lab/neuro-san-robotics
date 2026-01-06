@@ -2,6 +2,7 @@ import atexit
 import logging
 import os
 import queue
+import random
 import re
 import tempfile
 import threading
@@ -30,6 +31,20 @@ except ImportError:
     tts_say = None
 
 THINKING_INTERVAL = 30.0
+
+# Acknowledgment phrases to speak immediately when user input is received
+ACKNOWLEDGMENT_PHRASES = [
+    "Got it",
+    "I'm on it",
+    "Let me check",
+    "One moment",
+    "Sure thing",
+    "Okay",
+    "Understood",
+    "Working on it",
+    "Let me see",
+    "Give me a second"
+]
 
 os.environ["AGENT_MANIFEST_FILE"] = "registries/manifest.hocon"
 os.environ["AGENT_TOOL_PATH"] = "coded_tools"
@@ -137,6 +152,21 @@ def conscious_thinking_process():
                 if user_input == "exit":
                     break
                 thoughts = f"\n{timestamp} user: " + user_input
+
+                # Speak acknowledgment immediately to fill the gap
+                acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
+                logging.info("Speaking acknowledgment: %s", acknowledgment)
+                speech_queue.put(acknowledgment)
+                # Emit to UI as well
+                socketio.emit(
+                    "update_speech",
+                    {"data": acknowledgment},
+                    namespace="/chat",
+                )
+                # Wait for acknowledgment to finish speaking
+                speech_queue.join()
+                logging.info("Acknowledgment speech complete, proceeding with agent")
+
             except queue.Empty:
                 if thoughts is None:
                     continue
