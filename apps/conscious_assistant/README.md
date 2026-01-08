@@ -1,13 +1,13 @@
 # Conscious Agent
 
-The **Conscious Agent** is a basic multi-agent system that is called from the [conscious_assistant.py]
-(../../apps/conscious_assistant/conscious_assistant.py) Flask app.
+The **Conscious Agent** is a basic multi-agent system that is called from the
+[conscious_assistant.py](../../apps/conscious_assistant/conscious_assistant.py) Flask app.
 
 ## Note
 
 - Running the flask app will continuously call the agents and can rack up on your token consumption.
-- The flask app will store memory items in a file locally. You can turn this feature off by changing the flag in [list_topics.py]
-(../../coded_tools/kwik_agents/list_topics.py)
+- The flask app will store memory items in a file locally. You can turn this feature off by changing the flag in
+ [list_topics.py](../../coded_tools/kwik_agents/list_topics.py)
 
 ---
 
@@ -21,9 +21,14 @@ The **Conscious Agent** is a basic multi-agent system that is called from the [c
 
 - This agent is **disabled by default**. To test it:
     - Manually enable it in the `manifest.hocon` file.
-    - Make sure to install the requirements for this app using the following command:
-    `pip install -r apps/conscious_assistant/requirements.txt`
-    - run the application with the command:`python -m apps.conscious_assistant.interface_flask
+    - Make sure to install the requirements for this app using the following command:  
+      ```sh
+      pip install -r apps/conscious_assistant/requirements.txt
+      ```
+    - run the application with the command:  
+      ```sh
+      python -m apps.conscious_assistant.interface_flask
+      ```
 
 ---
 
