@@ -336,8 +336,11 @@
         document.getElementById('toggle-chat').addEventListener('click', function() {
             var mainContainer = document.getElementById('main-container');
             var toggleChatText = document.getElementById('toggle-chat-text');
+            var floatingMicButton = document.getElementById('floating-mic-button');
             mainContainer.classList.toggle('hidden');
-            toggleChatText.innerText = mainContainer.classList.contains('hidden') ? 'Show Chat' : 'Hide Chat';
+            var chatHidden = mainContainer.classList.contains('hidden');
+            toggleChatText.innerText = chatHidden ? 'Show Chat' : 'Hide Chat';
+            floatingMicButton.style.display = chatHidden ? 'flex' : 'none';
         });
 
         document.getElementById('floating-mic-button').addEventListener('mousedown', async function(e) {
