@@ -16,7 +16,7 @@
         </header>
 
     <div class="page-layout">
-        <div class="main-container">
+        <div class="main-container hidden" id="main-container">
             <section id="chat-history-section" aria-label="Chat History">
                 <h2>Chat History</h2>
                 <div id="chat-history" class="chat-box chat-history-box">
@@ -36,17 +36,26 @@
             </section>
         </div>
 
-        <aside id="assistant-thoughts-section" class="thoughts-sidebar" aria-label="Assistant's Thoughts">
+        <aside id="assistant-thoughts-section" class="thoughts-sidebar collapsed" aria-label="Assistant's Thoughts">
             <div class="thoughts-header">
                 <h2>CAIL-E Thoughts</h2>
                 <button id="toggle-thoughts" type="button">
-                    <span id="toggle-text">Hide Thoughts</span>
+                    <span id="toggle-text">Show Thoughts</span>
                 </button>
             </div>
             <div id="assistant-thoughts" class="chat-box">
                 <div class="empty-state">Internal processing stream will appear here...</div>
             </div>
         </aside>
+    </div>
+
+    <div class="floating-controls">
+        <button type="button" id="toggle-chat" class="floating-toggle-btn" aria-label="Toggle conversation">
+            <span id="toggle-chat-text">Show Chat</span>
+        </button>
+        <button type="button" id="floating-mic-button" class="floating-mic-btn" aria-label="Voice input">
+            <span class="mic-icon">🎤</span>
+        </button>
     </div>
     <footer>
         <small>&copy; {{year}} CAIL-E The Conscious Dog &mdash; Powered by Neuro-San from Cognizant AI Lab (CAIL)</small>
@@ -327,6 +336,58 @@
             var toggleText = document.getElementById('toggle-text');
             thoughtsSidebar.classList.toggle('collapsed');
             toggleText.innerText = thoughtsSidebar.classList.contains('collapsed') ? 'Show Thoughts' : 'Hide Thoughts';
+        });
+
+        document.getElementById('toggle-chat').addEventListener('click', function() {
+            var mainContainer = document.getElementById('main-container');
+            var toggleChatText = document.getElementById('toggle-chat-text');
+            mainContainer.classList.toggle('hidden');
+            toggleChatText.innerText = mainContainer.classList.contains('hidden') ? 'Show Chat' : 'Hide Chat';
+        });
+
+        document.getElementById('floating-mic-button').addEventListener('mousedown', async function(e) {
+            e.preventDefault();
+            if (!isRecording && !isTranscribing) {
+                const hasPermission = await ensureMicPermission();
+                if (hasPermission) {
+                    await startWhisperRecording();
+                    document.getElementById('floating-mic-button').classList.add('recording');
+                }
+            }
+        });
+
+        document.getElementById('floating-mic-button').addEventListener('mouseup', function(e) {
+            e.preventDefault();
+            if (isRecording) {
+                stopWhisperRecording();
+                document.getElementById('floating-mic-button').classList.remove('recording');
+            }
+        });
+
+        document.getElementById('floating-mic-button').addEventListener('mouseleave', function(e) {
+            if (isRecording) {
+                stopWhisperRecording();
+                document.getElementById('floating-mic-button').classList.remove('recording');
+            }
+        });
+
+        document.getElementById('floating-mic-button').addEventListener('touchstart', async function(e) {
+            e.preventDefault();
+            if (!isRecording && !isTranscribing) {
+                const hasPermission = await ensureMicPermission();
+                if (hasPermission) {
+                    await startWhisperRecording();
+                    document.getElementById('floating-mic-button').classList.add('recording');
+                }
+            }
+        }, {passive: false});
+
+        document.getElementById('floating-mic-button').addEventListener('touchend', function(e) {
+            e.preventDefault();
+            if (isRecording) {
+                stopWhisperRecording();
+                document.getElementById('floating-mic-button').classList.remove('recording');
+            }
         });
     </script>
 </body>

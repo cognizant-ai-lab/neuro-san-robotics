@@ -714,3 +714,92 @@ footer {
         transition-duration: 0.01ms !important;
     }
 }
+
+/* Hidden state for main container */
+.main-container.hidden {
+    display: none;
+}
+
+/* When main container is visible, add padding to avoid floating controls overlay */
+.main-container:not(.hidden) {
+    padding-bottom: 120px;
+}
+
+/* Floating controls - always visible */
+.floating-controls {
+    position: fixed;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    z-index: 1000;
+    padding: 16px 24px;
+    background: rgba(20, 25, 45, 0.9);
+    backdrop-filter: blur(20px);
+    border-radius: 50px;
+    border: 1px solid rgba(0, 255, 255, 0.2);
+    box-shadow: 
+        0 8px 32px rgba(0, 0, 0, 0.4),
+        0 0 40px rgba(0, 191, 255, 0.15);
+}
+
+.floating-toggle-btn {
+    font-size: 0.9em;
+    color: #00ffff;
+    background: rgba(0, 191, 255, 0.15);
+    border: 1px solid rgba(0, 255, 255, 0.3);
+    border-radius: 25px;
+    padding: 12px 20px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.floating-toggle-btn:hover, .floating-toggle-btn:focus {
+    background: rgba(0, 191, 255, 0.25);
+    border-color: rgba(0, 255, 255, 0.6);
+    box-shadow: 0 0 20px rgba(0, 255, 255, 0.3);
+    transform: translateY(-2px);
+}
+
+.floating-mic-btn {
+    padding: 16px 20px;
+    font-weight: 600;
+    background: linear-gradient(135deg, #00ffaa 0%, #00bfff 100%);
+    color: #fff;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 16px rgba(0, 255, 170, 0.4);
+    font-size: 1.5em;
+    min-width: 60px;
+    min-height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.floating-mic-btn:hover, .floating-mic-btn:focus {
+    background: linear-gradient(135deg, #00ffcc 0%, #00d4ff 100%);
+    box-shadow: 0 6px 24px rgba(0, 255, 170, 0.6);
+    transform: translateY(-2px) scale(1.05);
+}
+
+.floating-mic-btn.recording {
+    background: linear-gradient(135deg, #ff0066 0%, #ff3366 100%);
+    box-shadow: 0 0 30px rgba(255, 0, 102, 0.6);
+    animation: recordingPulse 1.5s ease-in-out infinite;
+}
+
+.floating-mic-btn.transcribing {
+    background: linear-gradient(135deg, #ffa500 0%, #ff8c00 100%);
+    box-shadow: 0 0 30px rgba(255, 165, 0, 0.6);
+    animation: transcribingPulse 1s ease-in-out infinite;
+    cursor: wait;
+}
