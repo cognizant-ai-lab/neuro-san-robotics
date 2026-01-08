@@ -484,9 +484,15 @@ def run_scheduled_tasks():
 atexit.register(cleanup)
 
 if __name__ == "__main__":
+    import ssl
+
     CERT = "/home/unitree/certs/cert.pem"
     KEY = "/home/unitree/certs/key.pem"
-    ssl_ctx = (CERT, KEY) if (os.path.exists(CERT) and os.path.exists(KEY)) else None
+
+    ssl_ctx = None
+    if os.path.exists(CERT) and os.path.exists(KEY):
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(CERT, KEY)
 
     socketio.run(
         app,
