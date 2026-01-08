@@ -1,6 +1,4 @@
 import atexit
-import eventlet
-eventlet.monkey_patch()
 
 import logging
 import os
@@ -113,7 +111,7 @@ os.environ["AGENT_MANIFEST_FILE"] = "registries/manifest.hocon"
 os.environ["AGENT_TOOL_PATH"] = "coded_tools"
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
-socketio = SocketIO(app, async_mode="eventlet")
+socketio = SocketIO(app)
 thread_started = False  # pylint: disable=invalid-name
 
 user_input_queue = queue.Queue()
