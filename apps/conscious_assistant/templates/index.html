@@ -53,7 +53,11 @@
     </footer>
 
     <script>
-        var socket = io.connect('http://' + document.domain + ':' + location.port + '/chat');
+        // var socket = io.connect('http://' + document.domain + ':' + location.port + '/chat');
+        const socket = io("/chat", {
+            path: "/socket.io",
+            transports: ["websocket", "polling"],
+        });
         var thoughtsInitialized = false;
         var chatHistoryInitialized = false;
         var isRecording = false;
@@ -304,7 +308,8 @@
         function sendUserInput() {
             var userInput = document.getElementById('user-input').value.trim();
             if (userInput) {
-                socket.emit('user_input', {data: userInput}, '/chat');
+                // socket.emit('user_input', {data: userInput}, '/chat');
+                socket.emit('user_input', {data: userInput});
                 document.getElementById('user-input').value = '';
             }
         }
