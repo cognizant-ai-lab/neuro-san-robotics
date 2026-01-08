@@ -480,7 +480,7 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=5001,
         debug=False,
-        ssl_context=("certs/cert.pem", "certs/key.pem"),
+        ssl_context=("~/certs/cert.pem", "~/certs/key.pem"),
         allow_unsafe_werkzeug=True,
         log_output=True,
         use_reloader=False
