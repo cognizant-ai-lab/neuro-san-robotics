@@ -720,6 +720,11 @@ footer {
     display: none;
 }
 
+/* When main container is visible, add padding to avoid floating controls overlay */
+.main-container:not(.hidden) {
+    padding-bottom: 120px;
+}
+
 /* Floating controls - always visible */
 .floating-controls {
     position: fixed;
