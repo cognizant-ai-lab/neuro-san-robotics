@@ -9,6 +9,8 @@ import threading
 import time
 from datetime import datetime
 
+from pathlib import Path
+
 # pylint: disable=import-error
 import schedule
 from flask import Flask
@@ -20,6 +22,12 @@ from flask_socketio import SocketIO
 from apps.conscious_assistant.conscious_assistant import conscious_thinker
 from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
 from apps.conscious_assistant.conscious_assistant import tear_down_conscious_assistant
+
+
+# SSL certificate paths
+BASE_DIR = Path(__file__).resolve().parent
+CERT = BASE_DIR / "certs" / "cert.pem"
+KEY  = BASE_DIR / "certs" / "key.pem"
 
 # Import TTS function for hardwired speech
 try:
@@ -480,7 +488,7 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=5001,
         debug=False,
-        ssl_context=("certs/cert.pem", "certs/key.pem"),
+        ssl_context=("/home/unitree/certs/cert.pem", "/home/unitree/certs/key.pem"),
         allow_unsafe_werkzeug=True,
         log_output=True,
         use_reloader=False
