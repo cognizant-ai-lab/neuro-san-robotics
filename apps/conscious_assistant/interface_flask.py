@@ -1,4 +1,5 @@
 import atexit
+
 import logging
 import os
 import queue
@@ -110,7 +111,7 @@ os.environ["AGENT_MANIFEST_FILE"] = "registries/manifest.hocon"
 os.environ["AGENT_TOOL_PATH"] = "coded_tools"
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
-socketio = SocketIO(app)
+socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 thread_started = False  # pylint: disable=invalid-name
 
 user_input_queue = queue.Queue()
@@ -483,12 +484,22 @@ def run_scheduled_tasks():
 atexit.register(cleanup)
 
 if __name__ == "__main__":
+    import ssl
+
+    CERT = "/home/unitree/certs/cert.pem"
+    KEY = "/home/unitree/certs/key.pem"
+
+    ssl_ctx = None
+    if os.path.exists(CERT) and os.path.exists(KEY):
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(CERT, KEY)
+
     socketio.run(
         app,
         host="0.0.0.0",
         port=5001,
         debug=False,
-        ssl_context=("/home/unitree/certs/cert.pem", "/home/unitree/certs/key.pem"),
+        ssl_context=ssl_ctx,
         allow_unsafe_werkzeug=True,
         log_output=True,
         use_reloader=False

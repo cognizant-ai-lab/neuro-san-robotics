@@ -212,3 +212,6 @@ __marimo__/
 # Unitree repos
 cyclonedds/
 unitree_sdk2_python/
+
+# local set env
+setmyenv.sh
