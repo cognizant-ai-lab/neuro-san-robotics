@@ -104,13 +104,22 @@
                 console.log('Already recording or transcribing, ignoring start request');
                 return;
             }
-            
+
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // Request audio with optimized constraints for faster processing
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        channelCount: 1,  // Mono audio (smaller file size)
+                        sampleRate: 16000,  // Lower sample rate for speech (default is 48000)
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
                 whisperStream = stream;
                 audioChunks = [];
-                
-                // Try to use webm/opus format (supported by Chrome/Brave)
+
+                // Try to use webm/opus format with optimized bitrate
                 let mimeType = 'audio/webm;codecs=opus';
                 if (!MediaRecorder.isTypeSupported(mimeType)) {
                     mimeType = 'audio/webm';
@@ -121,8 +130,12 @@
                         }
                     }
                 }
-                
-                const options = mimeType ? { mimeType: mimeType } : {};
+
+                // Use lower bitrate and timeslice for faster chunks
+                const options = mimeType ? {
+                    mimeType: mimeType,
+                    audioBitsPerSecond: 32000  // Lower bitrate for faster upload (default is 128000)
+                } : { audioBitsPerSecond: 32000 };
                 mediaRecorder = new MediaRecorder(stream, options);
                 
                 mediaRecorder.ondataavailable = function(event) {
@@ -185,10 +198,11 @@
                     }
                 };
                 
-                mediaRecorder.start();
+                // Start recording with timeslice for more frequent data chunks (every 100ms)
+                mediaRecorder.start(100);
                 isRecording = true;
                 document.getElementById('mic-button').classList.add('recording');
-                console.log('Whisper recording started');
+                console.log('Whisper recording started with optimized settings');
                 
             } catch (err) {
                 console.error('Failed to start Whisper recording:', err);
