@@ -1,0 +1,29 @@
+{
+  "tts_samples": [
+    {
+      "name": "short",
+      "text": "Hello world!",
+      "description": "Quick response testing"
+    },
+    {
+      "name": "medium",
+      "text": "I am CAIL-E, an advanced quadruped platform designed for research and development in robotics and artificial intelligence.",
+      "description": "Typical conversational response"
+    },
+    {
+      "name": "long",
+      "text": "The Neuro SAN framework represents a significant advancement in multi-agent artificial intelligence systems. By leveraging configuration-driven agent definitions, it enables researchers and developers to build complex autonomous systems without hardcoding orchestration logic. The framework integrates seamlessly with embodied platforms like the Unitree Go2, combining the power of large language models with real-world robotics to create agents that can perceive, reason, remember, and act in physical environments. This approach demonstrates the potential for creating truly intelligent machines that can interact naturally with humans while maintaining persistent memory and context across interactions.",
+      "description": "Extended narrative or explanation"
+    },
+    {
+      "name": "very_short",
+      "text": "OK",
+      "description": "Minimal acknowledgment"
+    },
+    {
+      "name": "command",
+      "text": "Standing up and looking to the left.",
+      "description": "Robot command"
+    }
+  ]
+}

@@ -30,14 +30,31 @@ BASE_DIR = Path(__file__).resolve().parent
 CERT = BASE_DIR / "certs" / "cert.pem"
 KEY  = BASE_DIR / "certs" / "key.pem"
 
-# Import TTS function for hardwired speech
+# Import TTS engine for hardwired speech
 try:
-    from coded_tools.unigo2.tts_go2 import say as tts_say
+    from coded_tools.unigo2.tts_core import TTSEngine
     TTS_AVAILABLE = True
+    # Create global persistent TTS engine at startup
+    tts_engine = TTSEngine()
+    tts_engine.__enter__()  # Initialize engine once
 except ImportError:
     logging.warning("TTS module not available - speech will be text-only")
     TTS_AVAILABLE = False
-    tts_say = None
+    tts_engine = None
+
+# Initialize OpenAI client for STT (Whisper API)
+# Reusing client improves performance by maintaining connection pool
+openai_client = None
+try:
+    from openai import OpenAI
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if openai_api_key:
+        openai_client = OpenAI(api_key=openai_api_key)
+        logging.info("OpenAI client initialized for speech recognition")
+    else:
+        logging.warning("OPENAI_API_KEY not set - speech recognition unavailable")
+except ImportError:
+    logging.warning("OpenAI library not available - speech recognition unavailable")
 
 # Import robot macros for motion during acknowledgment
 try:
@@ -154,8 +171,10 @@ def speak_text(text: str) -> None:
     This is the hardwired TTS function that gets called automatically
     whenever a 'say:' block is detected, ensuring speech always happens
     regardless of whether the agent's tool call worked.
+
+    Uses persistent TTS engine for fast, repeated speech generation.
     """
-    if not TTS_AVAILABLE or tts_say is None:
+    if not TTS_AVAILABLE or tts_engine is None:
         logging.info("TTS not available, skipping speech: %s", text[:50])
         return
 
@@ -166,7 +185,7 @@ def speak_text(text: str) -> None:
 
     try:
         logging.info("Speaking: %s", clean_text[:50])
-        tts_say(clean_text)
+        tts_engine.say(clean_text)
     except Exception as e:
         logging.exception("TTS failed for text: %s", clean_text[:50])
 
@@ -354,14 +373,15 @@ def index():
 def transcribe_audio():
     """
     Transcribe audio using OpenAI Whisper API.
-    
+
     Expects a multipart/form-data POST with an 'audio' file.
     Returns JSON with 'text' field containing the transcription.
+
+    Uses persistent OpenAI client for better performance.
     """
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if not openai_api_key:
+    if not openai_client:
         return jsonify({
-            "error": "OpenAI API key not configured. Please set OPENAI_API_KEY environment variable."
+            "error": "OpenAI client not available. Please set OPENAI_API_KEY environment variable."
         }), 503
     
     if "audio" not in request.files:
@@ -395,20 +415,17 @@ def transcribe_audio():
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         audio_file.save(temp_file.name)
         temp_file.close()
-        
+
         try:
-            from openai import OpenAI
-            client = OpenAI(api_key=openai_api_key)
-            
             with open(temp_file.name, "rb") as f:
-                transcript = client.audio.transcriptions.create(
+                transcript = openai_client.audio.transcriptions.create(
                     model="whisper-1",
                     file=f,
                     language="en"  # Optimize for English
                 )
-            
+
             return jsonify({"text": transcript.text})
-        
+
         except Exception as e:
             print(f"OpenAI API error: {e}")
             return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
@@ -442,10 +459,19 @@ def cleanup(from_request=False):
     if cleaned_up:
         return
     cleaned_up = True
-    
+
     print("Bye!")
+
+    # Cleanup TTS engine
+    if TTS_AVAILABLE and tts_engine is not None:
+        try:
+            logging.info("Cleaning up TTS engine...")
+            tts_engine.__exit__(None, None, None)
+        except Exception as e:
+            logging.warning(f"TTS engine cleanup failed: {e}")
+
     tear_down_conscious_assistant(conscious_session)
-    
+
     if from_request:
         try:
             from flask import has_request_context

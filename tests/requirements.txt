@@ -1,0 +1,4 @@
+# Testing dependencies
+
+# Progress bars (auto-installed by run_tts_perf.py if needed)
+tqdm>=4.65.0
