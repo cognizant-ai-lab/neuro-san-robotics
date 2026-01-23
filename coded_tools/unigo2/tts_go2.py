@@ -21,8 +21,9 @@ class Go2TTSTool(CodedTool):
     """
     CodedTool wrapper for TTS with persistent engine.
 
-    The engine is initialized once and reused for all TTS calls,
-    avoiding model reload overhead.
+    The engine is initialized once on first use and reused for all TTS calls,
+    avoiding model reload overhead. Engine cleanup happens naturally when the
+    application shuts down.
     """
 
     def __init__(self):
@@ -35,10 +36,11 @@ class Go2TTSTool(CodedTool):
             return "Missing required 'text'"
 
         try:
-            # Use persistent engine for better performance
+            # Lazy-initialize persistent engine for better performance
             if self._engine is None:
                 self._engine = TTSEngine()
                 self._engine.__enter__()
+                logging.info("TTS engine initialized (persistent for tool lifetime)")
 
             self._engine.say(
                 text=text,
@@ -51,14 +53,6 @@ class Go2TTSTool(CodedTool):
         except Exception as e:
             logging.exception("TTS failed")
             return f"TTS error: {e}"
-
-    def __del__(self):
-        """Cleanup engine on tool destruction."""
-        if self._engine is not None:
-            try:
-                self._engine.__exit__(None, None, None)
-            except Exception:
-                pass
 
 
 # ---------------------------------------------------------------------
