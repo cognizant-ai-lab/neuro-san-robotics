@@ -42,7 +42,7 @@ ALSA_MIXER_CONTROL = os.environ.get("GO2_ALSA_MIXER", "Master")
 
 DEFAULT_VOLUME_PERCENT = int(os.environ.get("GO2_TTS_VOLUME", "100"))
 
-TTS_LOCK_FILE = "/tmp/go2_tts.lock"
+TTS_LOCK_FILE = "/tmp/go2_tts_engine.lock"
 
 
 # ---------------------------------------------------------------------

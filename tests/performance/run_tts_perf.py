@@ -250,7 +250,7 @@ def main():
 
         # Clean up lock file
         try:
-            lock_file = Path("/tmp/go2_tts.lock")
+            lock_file = Path("/tmp/go2_tts_engine.lock")
             if lock_file.exists():
                 lock_file.unlink()
         except Exception:
