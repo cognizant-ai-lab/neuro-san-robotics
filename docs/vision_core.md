@@ -1,4 +1,4 @@
-# GoVision Performance Optimization Guide
+# VisionCore Performance Optimization Guide
 
 ## 🚀 Quick Start: Enable ONNX for 2-4x Speedup (MacBook)
 
@@ -9,8 +9,8 @@ pip install onnx onnxruntime
 # 2. Export YOLO to ONNX (one-time, ~2 minutes)
 python export_yolo_onnx.py
 
-# 3. Run GoVision - it will auto-use ONNX
-python coded_tools/unigo2/go_vision.py
+# 3. Run VisionCore - it will auto-use ONNX
+python coded_tools/unigo2/vision_core.py
 ```
 
 **Expected improvement**: 5 FPS → 15-25 FPS on MacBook! ⚡
@@ -82,7 +82,7 @@ python coded_tools/unigo2/go_vision.py
 ## If Still Too Slow (< 10 FPS on MacBook)
 
 ### Option 1: Use Even Smaller Input Size
-Edit `go_vision.py` line 945:
+Edit `vision_core.py` line 945:
 ```python
 input_size=256,  # Was 320, now even smaller
 ```
@@ -167,7 +167,7 @@ Result: 30 FPS smooth video, 6 detections/sec, 0.6 faces/sec
 On the robot's Jetson Orin with TensorRT, you'll get:
 
 ```python
-vision = GoVision(
+vision = VisionCore(
     yolo_model="yolov8n.pt",
     use_tensorrt=True,       # ⚡ Key optimization
     input_size=640,          # Can use full resolution
@@ -210,7 +210,7 @@ scale_x = original_width / processed_width
 scale_y = original_height / processed_height
 bbox_display = [x1*scale_x, y1*scale_y, x2*scale_x, y2*scale_y]
 ```
-**Status**: Fixed in go_vision.py lines 1109-1124
+**Status**: Fixed in vision_core.py lines 1109-1124
 
 ### Webcam Resolution Slowdown (FIXED ✓)
 **Problem**: Setting webcam to 640x480 made performance WORSE (3.5 FPS)
@@ -264,8 +264,8 @@ This is expected. Small input size misses:
 **Recommended Configuration:**
 
 ```python
-# On Jetson Orin (coded_tools/unigo2/go_vision_robot.py)
-vision = GoVision(
+# On Jetson Orin (coded_tools/unigo2/vision_core.py)
+vision = VisionCore(
     yolo_model="yolov8n.pt",
     face_model="Facenet",
     use_tensorrt=True,           # ✓ Must enable

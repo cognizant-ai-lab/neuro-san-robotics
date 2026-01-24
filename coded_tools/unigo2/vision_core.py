@@ -1,5 +1,5 @@
 """
-GoVision - Object Detection and Face Recognition for Unitree Go2 EDU
+VisionCore - Object Detection and Face Recognition for Unitree Go2 EDU
 Optimized for NVIDIA Jetson Orin
 
 This module provides a unified vision system combining:
@@ -24,7 +24,7 @@ import json
 from datetime import datetime
 
 
-class GoVision:
+class VisionCore:
     """
     Unified vision system for object detection and face recognition.
 
@@ -67,7 +67,7 @@ class GoVision:
         half_precision: bool = False        # FP16 mode (faster on Jetson, slight accuracy loss)
     ):
         """
-        Initialize GoVision system with optimized parameters.
+        Initialize VisionCore system with optimized parameters.
 
         SPEED vs ACCURACY Trade-offs:
         ================================
@@ -168,7 +168,7 @@ class GoVision:
         self.deepface = None
         self._face_detection_enabled = False
 
-        print(f"[GoVision] ✓ Initialized successfully")
+        print(f"[VisionCore] ✓ Initialized successfully")
         print(f"  Backend: {self.backend}")
         print(f"  YOLO Model: {yolo_model}")
         print(f"  Face Model: {face_model}")
@@ -227,17 +227,17 @@ class GoVision:
 
                 if os.path.exists(engine_path):
                     # Optimized engine found - use it directly
-                    print(f"[GoVision] ⚡⚡⚡ Loading TensorRT engine: {engine_path}")
+                    print(f"[VisionCore] ⚡⚡⚡ Loading TensorRT engine: {engine_path}")
                     self.yolo = YOLO(engine_path)
                     self.backend = "TensorRT"
                 else:
                     # No engine found - convert PyTorch model to TensorRT
-                    print(f"[GoVision] TensorRT engine not found. Creating one...")
-                    print(f"[GoVision] Loading PyTorch model: {model_name}")
+                    print(f"[VisionCore] TensorRT engine not found. Creating one...")
+                    print(f"[VisionCore] Loading PyTorch model: {model_name}")
                     self.yolo = YOLO(model_name)
 
-                    print(f"[GoVision] Exporting to TensorRT... (this takes 3-5 minutes, one-time only)")
-                    print(f"[GoVision] Parameters: input_size={self.input_size}, half={self.half_precision}")
+                    print(f"[VisionCore] Exporting to TensorRT... (this takes 3-5 minutes, one-time only)")
+                    print(f"[VisionCore] Parameters: input_size={self.input_size}, half={self.half_precision}")
 
                     # Export with optimization parameters
                     self.yolo.export(
@@ -250,7 +250,7 @@ class GoVision:
                     # Load the newly created engine
                     self.yolo = YOLO(engine_path)
                     self.backend = "TensorRT"
-                    print(f"[GoVision] ✓ TensorRT engine ready: {engine_path}")
+                    print(f"[VisionCore] ✓ TensorRT engine ready: {engine_path}")
 
             # ============================================================
             # ONNX RUNTIME PATH (CPU optimization)
@@ -262,15 +262,15 @@ class GoVision:
 
                 if os.path.exists(onnx_path):
                     # ONNX model found - use it for CPU speed
-                    print(f"[GoVision] ⚡⚡⚡ Loading ONNX model: {onnx_path}")
-                    print(f"[GoVision] ONNX Runtime: 2-4x faster than PyTorch on CPU")
+                    print(f"[VisionCore] ⚡⚡⚡ Loading ONNX model: {onnx_path}")
+                    print(f"[VisionCore] ONNX Runtime: 2-4x faster than PyTorch on CPU")
                     self.yolo = YOLO(onnx_path, task='detect')
                     self.backend = "ONNX"  # Track which backend is used
                 else:
                     # No ONNX found - use PyTorch (slower)
-                    print(f"[GoVision] Loading PyTorch model: {model_name}")
-                    print(f"[GoVision] ⚠️  PyTorch is SLOW on CPU (expect 3-6 FPS)")
-                    print(f"[GoVision] 💡 Run 'python export_yolo_onnx.py' for 2-4x speedup")
+                    print(f"[VisionCore] Loading PyTorch model: {model_name}")
+                    print(f"[VisionCore] ⚠️  PyTorch is SLOW on CPU (expect 3-6 FPS)")
+                    print(f"[VisionCore] 💡 Run 'python export_yolo_onnx.py' for 2-4x speedup")
                     self.yolo = YOLO(model_name)
                     self.backend = "PyTorch"
 
@@ -290,14 +290,14 @@ class GoVision:
             #           teddy bear, hair drier, toothbrush
             # ============================================================
             self.class_names = self.yolo.names
-            print(f"[GoVision] ✓ YOLO ready: {len(self.class_names)} classes available")
+            print(f"[VisionCore] ✓ YOLO ready: {len(self.class_names)} classes available")
 
         except ImportError:
-            print("[GoVision] ✗ ERROR: ultralytics not installed")
-            print("[GoVision]   Fix: pip install ultralytics")
+            print("[VisionCore] ✗ ERROR: ultralytics not installed")
+            print("[VisionCore]   Fix: pip install ultralytics")
             self.yolo = None
         except Exception as e:
-            print(f"[GoVision] ✗ ERROR loading YOLO: {e}")
+            print(f"[VisionCore] ✗ ERROR loading YOLO: {e}")
             self.yolo = None
 
     def _init_deepface(self):
@@ -330,13 +330,13 @@ class GoVision:
                 from deepface import DeepFace
                 self.deepface = DeepFace
                 self._face_detection_enabled = True
-                print(f"[GoVision] ✓ DeepFace initialized with {self.face_model} model")
+                print(f"[VisionCore] ✓ DeepFace initialized with {self.face_model} model")
             except ImportError:
-                print("[GoVision] ✗ ERROR: deepface not installed")
-                print("[GoVision]   Fix: pip install deepface tf-keras")
+                print("[VisionCore] ✗ ERROR: deepface not installed")
+                print("[VisionCore]   Fix: pip install deepface tf-keras")
                 self._face_detection_enabled = False
             except Exception as e:
-                print(f"[GoVision] ✗ ERROR initializing DeepFace: {e}")
+                print(f"[VisionCore] ✗ ERROR initializing DeepFace: {e}")
                 self._face_detection_enabled = False
 
     def detect_objects(
@@ -397,7 +397,7 @@ class GoVision:
         # ============================================================
         if self.yolo is None:
             if verbose:
-                print("[GoVision] Object detection unavailable (YOLO not loaded)")
+                print("[VisionCore] Object detection unavailable (YOLO not loaded)")
             return []
 
         detections = []
@@ -467,7 +467,7 @@ class GoVision:
                         print(f"  Detected: {class_name} ({conf:.2f}) at [{int(x1)}, {int(y1)}, {int(x2)}, {int(y2)}]")
 
         except Exception as e:
-            print(f"[GoVision] ✗ ERROR in object detection: {e}")
+            print(f"[VisionCore] ✗ ERROR in object detection: {e}")
 
         return detections
 
@@ -603,7 +603,7 @@ class GoVision:
                         })
 
         except Exception as e:
-            print(f"[GoVision] ✗ ERROR in face recognition: {e}")
+            print(f"[VisionCore] ✗ ERROR in face recognition: {e}")
 
         return faces
 
@@ -661,12 +661,12 @@ class GoVision:
         # Detect all objects in the scene using YOLO
         # ============================================================
         if verbose:
-            print("[GoVision] Running object detection...")
+            print("[VisionCore] Running object detection...")
 
         results['objects'] = self.detect_objects(image, verbose=verbose)
 
         if verbose:
-            print(f"[GoVision] Found {len(results['objects'])} objects")
+            print(f"[VisionCore] Found {len(results['objects'])} objects")
 
         # ============================================================
         # STEP 2: FACE RECOGNITION (Optional)
@@ -674,12 +674,12 @@ class GoVision:
         # ============================================================
         if detect_faces:
             if verbose:
-                print("[GoVision] Running face recognition...")
+                print("[VisionCore] Running face recognition...")
 
             results['faces'] = self.recognize_faces(image)
 
             if verbose:
-                print(f"[GoVision] Found {len(results['faces'])} faces")
+                print(f"[VisionCore] Found {len(results['faces'])} faces")
 
         # ============================================================
         # STEP 3: GENERATE SUMMARY
@@ -807,11 +807,11 @@ class GoVision:
             image_path = person_dir / image_filename
             cv2.imwrite(str(image_path), image)
 
-            print(f"[GoVision] ✓ Added face for '{person_name}': {image_path}")
+            print(f"[VisionCore] ✓ Added face for '{person_name}': {image_path}")
             return True
 
         except Exception as e:
-            print(f"[GoVision] ✗ ERROR adding face to database: {e}")
+            print(f"[VisionCore] ✗ ERROR adding face to database: {e}")
             return False
 
     def list_known_faces(self) -> List[str]:
@@ -824,7 +824,7 @@ class GoVision:
         try:
             return [d.name for d in self.face_db_path.iterdir() if d.is_dir()]
         except Exception as e:
-            print(f"[GoVision] ✗ ERROR listing known faces: {e}")
+            print(f"[VisionCore] ✗ ERROR listing known faces: {e}")
             return []
 
     def visualize_detections(
@@ -923,11 +923,11 @@ class GoVision:
 
 # ============================================================
 # EXAMPLE USAGE AND TESTING
-# Run this file directly to test GoVision
+# Run this file directly to test VisionCore
 # ============================================================
 if __name__ == "__main__":
     """
-    Example usage of GoVision class with interactive webcam demo.
+    Example usage of VisionCore class with interactive webcam demo.
 
     This demonstrates:
     1. Initialization with optimized parameters
@@ -939,7 +939,7 @@ if __name__ == "__main__":
     import time
 
     print("=" * 60)
-    print("GoVision - Interactive Demo")
+    print("VisionCore - Interactive Demo")
     print("=" * 60)
 
     # ============================================================
@@ -952,7 +952,7 @@ if __name__ == "__main__":
 
     if use_jetson_config:
         print("\n[Config] Using Jetson Orin optimized settings")
-        vision = GoVision(
+        vision = VisionCore(
             yolo_model="yolov8n.pt",        # Fastest model
             face_model="Facenet",            # Fast face recognition
             face_db_path="./face_database",
@@ -967,7 +967,7 @@ if __name__ == "__main__":
         print("\n[Config] Using desktop/laptop CPU-optimized settings")
         print("[Config] Input size: 256x256 (very fast, good for nearby objects)")
         print("[Config] Will use ONNX if available (2-4x faster than PyTorch)")
-        vision = GoVision(
+        vision = VisionCore(
             yolo_model="yolov8n.pt",         # Will auto-use yolov8n.onnx if exists
             face_model="Facenet",
             face_db_path="./face_database",
@@ -1050,7 +1050,7 @@ if __name__ == "__main__":
         detection_count = 0
 
         # Create named window
-        window_name = 'GoVision - Click here and press Q/S/A/V'
+        window_name = 'VisionCore - Click here and press Q/S/A/V'
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
         while True:
@@ -1272,5 +1272,5 @@ if __name__ == "__main__":
         print("Sample classes:", ', '.join(list(vision.class_names.values())[:20]))
 
     print("\n" + "=" * 60)
-    print("GoVision Demo Complete!")
+    print("VisionCore Demo Complete!")
     print("=" * 60)
