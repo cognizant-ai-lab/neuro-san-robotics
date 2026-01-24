@@ -46,54 +46,6 @@ TTS_LOCK_FILE = "/tmp/go2_tts_engine.lock"
 
 
 # ---------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------
-
-def _has(cmd: str) -> bool:
-    return shutil.which(cmd) is not None
-
-
-def _set_alsa_volume(volume_percent: int = DEFAULT_VOLUME_PERCENT) -> None:
-    """
-    Set ALSA mixer volume before playback to ensure consistent volume.
-
-    This helps prevent volume drift that can occur on some systems where
-    other processes may adjust mixer levels between playbacks.
-
-    Args:
-        volume_percent: Volume level 0-100 (default from GO2_TTS_VOLUME env var)
-    """
-    if not _has("amixer"):
-        logging.debug("amixer not found, skipping volume set")
-        return
-
-    volume_percent = max(0, min(100, volume_percent))
-
-    # Try common mixer control names
-    controls_to_try = [ALSA_MIXER_CONTROL]
-    if ALSA_MIXER_CONTROL != "Master":
-        controls_to_try.append("Master")
-    if ALSA_MIXER_CONTROL != "PCM":
-        controls_to_try.append("PCM")
-
-    for control in controls_to_try:
-        try:
-            result = subprocess.run(
-                ["amixer", "set", control, f"{volume_percent}%"],
-                capture_output=True,
-                timeout=2,
-            )
-            if result.returncode == 0:
-                logging.debug("Set %s volume to %d%%", control, volume_percent)
-                return
-        except Exception as e:
-            logging.debug("Failed to set %s volume: %s", control, e)
-            continue
-
-    logging.debug("Could not set ALSA volume (tried: %s)", controls_to_try)
-
-
-# ---------------------------------------------------------------------
 # TTS Engine Class (persistent model loading)
 # ---------------------------------------------------------------------
 
@@ -114,6 +66,51 @@ class TTSEngine:
         self.system = platform.system()
         self.lock_file = None
         self._initialized = False
+
+    @staticmethod
+    def _has(cmd: str) -> bool:
+        """Check if a command is available on PATH."""
+        return shutil.which(cmd) is not None
+
+    @staticmethod
+    def _set_alsa_volume(volume_percent: int = DEFAULT_VOLUME_PERCENT) -> None:
+        """
+        Set ALSA mixer volume before playback to ensure consistent volume.
+
+        This helps prevent volume drift that can occur on some systems where
+        other processes may adjust mixer levels between playbacks.
+
+        Args:
+            volume_percent: Volume level 0-100 (default from GO2_TTS_VOLUME env var)
+        """
+        if not TTSEngine._has("amixer"):
+            logging.debug("amixer not found, skipping volume set")
+            return
+
+        volume_percent = max(0, min(100, volume_percent))
+
+        # Try common mixer control names
+        controls_to_try = [ALSA_MIXER_CONTROL]
+        if ALSA_MIXER_CONTROL != "Master":
+            controls_to_try.append("Master")
+        if ALSA_MIXER_CONTROL != "PCM":
+            controls_to_try.append("PCM")
+
+        for control in controls_to_try:
+            try:
+                result = subprocess.run(
+                    ["amixer", "set", control, f"{volume_percent}%"],
+                    capture_output=True,
+                    timeout=2,
+                )
+                if result.returncode == 0:
+                    logging.debug("Set %s volume to %d%%", control, volume_percent)
+                    return
+            except Exception as e:
+                logging.debug("Failed to set %s volume: %s", control, e)
+                continue
+
+        logging.debug("Could not set ALSA volume (tried: %s)", controls_to_try)
 
     def __enter__(self):
         """Context manager entry - acquire lock."""
@@ -180,7 +177,7 @@ class TTSEngine:
         alsa_device: Optional[str] = None,
     ) -> None:
         """Linux Piper TTS implementation."""
-        if not _has("piper"):
+        if not TTSEngine._has("piper"):
             raise RuntimeError("piper binary not found on PATH")
 
         if not os.path.isfile(PIPER_MODEL) or not os.path.isfile(PIPER_CONFIG):
@@ -194,7 +191,7 @@ class TTSEngine:
 
         # Set ALSA volume before playback
         volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
-        _set_alsa_volume(volume_percent)
+        TTSEngine._set_alsa_volume(volume_percent)
 
         piper_cmd = [
             "piper",
@@ -245,7 +242,7 @@ class TTSEngine:
         alsa_device: Optional[str] = None,
     ) -> None:
         """Linux eSpeak fallback implementation."""
-        if not _has("espeak-ng"):
+        if not TTSEngine._has("espeak-ng"):
             raise RuntimeError("espeak-ng not installed")
 
         amp = max(0, min(200, int(volume * 200)))
