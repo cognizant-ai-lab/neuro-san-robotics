@@ -64,4 +64,4 @@ On Jetson Orin with Piper TTS, this eliminates ~100-200ms of model loading overh
 - Logging is set to WARNING level to avoid breaking progress bars
 - System volume is automatically preserved and restored
 - Tests run with real TTS engine at volume=0 (silent mode)
-- TTSEngine context manager ensures proper resource cleanup
+- TtsCore context manager ensures proper resource cleanup

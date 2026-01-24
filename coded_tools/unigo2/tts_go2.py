@@ -10,7 +10,7 @@ import logging
 from typing import Any, Dict
 
 from neuro_san.interfaces.coded_tool import CodedTool
-from coded_tools.unigo2.tts_core import say, TTSEngine
+from coded_tools.unigo2.tts_core import say, TtsCore
 
 
 # ---------------------------------------------------------------------
@@ -38,7 +38,7 @@ class Go2TTSTool(CodedTool):
         try:
             # Lazy-initialize persistent engine for better performance
             if self._engine is None:
-                self._engine = TTSEngine()
+                self._engine = TtsCore()
                 self._engine.__enter__()
                 logging.info("TTS engine initialized (persistent for tool lifetime)")
 

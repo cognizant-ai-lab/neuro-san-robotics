@@ -32,10 +32,10 @@ KEY  = BASE_DIR / "certs" / "key.pem"
 
 # Import TTS engine for hardwired speech
 try:
-    from coded_tools.unigo2.tts_core import TTSEngine
+    from coded_tools.unigo2.tts_core import TtsCore
     TTS_AVAILABLE = True
     # Create global persistent TTS engine at startup
-    tts_engine = TTSEngine()
+    tts_engine = TtsCore()
     tts_engine.__enter__()  # Initialize engine once
 except ImportError:
     logging.warning("TTS module not available - speech will be text-only")

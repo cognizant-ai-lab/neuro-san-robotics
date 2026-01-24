@@ -46,10 +46,10 @@ TTS_LOCK_FILE = "/tmp/go2_tts_engine.lock"
 
 
 # ---------------------------------------------------------------------
-# TTS Engine Class (persistent model loading)
+# TtsCore Class (persistent model loading)
 # ---------------------------------------------------------------------
 
-class TTSEngine:
+class TtsCore:
     """
     Text-to-speech engine with persistent model loading.
 
@@ -57,7 +57,7 @@ class TTSEngine:
     dramatically improving performance for multiple TTS operations.
 
     Usage:
-        with TTSEngine() as engine:
+        with TtsCore() as engine:
             engine.say("Hello")
             engine.say("World")  # Much faster - model already loaded
     """
@@ -83,7 +83,7 @@ class TTSEngine:
         Args:
             volume_percent: Volume level 0-100 (default from GO2_TTS_VOLUME env var)
         """
-        if not TTSEngine._has("amixer"):
+        if not TtsCore._has("amixer"):
             logging.debug("amixer not found, skipping volume set")
             return
 
@@ -147,7 +147,7 @@ class TTSEngine:
             alsa_device: ALSA device for Linux (default: plughw:0,0)
         """
         if not self._initialized:
-            raise RuntimeError("TTSEngine must be used as a context manager (with TTSEngine() as engine:)")
+            raise RuntimeError("TtsCore must be used as a context manager (with TtsCore() as engine:)")
 
         if self.system == "Linux":
             try:
@@ -177,7 +177,7 @@ class TTSEngine:
         alsa_device: Optional[str] = None,
     ) -> None:
         """Linux Piper TTS implementation."""
-        if not TTSEngine._has("piper"):
+        if not TtsCore._has("piper"):
             raise RuntimeError("piper binary not found on PATH")
 
         if not os.path.isfile(PIPER_MODEL) or not os.path.isfile(PIPER_CONFIG):
@@ -191,7 +191,7 @@ class TTSEngine:
 
         # Set ALSA volume before playback
         volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
-        TTSEngine._set_alsa_volume(volume_percent)
+        TtsCore._set_alsa_volume(volume_percent)
 
         piper_cmd = [
             "piper",
@@ -242,7 +242,7 @@ class TTSEngine:
         alsa_device: Optional[str] = None,
     ) -> None:
         """Linux eSpeak fallback implementation."""
-        if not TTSEngine._has("espeak-ng"):
+        if not TtsCore._has("espeak-ng"):
             raise RuntimeError("espeak-ng not installed")
 
         amp = max(0, min(200, int(volume * 200)))
@@ -312,8 +312,8 @@ def say(
     """
     Convenience function for one-off TTS calls.
 
-    For multiple TTS calls, use TTSEngine class for better performance:
-        with TTSEngine() as engine:
+    For multiple TTS calls, use TtsCore class for better performance:
+        with TtsCore() as engine:
             engine.say("First message")
             engine.say("Second message")  # Much faster!
 
@@ -324,5 +324,5 @@ def say(
         voice: Voice identifier (platform-specific)
         alsa_device: ALSA device for Linux (default: plughw:0,0)
     """
-    with TTSEngine() as engine:
+    with TtsCore() as engine:
         engine.say(text, rate=rate, volume=volume, voice=voice, alsa_device=alsa_device)

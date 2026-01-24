@@ -17,7 +17,7 @@ import os
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from coded_tools.unigo2.tts_core import TTSEngine
+from coded_tools.unigo2.tts_core import TtsCore
 from tests.performance.perf_utils import run_perf_test, print_perf_table
 
 try:
@@ -219,7 +219,7 @@ def main():
 
         # Create persistent TTS engine (model loaded once)
         print("Initializing TTS engine...")
-        with TTSEngine() as engine:
+        with TtsCore() as engine:
             print("✓ Engine ready\n")
 
             # Run tests with progress bar
