@@ -415,12 +415,20 @@ def transcribe_audio():
         elif "mp3" in content_type or "mpeg" in content_type:
             suffix = ".mp3"
         
-        logging.info("Transcription: filename=%s, content_type=%s, using suffix=%s", 
-                     filename, content_type, suffix)
+        print(f"Transcription: filename={filename}, content_type={content_type}, using suffix={suffix}, file_size={file_size}")
         
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         audio_file.save(temp_file.name)
         temp_file.close()
+        
+        # Log the actual file size after saving
+        saved_size = os.path.getsize(temp_file.name)
+        print(f"Transcription: saved to {temp_file.name}, size={saved_size} bytes")
+        
+        # Check first few bytes to identify actual format
+        with open(temp_file.name, "rb") as f:
+            header = f.read(12)
+            print(f"Transcription: file header (hex): {header.hex()}")
         
         try:
             from openai import OpenAI
@@ -437,6 +445,7 @@ def transcribe_audio():
         
         except Exception as e:
             print(f"OpenAI API error: {e}")
+            print(f"Transcription failed for file: {temp_file.name}, suffix={suffix}, size={saved_size}")
             return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
     
     finally:
