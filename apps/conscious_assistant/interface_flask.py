@@ -384,13 +384,39 @@ def transcribe_audio():
     
     temp_file = None
     try:
+        # Determine file extension from filename or content type
+        # OpenAI Whisper supports: flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm
         suffix = ".webm"  # Default to webm
-        if audio_file.filename.endswith(".wav"):
+        filename = audio_file.filename.lower() if audio_file.filename else ""
+        content_type = audio_file.content_type.lower() if audio_file.content_type else ""
+        
+        # Check filename extension first
+        if filename.endswith(".wav"):
             suffix = ".wav"
-        elif audio_file.filename.endswith(".mp3"):
+        elif filename.endswith(".mp3"):
             suffix = ".mp3"
-        elif audio_file.filename.endswith(".m4a"):
+        elif filename.endswith(".m4a"):
             suffix = ".m4a"
+        elif filename.endswith(".mp4"):
+            suffix = ".mp4"
+        elif filename.endswith(".ogg") or filename.endswith(".oga"):
+            suffix = ".ogg"
+        elif filename.endswith(".flac"):
+            suffix = ".flac"
+        elif filename.endswith(".webm"):
+            suffix = ".webm"
+        # Fall back to content type if filename doesn't have a recognized extension
+        elif "mp4" in content_type:
+            suffix = ".mp4"
+        elif "ogg" in content_type:
+            suffix = ".ogg"
+        elif "wav" in content_type:
+            suffix = ".wav"
+        elif "mp3" in content_type or "mpeg" in content_type:
+            suffix = ".mp3"
+        
+        logging.info("Transcription: filename=%s, content_type=%s, using suffix=%s", 
+                     filename, content_type, suffix)
         
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         audio_file.save(temp_file.name)

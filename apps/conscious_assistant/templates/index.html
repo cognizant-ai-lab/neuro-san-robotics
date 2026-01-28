@@ -155,14 +155,27 @@
                         whisperStream = null;
                     }
                     
-                    // Create blob from chunks
-                    const audioBlob = new Blob(audioChunks, { type: mimeType || 'audio/webm' });
+                    // Create blob from chunks with the actual MIME type used
+                    const actualMimeType = mimeType || 'audio/webm';
+                    const audioBlob = new Blob(audioChunks, { type: actualMimeType });
                     audioChunks = [];
+                    
+                    // Determine file extension based on actual MIME type
+                    let fileExtension = '.webm';
+                    if (actualMimeType.includes('mp4')) {
+                        fileExtension = '.mp4';
+                    } else if (actualMimeType.includes('ogg')) {
+                        fileExtension = '.ogg';
+                    } else if (actualMimeType.includes('wav')) {
+                        fileExtension = '.wav';
+                    }
+                    const filename = 'speech' + fileExtension;
+                    console.log('Audio recorded with MIME type:', actualMimeType, 'filename:', filename);
                     
                     // Send to server for transcription
                     try {
                         const formData = new FormData();
-                        formData.append('audio', audioBlob, 'speech.webm');
+                        formData.append('audio', audioBlob, filename);
                         
                         const response = await fetch('/api/transcribe', {
                             method: 'POST',
