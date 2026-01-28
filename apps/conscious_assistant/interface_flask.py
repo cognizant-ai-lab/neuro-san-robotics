@@ -1,3 +1,6 @@
+import shutil
+import subprocess
+
 import atexit
 
 import logging
@@ -359,71 +362,141 @@ def index():
 def transcribe_audio():
     """
     Transcribe audio using OpenAI Whisper API.
-    
+
     Expects a multipart/form-data POST with an 'audio' file.
     Returns JSON with 'text' field containing the transcription.
+
+    Robust across macOS/Linux:
+    - Save upload to temp file
+    - If ffmpeg is available, transcode to canonical WAV (mono, 16 kHz)
+    - Send to OpenAI with explicit (filename, fileobj, mimetype) tuple
+      to avoid "Invalid file format" caused by missing/ambiguous filename.
     """
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
         return jsonify({
             "error": "OpenAI API key not configured. Please set OPENAI_API_KEY environment variable."
         }), 503
-    
+
     if "audio" not in request.files:
         return jsonify({"error": "No audio file provided"}), 400
-    
+
     audio_file = request.files["audio"]
-    if audio_file.filename == "":
-        return jsonify({"error": "Empty audio file"}), 400
-    
+    filename = (getattr(audio_file, "filename", "") or "").strip()
+
     MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
-    audio_file.seek(0, os.SEEK_END)
-    file_size = audio_file.tell()
-    audio_file.seek(0)
-    
-    if file_size > MAX_FILE_SIZE:
-        return jsonify({"error": f"Audio file too large. Maximum size is 25MB, got {file_size / 1024 / 1024:.1f}MB"}), 413
-    
-    if file_size == 0:
-        return jsonify({"error": "Audio file is empty"}), 400
-    
-    temp_file = None
+
+    # Compute size without consuming stream
     try:
-        suffix = ".webm"  # Default to webm
-        if audio_file.filename.endswith(".wav"):
+        audio_file.stream.seek(0, os.SEEK_END)
+        file_size = audio_file.stream.tell()
+        audio_file.stream.seek(0)
+    except Exception:
+        # Fallback: rely on read to check emptiness later
+        file_size = None
+
+    if file_size is not None:
+        if file_size > MAX_FILE_SIZE:
+            return jsonify({
+                "error": f"Audio file too large. Maximum size is 25MB, got {file_size / 1024 / 1024:.1f}MB"
+            }), 413
+        if file_size == 0:
+            return jsonify({"error": "Audio file is empty"}), 400
+
+    # Choose a suffix (helps downstream tooling and OpenAI sniffing)
+    mt = (getattr(audio_file, "mimetype", "") or "").lower()
+    lower = filename.lower()
+
+    suffix = ".webm"  # browser default for MediaRecorder in many cases
+    if lower.endswith((".wav", ".mp3", ".m4a", ".mp4", ".ogg", ".oga", ".webm")):
+        suffix = Path(lower).suffix
+    else:
+        if "wav" in mt:
             suffix = ".wav"
-        elif audio_file.filename.endswith(".mp3"):
+        elif "mpeg" in mt or "mp3" in mt:
             suffix = ".mp3"
-        elif audio_file.filename.endswith(".m4a"):
+        elif "mp4" in mt or "m4a" in mt:
             suffix = ".m4a"
-        
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-        audio_file.save(temp_file.name)
-        temp_file.close()
-        
-        try:
-            from openai import OpenAI
-            client = OpenAI(api_key=openai_api_key)
-            
-            with open(temp_file.name, "rb") as f:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=f,
-                    language="en"  # Optimize for English
+        elif "ogg" in mt or "opus" in mt:
+            suffix = ".ogg"
+        elif "webm" in mt:
+            suffix = ".webm"
+
+    tmp_in = None
+    tmp_wav = None
+
+    try:
+        # Persist upload
+        tmp_in = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        audio_file.save(tmp_in.name)
+        tmp_in.close()
+
+        # If upload somehow saved empty, catch it
+        if os.path.getsize(tmp_in.name) == 0:
+            return jsonify({"error": "Audio file is empty"}), 400
+
+        send_path = tmp_in.name
+        send_name = f"audio{suffix}"
+        send_mime = {
+            ".webm": "audio/webm",
+            ".wav": "audio/wav",
+            ".mp3": "audio/mpeg",
+            ".m4a": "audio/mp4",
+            ".mp4": "audio/mp4",
+            ".ogg": "audio/ogg",
+            ".oga": "audio/ogg",
+        }.get(suffix, "application/octet-stream")
+
+        # Transcode to canonical WAV if possible (most reliable for Whisper)
+        if shutil.which("ffmpeg"):
+            tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+            tmp_wav.close()
+
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-nostdin",
+                "-y",
+                "-i", tmp_in.name,
+                "-ac", "1",
+                "-ar", "16000",
+                "-f", "wav",
+                tmp_wav.name,
+            ]
+            proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+            if proc.returncode == 0 and os.path.exists(tmp_wav.name) and os.path.getsize(tmp_wav.name) > 44:
+                send_path = tmp_wav.name
+                send_name = "audio.wav"
+                send_mime = "audio/wav"
+            else:
+                logging.warning(
+                    "ffmpeg transcode failed (rc=%s). stderr=%s",
+                    proc.returncode,
+                    (proc.stderr or "")[:500],
                 )
-            
-            return jsonify({"text": transcript.text})
-        
-        except Exception as e:
-            print(f"OpenAI API error: {e}")
-            return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
-    
+
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_api_key)
+
+        with open(send_path, "rb") as f:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=(send_name, f, send_mime),
+                language="en",
+            )
+
+        return jsonify({"text": transcript.text})
+
+    except Exception as e:
+        logging.exception("OpenAI transcription failed")
+        return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
+
     finally:
-        if temp_file and os.path.exists(temp_file.name):
-            try:
-                os.unlink(temp_file.name)
-            except Exception as e:
-                print(f"Failed to delete temp file: {e}")
+        for tmp in (tmp_in, tmp_wav):
+            if tmp and os.path.exists(tmp.name):
+                try:
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
 
 
 @socketio.on("user_input", namespace="/chat")
