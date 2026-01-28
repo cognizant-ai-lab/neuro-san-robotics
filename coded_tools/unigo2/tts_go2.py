@@ -296,20 +296,17 @@ def _linux_say_via_piper(
     alsa_device: str | None = None,
 ) -> None:
     """
-    Synthesize speech using the persistent Piper process.
+    Synthesize speech using Piper TTS.
     
-    Falls back to spawning a new process if the persistent approach fails.
+    Uses subprocess approach which spawns a new piper process for each request.
+    This is slower due to model loading but more reliable.
     """
     # Set ALSA volume before playback
     volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
     _set_alsa_volume(volume_percent)
     
-    try:
-        piper = _get_persistent_piper()
-        piper.synthesize(text, alsa_device)
-    except Exception as e:
-        logging.warning("GO2_TTS: Persistent Piper failed (%s), falling back to subprocess", e)
-        _linux_say_via_piper_subprocess(text, volume, alsa_device)
+    # Use subprocess approach directly (persistent mode disabled for now)
+    _linux_say_via_piper_subprocess(text, volume, alsa_device)
 
 
 def _linux_say_via_piper_subprocess(
