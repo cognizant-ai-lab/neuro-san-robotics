@@ -25,9 +25,6 @@
                 <form id="user-input-section" autocomplete="off">
                     <textarea id="user-input" rows="3" placeholder="Communicate with CAIL-E the conscious dog... (type 'exit' to disconnect)" aria-label="Type your message"></textarea>
                     <div class="button-group">
-                        <button type="button" id="mic-button" aria-label="Voice input">
-                            <span class="mic-icon">🎤</span>
-                        </button>
                         <button type="button" id="send-button" onclick="sendUserInput()">
                             <span class="button-text">Send</span>
                         </button>
@@ -71,6 +68,7 @@
         var chatHistoryInitialized = false;
         var isRecording = false;
         var micPermissionGranted = false;
+        var isProcessing = false;  // Track when robot is processing a response
         
         // Whisper (OpenAI) speech recognition variables
         var mediaRecorder = null;
@@ -147,7 +145,7 @@
                 mediaRecorder.onstop = async function() {
                     console.log('MediaRecorder stopped, transcribing...');
                     isTranscribing = true;
-                    document.getElementById('mic-button').classList.add('transcribing');
+                    document.getElementById('floating-mic-button').classList.add('transcribing');
                     
                     // Stop all tracks
                     if (whisperStream) {
@@ -194,14 +192,14 @@
                         alert('Transcription failed: ' + err.message + '\n\nMake sure OPENAI_API_KEY is set on the server.');
                     } finally {
                         isTranscribing = false;
-                        document.getElementById('mic-button').classList.remove('transcribing');
+                        document.getElementById('floating-mic-button').classList.remove('transcribing');
                     }
                 };
                 
                 // Start recording with timeslice for more frequent data chunks (every 100ms)
                 mediaRecorder.start(100);
                 isRecording = true;
-                document.getElementById('mic-button').classList.add('recording');
+                document.getElementById('floating-mic-button').classList.add('recording');
                 console.log('Whisper recording started with optimized settings');
                 
             } catch (err) {
@@ -216,42 +214,10 @@
             if (mediaRecorder && mediaRecorder.state !== 'inactive') {
                 mediaRecorder.stop();
                 isRecording = false;
-                document.getElementById('mic-button').classList.remove('recording');
+                document.getElementById('floating-mic-button').classList.remove('recording');
                 console.log('Stopping Whisper recording...');
             }
         }
-
-        // Setup mic button push-to-talk event handlers
-        document.addEventListener('DOMContentLoaded', function() {
-            const micButton = document.getElementById('mic-button');
-            
-            async function startIfPossible(e) {
-                e.preventDefault();
-                if (!isRecording && !isTranscribing) {
-                    const hasPermission = await ensureMicPermission();
-                    if (hasPermission) {
-                        await startWhisperRecording();
-                    }
-                }
-            }
-            
-            function stopIfRecording(e) {
-                e.preventDefault();
-                if (isRecording) {
-                    stopWhisperRecording();
-                }
-            }
-            
-            // Mouse events
-            micButton.addEventListener('mousedown', startIfPossible);
-            micButton.addEventListener('mouseup', stopIfRecording);
-            micButton.addEventListener('mouseleave', stopIfRecording);
-            
-            // Touch events for mobile
-            micButton.addEventListener('touchstart', startIfPossible, {passive: false});
-            micButton.addEventListener('touchend', stopIfRecording);
-            micButton.addEventListener('touchcancel', stopIfRecording);
-        });
 
         // Spacebar hotkey for speech input (hold to talk, release to stop)
         var spacebarPressed = false;
@@ -263,6 +229,11 @@
                 e.preventDefault();
                 spacebarPressed = true;
                 spacebarStartTime = Date.now();
+                
+                if (isProcessing) {
+                    console.log('Cannot record while robot is processing');
+                    return;
+                }
                 
                 if (!isRecording && !isTranscribing) {
                     // Use async function to handle permission check
@@ -298,6 +269,38 @@
             console.log('Websocket connected!');
         });
 
+        // Functions to enable/disable input controls during robot processing
+        function setInputDisabled(disabled) {
+            isProcessing = disabled;
+            var textarea = document.getElementById('user-input');
+            var sendButton = document.getElementById('send-button');
+            var floatingMicButton = document.getElementById('floating-mic-button');
+            
+            textarea.disabled = disabled;
+            sendButton.disabled = disabled;
+            
+            if (disabled) {
+                textarea.classList.add('disabled');
+                sendButton.classList.add('disabled');
+                floatingMicButton.classList.add('disabled');
+            } else {
+                textarea.classList.remove('disabled');
+                sendButton.classList.remove('disabled');
+                floatingMicButton.classList.remove('disabled');
+            }
+        }
+
+        // Listen for processing state changes from server
+        socket.on('processing_started', function() {
+            console.log('Robot is processing...');
+            setInputDisabled(true);
+        });
+
+        socket.on('processing_complete', function() {
+            console.log('Robot finished processing');
+            setInputDisabled(false);
+        });
+
         socket.on('update_thoughts', function(data) {
             var element = document.getElementById('assistant-thoughts');
             if (!thoughtsInitialized) {
@@ -329,11 +332,16 @@
         });
 
         function sendUserInput() {
+            if (isProcessing) {
+                console.log('Cannot send input while robot is processing');
+                return;
+            }
             var userInput = document.getElementById('user-input').value.trim();
             if (userInput) {
-                // socket.emit('user_input', {data: userInput}, '/chat');
                 socket.emit('user_input', {data: userInput});
                 document.getElementById('user-input').value = '';
+                // Disable input immediately after sending
+                setInputDisabled(true);
             }
         }
 
@@ -361,6 +369,10 @@
 
         document.getElementById('floating-mic-button').addEventListener('mousedown', async function(e) {
             e.preventDefault();
+            if (isProcessing) {
+                console.log('Cannot record while robot is processing');
+                return;
+            }
             if (!isRecording && !isTranscribing) {
                 const hasPermission = await ensureMicPermission();
                 if (hasPermission) {
@@ -387,6 +399,10 @@
 
         document.getElementById('floating-mic-button').addEventListener('touchstart', async function(e) {
             e.preventDefault();
+            if (isProcessing) {
+                console.log('Cannot record while robot is processing');
+                return;
+            }
             if (!isRecording && !isTranscribing) {
                 const hasPermission = await ensureMicPermission();
                 if (hasPermission) {

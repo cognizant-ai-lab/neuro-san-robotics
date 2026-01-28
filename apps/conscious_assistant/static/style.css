@@ -803,3 +803,29 @@ footer {
     animation: transcribingPulse 1s ease-in-out infinite;
     cursor: wait;
 }
+
+/* Disabled state for input controls during robot processing */
+textarea.disabled,
+textarea:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    background: rgba(15, 20, 35, 0.4);
+}
+
+#send-button.disabled,
+#send-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
+    background: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
+    box-shadow: none;
+}
+
+.floating-mic-btn.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
+    background: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
+    box-shadow: none;
+    animation: none;
+}
