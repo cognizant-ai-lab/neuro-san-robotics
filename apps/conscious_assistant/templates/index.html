@@ -139,13 +139,14 @@
                 mediaRecorder = new MediaRecorder(stream, options);
                 
                 mediaRecorder.ondataavailable = function(event) {
+                    console.log('ondataavailable: chunk size =', event.data.size);
                     if (event.data.size > 0) {
                         audioChunks.push(event.data);
                     }
                 };
                 
                 mediaRecorder.onstop = async function() {
-                    console.log('MediaRecorder stopped, transcribing...');
+                    console.log('MediaRecorder stopped, chunks collected:', audioChunks.length);
                     isTranscribing = true;
                     document.getElementById('mic-button').classList.add('transcribing');
                     
@@ -158,7 +159,19 @@
                     // Create blob from chunks with the actual MIME type used
                     const actualMimeType = mimeType || 'audio/webm';
                     const audioBlob = new Blob(audioChunks, { type: actualMimeType });
+                    const blobSize = audioBlob.size;
                     audioChunks = [];
+                    
+                    console.log('Audio blob created: size =', blobSize, 'bytes, type =', actualMimeType);
+                    
+                    // Check if we have enough audio data (at least 1KB for meaningful speech)
+                    if (blobSize < 1000) {
+                        console.warn('Audio too short:', blobSize, 'bytes. Please hold the button longer.');
+                        alert('Recording too short. Please hold the microphone button for at least 1 second while speaking.');
+                        isTranscribing = false;
+                        document.getElementById('mic-button').classList.remove('transcribing');
+                        return;
+                    }
                     
                     // Determine file extension based on actual MIME type
                     let fileExtension = '.webm';
@@ -170,7 +183,7 @@
                         fileExtension = '.wav';
                     }
                     const filename = 'speech' + fileExtension;
-                    console.log('Audio recorded with MIME type:', actualMimeType, 'filename:', filename);
+                    console.log('Sending audio: filename =', filename, 'size =', blobSize);
                     
                     // Send to server for transcription
                     try {
