@@ -2,25 +2,29 @@
 go2_tts.py — Offline TTS for Unitree Go2 EDU speaker (Linux/Jetson) and macOS.
 
 Linux / Unitree Go2:
-- PRIMARY: Piper TTS (neural, offline, natural voice)
+- PRIMARY: Piper TTS (neural, offline, natural voice) with persistent process
 - FALLBACK: espeak-ng -> ALSA via aplay
 
 macOS:
 - Native 'say' command (truly blocking, prevents audio overlap)
 - Set GO2_MAC_VOICE env var to specify voice (e.g., "Samantha")
 
-Tested with Piper CLI requiring:
-  piper -m MODEL -c CONFIG --output-raw | aplay
+The Piper process is kept running persistently to avoid model loading latency
+on each TTS call. The model is loaded once at startup and reused for all
+subsequent speech synthesis requests.
 """
 
 import argparse
+import atexit
 import fcntl
+import json
 import logging
 import os
 import platform
 import shutil
 import subprocess
-from typing import Any, Dict
+import threading
+from typing import Any, Dict, Optional
 
 from neuro_san.interfaces.coded_tool import CodedTool
 
@@ -98,14 +102,222 @@ def _set_alsa_volume(volume_percent: int = DEFAULT_VOLUME_PERCENT) -> None:
 
 
 # ---------------------------------------------------------------------
-# Linux: Piper TTS (primary)
+# Linux: Persistent Piper TTS Process
 # ---------------------------------------------------------------------
+# Keep Piper running persistently to avoid model loading latency.
+# The model is loaded once and reused for all TTS requests.
+
+class PersistentPiper:
+    """
+    Manages a persistent Piper TTS process that keeps the model loaded in memory.
+    
+    This eliminates the model loading latency (several seconds on Jetson) that
+    occurs when spawning a new piper process for each TTS request.
+    """
+    
+    def __init__(self) -> None:
+        self._process: Optional[subprocess.Popen] = None
+        self._lock = threading.Lock()
+        self._initialized = False
+    
+    def _start_process(self) -> None:
+        """Start the persistent piper process with JSON input mode."""
+        if not _has("piper"):
+            raise RuntimeError("piper binary not found on PATH")
+        
+        if not os.path.isfile(PIPER_MODEL) or not os.path.isfile(PIPER_CONFIG):
+            raise RuntimeError(
+                f"Piper model/config not found:\n"
+                f"  MODEL={PIPER_MODEL}\n"
+                f"  CONFIG={PIPER_CONFIG}"
+            )
+        
+        piper_cmd = [
+            "piper",
+            "--model", PIPER_MODEL,
+            "--config", PIPER_CONFIG,
+            "--output-raw",
+            "--json-input",
+        ]
+        
+        logging.info("GO2_TTS: Starting persistent Piper process...")
+        self._process = subprocess.Popen(
+            piper_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self._initialized = True
+        logging.info("GO2_TTS: Persistent Piper process started (PID=%d)", self._process.pid)
+    
+    def _ensure_running(self) -> None:
+        """Ensure the piper process is running, restart if needed."""
+        if self._process is None or self._process.poll() is not None:
+            if self._process is not None:
+                logging.warning("GO2_TTS: Piper process died, restarting...")
+            self._start_process()
+    
+    def synthesize(self, text: str, alsa_device: Optional[str] = None) -> None:
+        """
+        Synthesize speech from text using the persistent piper process.
+        
+        Sends text as JSON to piper's stdin and streams the raw audio output
+        directly to aplay for immediate playback.
+        """
+        with self._lock:
+            self._ensure_running()
+            
+            device = alsa_device or DEFAULT_ALSA_DEVICE
+            
+            aplay_cmd = [
+                "aplay",
+                "-D", device,
+                "-r", "22050",
+                "-f", "S16_LE",
+                "-c", "1",
+                "-t", "raw",
+            ]
+            
+            # Send JSON input to piper
+            json_input = json.dumps({"text": text.strip()}) + "\n"
+            
+            logging.info("GO2_TTS: Synthesizing via persistent Piper...")
+            
+            try:
+                # Write to piper's stdin
+                self._process.stdin.write(json_input.encode("utf-8"))
+                self._process.stdin.flush()
+                
+                # Read the raw audio output and pipe to aplay
+                # Piper outputs raw 16-bit PCM at 22050 Hz
+                # We need to read until we get silence or a reasonable timeout
+                aplay_proc = subprocess.Popen(
+                    aplay_cmd,
+                    stdin=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                
+                # Read audio data in chunks and write to aplay
+                # Piper outputs audio for one sentence then waits for more input
+                chunk_size = 4096
+                silence_threshold = 0.1  # seconds of silence to detect end
+                sample_rate = 22050
+                bytes_per_sample = 2
+                silence_bytes = int(silence_threshold * sample_rate * bytes_per_sample)
+                
+                total_bytes = 0
+                consecutive_empty = 0
+                max_empty_reads = 10
+                
+                while True:
+                    # Non-blocking read with small timeout
+                    import select
+                    ready, _, _ = select.select([self._process.stdout], [], [], 0.05)
+                    
+                    if ready:
+                        chunk = self._process.stdout.read(chunk_size)
+                        if chunk:
+                            aplay_proc.stdin.write(chunk)
+                            aplay_proc.stdin.flush()
+                            total_bytes += len(chunk)
+                            consecutive_empty = 0
+                        else:
+                            consecutive_empty += 1
+                    else:
+                        consecutive_empty += 1
+                    
+                    # If we've read some audio and then get empty reads, we're done
+                    if total_bytes > 0 and consecutive_empty >= max_empty_reads:
+                        break
+                    
+                    # Safety timeout - if no audio after many empty reads, break
+                    if total_bytes == 0 and consecutive_empty >= 100:
+                        logging.warning("GO2_TTS: No audio received from Piper")
+                        break
+                
+                # Close aplay's stdin to signal end of audio
+                aplay_proc.stdin.close()
+                aplay_proc.wait()
+                
+                logging.info("GO2_TTS: Synthesized %d bytes of audio", total_bytes)
+                
+            except BrokenPipeError:
+                logging.error("GO2_TTS: Piper process pipe broken, will restart on next call")
+                self._process = None
+                raise RuntimeError("Piper process died unexpectedly")
+    
+    def shutdown(self) -> None:
+        """Shutdown the persistent piper process."""
+        with self._lock:
+            if self._process is not None:
+                logging.info("GO2_TTS: Shutting down persistent Piper process...")
+                try:
+                    self._process.stdin.close()
+                    self._process.terminate()
+                    self._process.wait(timeout=5)
+                except Exception as e:
+                    logging.warning("GO2_TTS: Error shutting down Piper: %s", e)
+                    try:
+                        self._process.kill()
+                    except Exception:
+                        pass
+                self._process = None
+                self._initialized = False
+
+
+# Global persistent piper instance
+_persistent_piper: Optional[PersistentPiper] = None
+_persistent_piper_lock = threading.Lock()
+
+
+def _get_persistent_piper() -> PersistentPiper:
+    """Get or create the global persistent piper instance."""
+    global _persistent_piper
+    with _persistent_piper_lock:
+        if _persistent_piper is None:
+            _persistent_piper = PersistentPiper()
+        return _persistent_piper
+
+
+def _shutdown_persistent_piper() -> None:
+    """Shutdown the persistent piper process on exit."""
+    global _persistent_piper
+    if _persistent_piper is not None:
+        _persistent_piper.shutdown()
+
+
+# Register shutdown handler
+atexit.register(_shutdown_persistent_piper)
+
 
 def _linux_say_via_piper(
     text: str,
     volume: float = 1.0,
     alsa_device: str | None = None,
 ) -> None:
+    """
+    Synthesize speech using the persistent Piper process.
+    
+    Falls back to spawning a new process if the persistent approach fails.
+    """
+    # Set ALSA volume before playback
+    volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
+    _set_alsa_volume(volume_percent)
+    
+    try:
+        piper = _get_persistent_piper()
+        piper.synthesize(text, alsa_device)
+    except Exception as e:
+        logging.warning("GO2_TTS: Persistent Piper failed (%s), falling back to subprocess", e)
+        _linux_say_via_piper_subprocess(text, volume, alsa_device)
+
+
+def _linux_say_via_piper_subprocess(
+    text: str,
+    volume: float = 1.0,
+    alsa_device: str | None = None,
+) -> None:
+    """Fallback: spawn a new piper process for each TTS request."""
     if not _has("piper"):
         raise RuntimeError("piper binary not found on PATH")
 
@@ -118,15 +330,10 @@ def _linux_say_via_piper(
 
     device = alsa_device or DEFAULT_ALSA_DEVICE
 
-    # Set ALSA volume before playback to ensure consistent volume
-    # This prevents volume drift that can occur on some systems
-    volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
-    _set_alsa_volume(volume_percent)
-
     piper_cmd = [
         "piper",
-        "-m", PIPER_MODEL,
-        "-c", PIPER_CONFIG,
+        "--model", PIPER_MODEL,
+        "--config", PIPER_CONFIG,
         "--output-raw",
     ]
 
@@ -135,15 +342,13 @@ def _linux_say_via_piper(
         "-D", device,
         "-r", "22050",
         "-f", "S16_LE",
-        "-c", "1",  # Mono output (Piper outputs mono audio)
+        "-c", "1",
         "-t", "raw",
     ]
 
-    logging.info("GO2_TTS: Piper -> aplay (%s) at %d%% volume", device, volume_percent)
+    logging.info("GO2_TTS: Piper subprocess -> aplay (%s)", device)
 
-    # Stream audio directly from piper to aplay for low-latency playback.
-    # This allows audio to start playing as soon as piper begins generating,
-    # rather than waiting for all audio to be synthesized first.
+    # Stream audio directly from piper to aplay
     piper_proc = subprocess.Popen(
         piper_cmd,
         stdin=subprocess.PIPE,
@@ -157,14 +362,10 @@ def _linux_say_via_piper(
         stderr=subprocess.PIPE,
     )
 
-    # Close piper's stdout in parent so aplay receives EOF when piper finishes
     piper_proc.stdout.close()
-
-    # Send text to piper and close stdin to signal end of input
     piper_proc.stdin.write((text.strip() + "\n").encode("utf-8"))
     piper_proc.stdin.close()
 
-    # Wait for both processes to complete
     aplay_proc.wait()
     piper_returncode = piper_proc.wait()
 
