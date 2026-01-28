@@ -141,7 +141,9 @@ def _linux_say_via_piper(
 
     logging.info("GO2_TTS: Piper -> aplay (%s) at %d%% volume", device, volume_percent)
 
-    # IMPORTANT: newline + communicate()
+    # Stream audio directly from piper to aplay for low-latency playback.
+    # This allows audio to start playing as soon as piper begins generating,
+    # rather than waiting for all audio to be synthesized first.
     piper_proc = subprocess.Popen(
         piper_cmd,
         stdin=subprocess.PIPE,
@@ -149,20 +151,28 @@ def _linux_say_via_piper(
         stderr=subprocess.PIPE,
     )
 
-    piper_input = (text.strip() + "\n").encode("utf-8")
-
-    stdout, stderr = piper_proc.communicate(input=piper_input)
-
-    if piper_proc.returncode != 0:
-        raise RuntimeError(
-            f"Piper failed (rc={piper_proc.returncode}): {stderr.decode(errors='ignore')}"
-        )
-
-    subprocess.run(
+    aplay_proc = subprocess.Popen(
         aplay_cmd,
-        input=stdout,
-        check=True,
+        stdin=piper_proc.stdout,
+        stderr=subprocess.PIPE,
     )
+
+    # Close piper's stdout in parent so aplay receives EOF when piper finishes
+    piper_proc.stdout.close()
+
+    # Send text to piper and close stdin to signal end of input
+    piper_proc.stdin.write((text.strip() + "\n").encode("utf-8"))
+    piper_proc.stdin.close()
+
+    # Wait for both processes to complete
+    aplay_proc.wait()
+    piper_returncode = piper_proc.wait()
+
+    if piper_returncode != 0:
+        stderr_output = piper_proc.stderr.read().decode(errors="ignore") if piper_proc.stderr else ""
+        raise RuntimeError(
+            f"Piper failed (rc={piper_returncode}): {stderr_output}"
+        )
 
 
 # ---------------------------------------------------------------------
