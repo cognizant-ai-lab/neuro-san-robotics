@@ -282,6 +282,8 @@ def conscious_thinking_process():
                 if thoughts is None:
                     continue
                 thoughts = f"\n{timestamp} user: " + "[Silence]"
+                # Emit processing_started for silence-triggered processing
+                socketio.emit("processing_started", namespace="/chat")
 
             thoughts, conscious_thread = conscious_thinker(conscious_session, conscious_thread, thoughts)
             print(thoughts)
@@ -332,6 +334,9 @@ def conscious_thinking_process():
                 logging.info("Waiting for TTS playback to complete...")
                 speech_queue.join()
                 logging.info("TTS playback complete, ready for next turn")
+            
+            # Signal that processing is complete and user can send new input
+            socketio.emit("processing_complete", namespace="/chat")
 
 
 @socketio.on("connect", namespace="/chat")
