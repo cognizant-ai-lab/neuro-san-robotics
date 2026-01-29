@@ -387,6 +387,12 @@ def transcribe_audio():
     if file_size == 0:
         return jsonify({"error": "Audio file is empty"}), 400
     
+    # Minimum file size check - very short recordings produce corrupted files
+    MIN_AUDIO_SIZE = 1000  # 1KB minimum
+    if file_size < MIN_AUDIO_SIZE:
+        logging.warning("Audio file too small (%d bytes), likely a quick tap", file_size)
+        return jsonify({"error": "Recording too short. Please hold the mic button longer."}), 400
+    
     temp_file = None
     try:
         suffix = ".webm"  # Default to webm
