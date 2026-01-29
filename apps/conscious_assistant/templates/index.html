@@ -76,6 +76,9 @@
         var whisperStream = null;
         var isTranscribing = false;
         var AUTO_SEND = true;  // Auto-send transcription when recording stops
+        var recordingStartTime = 0;  // Track when recording started
+        var MIN_RECORDING_DURATION_MS = 300;  // Minimum recording duration in milliseconds
+        var MIN_AUDIO_SIZE_BYTES = 1000;  // Minimum audio blob size in bytes
 
         // Pre-warm microphone permission on first use
         async function ensureMicPermission() {
@@ -143,19 +146,43 @@
                 };
                 
                 mediaRecorder.onstop = async function() {
-                    console.log('MediaRecorder stopped, transcribing...');
-                    isTranscribing = true;
-                    document.getElementById('floating-mic-button').classList.add('transcribing');
+                    console.log('MediaRecorder stopped, processing...');
                     
-                    // Stop all tracks
+                    // Stop all tracks first
                     if (whisperStream) {
                         whisperStream.getTracks().forEach(track => track.stop());
                         whisperStream = null;
                     }
                     
+                    // Check recording duration
+                    var recordingDuration = Date.now() - recordingStartTime;
+                    console.log('Recording duration: ' + recordingDuration + 'ms, chunks: ' + audioChunks.length);
+                    
+                    if (recordingDuration < MIN_RECORDING_DURATION_MS) {
+                        console.log('Recording too short (' + recordingDuration + 'ms < ' + MIN_RECORDING_DURATION_MS + 'ms), discarding');
+                        audioChunks = [];
+                        return;
+                    }
+                    
+                    // Check if we have any audio chunks
+                    if (audioChunks.length === 0) {
+                        console.log('No audio chunks recorded, discarding');
+                        return;
+                    }
+                    
                     // Create blob from chunks
                     const audioBlob = new Blob(audioChunks, { type: mimeType || 'audio/webm' });
                     audioChunks = [];
+                    
+                    // Check minimum audio size
+                    if (audioBlob.size < MIN_AUDIO_SIZE_BYTES) {
+                        console.log('Audio too small (' + audioBlob.size + ' bytes < ' + MIN_AUDIO_SIZE_BYTES + ' bytes), discarding');
+                        return;
+                    }
+                    
+                    console.log('Audio blob size: ' + audioBlob.size + ' bytes, transcribing...');
+                    isTranscribing = true;
+                    document.getElementById('floating-mic-button').classList.add('transcribing');
                     
                     // Send to server for transcription
                     try {
@@ -199,6 +226,7 @@
                 // Start recording with timeslice for more frequent data chunks (every 100ms)
                 mediaRecorder.start(100);
                 isRecording = true;
+                recordingStartTime = Date.now();
                 document.getElementById('floating-mic-button').classList.add('recording');
                 console.log('Whisper recording started with optimized settings');
                 
