@@ -1,9 +1,5 @@
 import atexit
 
-import io
-import shutil
-import subprocess
-
 import logging
 import os
 import queue
@@ -27,6 +23,10 @@ from flask_socketio import SocketIO
 from apps.conscious_assistant.conscious_assistant import conscious_thinker
 from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
 from apps.conscious_assistant.conscious_assistant import tear_down_conscious_assistant
+import shutil
+import mimetypes
+import subprocess
+
 
 
 # SSL certificate paths
@@ -362,17 +362,14 @@ def index():
 @app.route("/api/transcribe", methods=["POST"])
 def transcribe_audio():
     """
-    Transcribe audio using OpenAI Whisper API.
+    Robust audio transcription endpoint.
 
-    Expects a multipart/form-data POST with an 'audio' file.
-    Returns JSON with 'text' field containing the transcription.
-
-    Notes:
-    - Browsers may upload different containers (webm/ogg/m4a/wav).
-    - OpenAI's transcription endpoint is sensitive to container/codec.
-    - On Jetson/Linux, we've seen uploads with missing/incorrect extensions.
-      We therefore (1) sniff magic bytes, and (2) optionally transcode to WAV
-      via ffmpeg for maximum compatibility.
+    Key fixes for Jetson/robot:
+    - Do NOT use audio_file.seek()/tell() on Werkzeug FileStorage (not reliable on all setups).
+    - Read bytes from audio_file.stream once, then write to a temp file.
+    - Detect extension from magic bytes + mimetype, not just filename.
+    - If ffmpeg can decode, transcode to canonical WAV (mono, 16k) for Whisper.
+    - If ffmpeg can't decode, still send original bytes with explicit filename+mime tuple.
     """
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
@@ -384,12 +381,17 @@ def transcribe_audio():
         return jsonify({"error": "No audio file provided"}), 400
 
     audio_file = request.files["audio"]
-    if not getattr(audio_file, "filename", ""):
-        # Some browsers send an empty filename; we can still handle it.
-        audio_file.filename = "audio"
+    filename = (getattr(audio_file, "filename", "") or "").strip()
+    mimetype = (getattr(audio_file, "mimetype", "") or "").strip().lower()
 
-    # Read bytes once so we can sniff + (optionally) transcode.
-    data = audio_file.read()
+    # Read bytes safely (works across platforms)
+    try:
+        if hasattr(audio_file, "stream") and hasattr(audio_file.stream, "seek"):
+            audio_file.stream.seek(0)
+        data = audio_file.stream.read() if hasattr(audio_file, "stream") else audio_file.read()
+    except Exception:
+        data = audio_file.read()
+
     if not data:
         return jsonify({"error": "Audio file is empty"}), 400
 
@@ -397,141 +399,117 @@ def transcribe_audio():
     if len(data) > MAX_FILE_SIZE:
         return jsonify({"error": f"Audio file too large. Maximum size is 25MB, got {len(data) / 1024 / 1024:.1f}MB"}), 413
 
-    # ----------------------------
-    # Detect container by magic bytes
-    # ----------------------------
-    def _detect_ext_and_mime(b: bytes) -> tuple[str, str]:
-        if b.startswith(b"RIFF") and b[8:12] == b"WAVE":
+    def detect_ext_and_mime(buf: bytes) -> tuple[str, str]:
+        # WAV: RIFF....WAVE
+        if len(buf) >= 12 and buf[0:4] == b"RIFF" and buf[8:12] == b"WAVE":
             return ".wav", "audio/wav"
-        if b.startswith(b"ID3") or b[:2] == b"\xff\xfb":
-            return ".mp3", "audio/mpeg"
-        if b.startswith(b"fLaC"):
-            return ".flac", "audio/flac"
-        if b.startswith(b"OggS"):
-            # Could be ogg/opus (oga/ogg). Use .ogg.
+        # OGG container: OggS
+        if len(buf) >= 4 and buf[0:4] == b"OggS":
             return ".ogg", "audio/ogg"
-        if b[:4] == b"ftyp":
-            # very small/odd files can start with ftyp directly if truncated header
-            return ".m4a", "audio/mp4"
-        if len(b) >= 12 and b[4:8] == b"ftyp":
-            # ISO BMFF (m4a/mp4)
-            return ".m4a", "audio/mp4"
-        if b[:4] == b"\x1aE\xdf\xa3":
-            # Matroska/WebM
+        # WebM/Matroska EBML header: 1A45DFA3
+        if len(buf) >= 4 and buf[0:4] == b"\x1A\x45\xDF\xA3":
             return ".webm", "audio/webm"
-        return "", "application/octet-stream"
+        # MP3: ID3 or frame sync
+        if len(buf) >= 3 and buf[0:3] == b"ID3":
+            return ".mp3", "audio/mpeg"
+        if len(buf) >= 2 and buf[0] == 0xFF and (buf[1] & 0xE0) == 0xE0:
+            return ".mp3", "audio/mpeg"
+        # MP4/M4A: ....ftyp
+        if len(buf) >= 12 and buf[4:8] == b"ftyp":
+            return ".m4a", "audio/mp4"
 
-    guessed_ext, guessed_mime = _detect_ext_and_mime(data)
+        # Fall back to mimetype
+        if mimetype:
+            if "wav" in mimetype:
+                return ".wav", "audio/wav"
+            if "ogg" in mimetype or "opus" in mimetype:
+                return ".ogg", "audio/ogg"
+            if "webm" in mimetype:
+                return ".webm", "audio/webm"
+            if "mpeg" in mimetype or "mp3" in mimetype:
+                return ".mp3", "audio/mpeg"
+            if "mp4" in mimetype or "m4a" in mimetype:
+                return ".m4a", "audio/mp4"
 
-    # Prefer original filename extension if it's one of the supported set.
-    supported_exts = {".wav", ".mp3", ".m4a", ".mp4", ".mpeg", ".mpga", ".oga", ".ogg", ".webm", ".flac"}
-    orig = (audio_file.filename or "").lower()
-    orig_ext = os.path.splitext(orig)[1] if orig else ""
-    if orig_ext in supported_exts:
-        ext = orig_ext
-    elif guessed_ext in supported_exts:
-        ext = guessed_ext
-    else:
-        # Default (most common from MediaRecorder on Chrome)
-        ext = ".webm"
+        # Fall back to filename extension if present
+        ext = (Path(filename).suffix.lower() if filename else "")
+        if ext in {".wav", ".mp3", ".m4a", ".mp4", ".webm", ".ogg", ".oga"}:
+            guessed = mimetypes.guess_type("audio"+ext)[0] or "application/octet-stream"
+            return ext, guessed
 
-    # Debug info (helps when robot/Linux behaves differently)
+        return ".webm", "audio/webm"
+
+    ext, mime = detect_ext_and_mime(data)
+
+    tmp_in = None
+    tmp_wav = None
     try:
-        logging.info(
-            "Transcribe upload: filename=%s mimetype=%s size=%dB magic=%s ext=%s",
-            audio_file.filename,
-            getattr(audio_file, "mimetype", None),
-            len(data),
-            data[:16].hex(),
-            ext,
-        )
-    except Exception:
-        pass
+        tmp_in = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+        tmp_in.write(data)
+        tmp_in.flush()
+        tmp_in.close()
 
-    # ----------------------------
-    # Optional ffmpeg transcode -> WAV (most compatible)
-    # ----------------------------
-    # On some Jetson builds, ffmpeg can fail to auto-detect the container
-    # if the filename extension is missing or if the browser sends OGG/OPUS.
-    # We try to transcode to 16kHz mono WAV; if it fails, we fall back to the original.
-    wav_data: bytes | None = None
-    if shutil.which("ffmpeg"):
-        try:
+        send_path = tmp_in.name
+        send_name = f"audio{ext}"
+        send_mime = mime
+
+        # Try to transcode to WAV for maximum Whisper compatibility
+        if shutil.which("ffmpeg"):
+            tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+            tmp_wav.close()
+
             ffmpeg_cmd = [
                 "ffmpeg",
-                "-hide_banner",
-                "-loglevel", "error",
-                "-i", "pipe:0",
+                "-nostdin",
+                "-y",
+                "-i", tmp_in.name,
                 "-ac", "1",
                 "-ar", "16000",
                 "-f", "wav",
-                "pipe:1",
+                tmp_wav.name,
             ]
-            proc = subprocess.run(
-                ffmpeg_cmd,
-                input=data,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            if proc.returncode == 0 and proc.stdout.startswith(b"RIFF"):
-                wav_data = proc.stdout
+            proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+            if proc.returncode == 0 and os.path.exists(tmp_wav.name) and os.path.getsize(tmp_wav.name) > 44:
+                send_path = tmp_wav.name
+                send_name = "audio.wav"
+                send_mime = "audio/wav"
             else:
-                logging.warning(
-                    "ffmpeg transcode skipped/failed (rc=%s). stderr=%s",
-                    proc.returncode,
-                    proc.stderr.decode(errors="ignore")[:400],
-                )
-        except Exception as e:
-            logging.warning("ffmpeg transcode exception: %s", e)
+                tail = (proc.stderr or "")[-1200:]
+                logging.warning("ffmpeg transcode skipped/failed (rc=%s). stderr=%s", proc.returncode, tail)
 
-    # Build a file-like object with a real filename for OpenAI
-    from openai import OpenAI
-    client = OpenAI(api_key=openai_api_key)
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_api_key)
 
-    # If we successfully transcoded, always send WAV.
-    if wav_data:
-        bio = io.BytesIO(wav_data)
-        bio.name = "audio.wav"
-        mime = "audio/wav"
-    else:
-        bio = io.BytesIO(data)
-        bio.name = f"audio{ext}"
-        # best-effort mime
-        mime = guessed_mime if guessed_mime != "application/octet-stream" else {
-            ".webm": "audio/webm",
-            ".ogg": "audio/ogg",
-            ".oga": "audio/ogg",
-            ".mp3": "audio/mpeg",
-            ".m4a": "audio/mp4",
-            ".mp4": "audio/mp4",
-            ".wav": "audio/wav",
-            ".flac": "audio/flac",
-        }.get(ext, "application/octet-stream")
+        with open(send_path, "rb") as f:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=(send_name, f, send_mime),
+            )
 
-    bio.seek(0)
-
-    try:
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=bio,
-            language="en",
-        )
         return jsonify({"text": transcript.text})
+
     except Exception as e:
         logging.exception("OpenAI transcription failed")
-        # Include a small amount of debugging info (but not the audio) for triage.
+        # Include minimal debug hints (safe)
         return jsonify({
             "error": f"Transcription failed: {str(e)}",
-            "details": {
-                "uploaded_filename": audio_file.filename,
-                "uploaded_mimetype": getattr(audio_file, "mimetype", None),
-                "bytes": len(data),
-                "sent_as": getattr(bio, "name", None),
-                "sent_mime": mime,
-                "used_ffmpeg_wav": bool(wav_data),
-            },
+            "debug": {
+                "uploaded_filename": filename,
+                "uploaded_mimetype": mimetype,
+                "detected_ext": ext,
+                "sent_name": send_name if "send_name" in locals() else None,
+                "sent_mime": send_mime if "send_mime" in locals() else None,
+                "bytes": len(data) if data is not None else None,
+            }
         }), 500
+
+    finally:
+        for tf in (tmp_in, tmp_wav):
+            try:
+                if tf and os.path.exists(tf.name):
+                    os.unlink(tf.name)
+            except Exception:
+                pass
 
 
 @socketio.on("user_input", namespace="/chat")
