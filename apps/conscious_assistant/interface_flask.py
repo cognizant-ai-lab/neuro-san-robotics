@@ -395,6 +395,12 @@ def transcribe_audio():
     if not data:
         return jsonify({"error": "Audio file is empty"}), 400
 
+    # Minimum file size check - very short recordings produce corrupted files
+    MIN_AUDIO_SIZE = 1000  # 1KB minimum
+    if len(data) < MIN_AUDIO_SIZE:
+        logging.warning("Audio file too small (%d bytes), likely a quick tap", len(data))
+        return jsonify({"error": "Recording too short. Please hold the mic button longer."}), 400
+
     MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
     if len(data) > MAX_FILE_SIZE:
         return jsonify({"error": f"Audio file too large. Maximum size is 25MB, got {len(data) / 1024 / 1024:.1f}MB"}), 413
