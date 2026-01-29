@@ -62,7 +62,8 @@
         // var socket = io.connect('http://' + document.domain + ':' + location.port + '/chat');
         const socket = io("/chat", {
             path: "/socket.io",
-            transports: ["websocket", "polling"],
+            transports: ["polling"],
+            upgrade: false,
         });
         var thoughtsInitialized = false;
         var chatHistoryInitialized = false;
