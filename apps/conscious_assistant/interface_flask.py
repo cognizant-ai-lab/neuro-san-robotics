@@ -319,21 +319,22 @@ def conscious_thinking_process():
                 )
 
             if speeches_to_emit:
+                # Speak first, then write to chat window
+                # Queue each speech block for audio playback
+                for speech_text in speeches_to_emit:
+                    speech_queue.put(speech_text)
+                
+                # Wait for all speech to complete before showing in chat
+                logging.info("Waiting for TTS playback to complete...")
+                speech_queue.join()
+                logging.info("TTS playback complete, now updating chat window")
+                
+                # Now emit to chat window after speech is done
                 socketio.emit(
                     "update_speech",
                     {"data": "\n".join(speeches_to_emit)},
                     namespace="/chat",
                 )
-                # Hardwired TTS: Queue each speech block for audio playback
-                for speech_text in speeches_to_emit:
-                    speech_queue.put(speech_text)
-                
-                # Wait for all speech to complete before continuing to next turn
-                # This prevents the agent from starting a new conversation turn
-                # while the robot is still speaking the previous response
-                logging.info("Waiting for TTS playback to complete...")
-                speech_queue.join()
-                logging.info("TTS playback complete, ready for next turn")
             
             # Signal that processing is complete and user can send new input
             socketio.emit("processing_complete", namespace="/chat")
