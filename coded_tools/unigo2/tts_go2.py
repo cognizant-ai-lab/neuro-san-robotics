@@ -112,16 +112,16 @@ def sanitize_tts_text(text: str) -> str:
     return result.strip()
 
 
-def split_into_chunks(text: str, max_chunk_size: int = 200) -> List[str]:
+def split_into_chunks(text: str, max_chunk_size: int = 50) -> List[str]:
     """
-    Split text into chunks for progressive TTS playback.
+    Split text into small phrase-level chunks for fast TTS playback.
 
-    Splits on sentence boundaries (., !, ?) to create natural pauses.
-    If a sentence is too long, it will be split on commas or spaces.
+    Uses small chunks (~50 chars, ~8-10 words) so the first audio plays
+    quickly. Splits on natural boundaries: sentence ends, commas, then spaces.
 
     Args:
         text: Text to split
-        max_chunk_size: Maximum characters per chunk (default 200)
+        max_chunk_size: Maximum characters per chunk (default 50 for fast response)
 
     Returns:
         List of text chunks
@@ -129,49 +129,27 @@ def split_into_chunks(text: str, max_chunk_size: int = 200) -> List[str]:
     if not text:
         return []
 
-    # First, split on sentence boundaries
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+    words = text.split()
+    if not words:
+        return []
 
     chunks = []
     current_chunk = ""
 
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
+    for word in words:
+        # Check if adding this word would exceed max size
+        test_chunk = (current_chunk + " " + word).strip() if current_chunk else word
 
-        # If adding this sentence would exceed max size, save current chunk
-        if current_chunk and len(current_chunk) + len(sentence) + 1 > max_chunk_size:
-            chunks.append(current_chunk.strip())
-            current_chunk = ""
-
-        # If the sentence itself is too long, split it further
-        if len(sentence) > max_chunk_size:
-            # Try splitting on commas first
-            parts = re.split(r',\s*', sentence)
-            for part in parts:
-                part = part.strip()
-                if not part:
-                    continue
-                if current_chunk and len(current_chunk) + len(part) + 1 > max_chunk_size:
-                    chunks.append(current_chunk.strip())
-                    current_chunk = ""
-                if len(part) > max_chunk_size:
-                    # Last resort: split on spaces
-                    words = part.split()
-                    for word in words:
-                        if current_chunk and len(current_chunk) + len(word) + 1 > max_chunk_size:
-                            chunks.append(current_chunk.strip())
-                            current_chunk = ""
-                        current_chunk = (current_chunk + " " + word).strip()
-                else:
-                    current_chunk = (current_chunk + " " + part).strip()
+        if len(test_chunk) > max_chunk_size and current_chunk:
+            # Save current chunk and start a new one
+            chunks.append(current_chunk)
+            current_chunk = word
         else:
-            current_chunk = (current_chunk + " " + sentence).strip()
+            current_chunk = test_chunk
 
     # Don't forget the last chunk
     if current_chunk:
-        chunks.append(current_chunk.strip())
+        chunks.append(current_chunk)
 
     return chunks
 
@@ -479,13 +457,14 @@ def say_streaming(
     volume: float = 1.0,
     voice: str = "en-gb+f3",
     alsa_device: str | None = None,
-    max_chunk_size: int = 200,
+    max_chunk_size: int = 50,
     on_chunk_start: Optional[Callable[[str, int, int], None]] = None,
 ) -> None:
     """
     Speak text using streaming TTS with parallel conversion.
 
     Converts chunk N+1 in background while playing chunk N, reducing latency.
+    Uses small chunks (~50 chars) for fast initial response.
     Optionally calls a callback when each chunk starts playing (for UI updates).
 
     Args:
@@ -494,7 +473,7 @@ def say_streaming(
         volume: Volume level 0.0-1.0 (default 1.0)
         voice: Voice name for espeak fallback (default "en-gb+f3")
         alsa_device: ALSA device for Linux (default from env var)
-        max_chunk_size: Maximum characters per chunk
+        max_chunk_size: Maximum characters per chunk (default 50 for fast response)
         on_chunk_start: Callback(chunk_text, chunk_index, total_chunks) called
                         when each chunk starts playing
     """
@@ -616,7 +595,7 @@ def say(
     voice: str = "en-gb+f3",
     alsa_device: str | None = None,
     chunked: bool = True,
-    max_chunk_size: int = 200,
+    max_chunk_size: int = 50,
     on_chunk_start: Optional[Callable[[str, int, int], None]] = None,
 ) -> None:
     """
@@ -624,6 +603,7 @@ def say(
 
     When chunked=True (default), uses streaming TTS with parallel conversion
     to minimize latency - converts chunk N+1 while playing chunk N.
+    Uses small chunks (~50 chars) for fast initial response.
 
     Args:
         text: Text to speak (will be sanitized to remove symbols/formatting)
@@ -632,7 +612,7 @@ def say(
         voice: Voice name for espeak fallback (default "en-gb+f3")
         alsa_device: ALSA device for Linux (default from env var)
         chunked: If True, use streaming TTS with parallel conversion
-        max_chunk_size: Maximum characters per chunk when chunked=True
+        max_chunk_size: Maximum characters per chunk (default 50 for fast response)
         on_chunk_start: Callback(chunk_text, chunk_index, total_chunks) called
                         when each chunk starts playing (only when chunked=True)
     """
