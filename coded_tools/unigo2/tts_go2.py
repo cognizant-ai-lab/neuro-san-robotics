@@ -23,10 +23,12 @@ import fcntl
 import logging
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
-from typing import Any, Dict, List
+import threading
+from typing import Any, Callable, Dict, List, Optional
 
 from neuro_san.interfaces.coded_tool import CodedTool
 
@@ -185,32 +187,33 @@ def _has(cmd: str) -> bool:
 def _set_alsa_volume(volume_percent: int = DEFAULT_VOLUME_PERCENT) -> None:
     """
     Set ALSA mixer volume before playback to ensure consistent volume.
-    
+
     This helps prevent volume drift that can occur on some systems where
     other processes may adjust mixer levels between playbacks.
-    
+
     Args:
         volume_percent: Volume level 0-100 (default from GO2_TTS_VOLUME env var)
     """
     if not _has("amixer"):
         logging.debug("amixer not found, skipping volume set")
         return
-    
+
     volume_percent = max(0, min(100, volume_percent))
-    
+
     # Try common mixer control names
     controls_to_try = [ALSA_MIXER_CONTROL]
     if ALSA_MIXER_CONTROL != "Master":
         controls_to_try.append("Master")
     if ALSA_MIXER_CONTROL != "PCM":
         controls_to_try.append("PCM")
-    
+
     for control in controls_to_try:
         try:
             result = subprocess.run(
                 ["amixer", "set", control, f"{volume_percent}%"],
                 capture_output=True,
                 timeout=2,
+                check=False,
             )
             if result.returncode == 0:
                 logging.debug("Set %s volume to %d%%", control, volume_percent)
@@ -218,7 +221,7 @@ def _set_alsa_volume(volume_percent: int = DEFAULT_VOLUME_PERCENT) -> None:
         except Exception as e:
             logging.debug("Failed to set %s volume: %s", control, e)
             continue
-    
+
     logging.debug("Could not set ALSA volume (tried: %s)", controls_to_try)
 
 
@@ -350,6 +353,83 @@ def _mac_say_via_subprocess(
 
 
 # ---------------------------------------------------------------------
+# Audio Conversion (for parallel processing)
+# ---------------------------------------------------------------------
+
+def _convert_text_to_audio_piper(text: str) -> bytes:
+    """
+    Convert text to raw audio bytes using Piper TTS.
+
+    This function only converts - it does NOT play the audio.
+    Used for parallel conversion while another chunk is playing.
+
+    Args:
+        text: Text to convert (should already be sanitized)
+
+    Returns:
+        Raw audio bytes (22050 Hz, 16-bit signed LE, mono)
+
+    Raises:
+        RuntimeError: If Piper is not available or conversion fails
+    """
+    if not _has("piper"):
+        raise RuntimeError("piper binary not found on PATH")
+
+    if not os.path.isfile(PIPER_MODEL) or not os.path.isfile(PIPER_CONFIG):
+        raise RuntimeError(
+            f"Piper model/config not found:\n"
+            f"  MODEL={PIPER_MODEL}\n"
+            f"  CONFIG={PIPER_CONFIG}"
+        )
+
+    piper_cmd = [
+        "piper",
+        "-m", PIPER_MODEL,
+        "-c", PIPER_CONFIG,
+        "--output-raw",
+    ]
+
+    piper_proc = subprocess.Popen(
+        piper_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    piper_input = (text.strip() + "\n").encode("utf-8")
+    stdout, stderr = piper_proc.communicate(input=piper_input)
+
+    if piper_proc.returncode != 0:
+        raise RuntimeError(
+            f"Piper failed (rc={piper_proc.returncode}): {stderr.decode(errors='ignore')}"
+        )
+
+    return stdout
+
+
+def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None:
+    """
+    Play raw audio bytes via aplay.
+
+    Args:
+        audio_data: Raw audio bytes (22050 Hz, 16-bit signed LE, mono)
+        alsa_device: ALSA device to use (default from env var)
+    """
+    device = alsa_device or DEFAULT_ALSA_DEVICE
+
+    aplay_cmd = [
+        "aplay",
+        "-D", device,
+        "-r", "22050",
+        "-f", "S16_LE",
+        "-c", "1",
+        "-t", "raw",
+    ]
+
+    subprocess.run(aplay_cmd, input=audio_data, check=True)
+
+
+# ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
 
@@ -393,6 +473,142 @@ def _say_single_chunk(
     raise RuntimeError(f"TTS not supported on OS={system}")
 
 
+def say_streaming(
+    text: str,
+    rate: int = 150,
+    volume: float = 1.0,
+    voice: str = "en-gb+f3",
+    alsa_device: str | None = None,
+    max_chunk_size: int = 200,
+    on_chunk_start: Optional[Callable[[str, int, int], None]] = None,
+) -> None:
+    """
+    Speak text using streaming TTS with parallel conversion.
+
+    Converts chunk N+1 in background while playing chunk N, reducing latency.
+    Optionally calls a callback when each chunk starts playing (for UI updates).
+
+    Args:
+        text: Text to speak (will be sanitized to remove symbols/formatting)
+        rate: Speech rate (words per minute, default 150)
+        volume: Volume level 0.0-1.0 (default 1.0)
+        voice: Voice name for espeak fallback (default "en-gb+f3")
+        alsa_device: ALSA device for Linux (default from env var)
+        max_chunk_size: Maximum characters per chunk
+        on_chunk_start: Callback(chunk_text, chunk_index, total_chunks) called
+                        when each chunk starts playing
+    """
+    system = platform.system()
+
+    # Sanitize text to remove symbols that cause TTS issues
+    clean_text = sanitize_tts_text(text)
+    if not clean_text:
+        logging.warning("TTS: Empty text after sanitization, skipping")
+        return
+
+    # Split into chunks
+    chunks = split_into_chunks(clean_text, max_chunk_size)
+    if not chunks:
+        return
+
+    logging.info("TTS streaming: %d chunks to speak", len(chunks))
+
+    # Set ALSA volume once at the start
+    volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
+    _set_alsa_volume(volume_percent)
+
+    with open(TTS_LOCK_FILE, "w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            if system == "Linux" and _has("piper"):
+                # Use parallel conversion for Piper TTS
+                _say_streaming_piper(
+                    chunks, alsa_device, on_chunk_start
+                )
+            else:
+                # Fallback: sequential playback for other systems
+                for i, chunk in enumerate(chunks):
+                    if on_chunk_start:
+                        on_chunk_start(chunk, i, len(chunks))
+                    _say_single_chunk(
+                        chunk,
+                        rate=rate,
+                        volume=volume,
+                        voice=voice,
+                        alsa_device=alsa_device,
+                    )
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _say_streaming_piper(
+    chunks: List[str],
+    alsa_device: str | None,
+    on_chunk_start: Optional[Callable[[str, int, int], None]],
+) -> None:
+    """
+    Stream TTS using Piper with parallel conversion.
+
+    Converts chunk N+1 while playing chunk N for minimal latency.
+    """
+    total_chunks = len(chunks)
+    audio_queue: queue.Queue[Optional[tuple]] = queue.Queue(maxsize=2)
+    conversion_error: List[Exception] = []
+
+    def convert_worker():
+        """Background worker that converts chunks to audio."""
+        try:
+            for i, chunk in enumerate(chunks):
+                logging.debug("Converting chunk %d/%d: %s...",
+                              i + 1, total_chunks, chunk[:30])
+                try:
+                    audio_data = _convert_text_to_audio_piper(chunk)
+                    audio_queue.put((i, chunk, audio_data))
+                except Exception as e:
+                    logging.exception("Failed to convert chunk %d", i)
+                    conversion_error.append(e)
+                    audio_queue.put(None)
+                    return
+            audio_queue.put(None)  # Signal end of conversion
+        except Exception as e:
+            logging.exception("Conversion worker error")
+            conversion_error.append(e)
+            audio_queue.put(None)
+
+    # Start conversion in background thread
+    converter_thread = threading.Thread(target=convert_worker, daemon=True)
+    converter_thread.start()
+
+    # Play audio as it becomes available
+    while True:
+        item = audio_queue.get()
+        if item is None:
+            break
+
+        chunk_idx, chunk_text, audio_data = item
+        logging.debug("Playing chunk %d/%d", chunk_idx + 1, total_chunks)
+
+        # Call the callback before playing (for UI updates)
+        if on_chunk_start:
+            try:
+                on_chunk_start(chunk_text, chunk_idx, total_chunks)
+            except Exception as e:
+                logging.exception("on_chunk_start callback failed")
+
+        # Play the audio
+        try:
+            _play_audio_bytes(audio_data, alsa_device)
+        except Exception as e:
+            logging.exception("Failed to play chunk %d", chunk_idx)
+
+    # Wait for converter to finish
+    converter_thread.join(timeout=5.0)
+
+    # Re-raise any conversion errors
+    if conversion_error:
+        raise conversion_error[0]
+
+
 def say(
     text: str,
     rate: int = 150,
@@ -401,9 +617,13 @@ def say(
     alsa_device: str | None = None,
     chunked: bool = True,
     max_chunk_size: int = 200,
+    on_chunk_start: Optional[Callable[[str, int, int], None]] = None,
 ) -> None:
     """
     Speak text using TTS with automatic sanitization and optional chunking.
+
+    When chunked=True (default), uses streaming TTS with parallel conversion
+    to minimize latency - converts chunk N+1 while playing chunk N.
 
     Args:
         text: Text to speak (will be sanitized to remove symbols/formatting)
@@ -411,34 +631,32 @@ def say(
         volume: Volume level 0.0-1.0 (default 1.0)
         voice: Voice name for espeak fallback (default "en-gb+f3")
         alsa_device: ALSA device for Linux (default from env var)
-        chunked: If True, split long text into chunks for faster initial response
+        chunked: If True, use streaming TTS with parallel conversion
         max_chunk_size: Maximum characters per chunk when chunked=True
+        on_chunk_start: Callback(chunk_text, chunk_index, total_chunks) called
+                        when each chunk starts playing (only when chunked=True)
     """
-    # Sanitize text to remove symbols that cause TTS issues
-    clean_text = sanitize_tts_text(text)
-    if not clean_text:
-        logging.warning("TTS: Empty text after sanitization, skipping")
-        return
+    if chunked:
+        # Use streaming TTS with parallel conversion
+        say_streaming(
+            text=text,
+            rate=rate,
+            volume=volume,
+            voice=voice,
+            alsa_device=alsa_device,
+            max_chunk_size=max_chunk_size,
+            on_chunk_start=on_chunk_start,
+        )
+    else:
+        # Speak entire text at once (no chunking)
+        clean_text = sanitize_tts_text(text)
+        if not clean_text:
+            logging.warning("TTS: Empty text after sanitization, skipping")
+            return
 
-    with open(TTS_LOCK_FILE, "w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            if chunked:
-                # Split into chunks and speak progressively
-                chunks = split_into_chunks(clean_text, max_chunk_size)
-                logging.info("TTS: Speaking %d chunks", len(chunks))
-                for i, chunk in enumerate(chunks):
-                    logging.debug("TTS: Speaking chunk %d/%d: %s...",
-                                  i + 1, len(chunks), chunk[:50])
-                    _say_single_chunk(
-                        chunk,
-                        rate=rate,
-                        volume=volume,
-                        voice=voice,
-                        alsa_device=alsa_device,
-                    )
-            else:
-                # Speak entire text at once
+        with open(TTS_LOCK_FILE, "w", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
                 _say_single_chunk(
                     clean_text,
                     rate=rate,
@@ -446,8 +664,8 @@ def say(
                     voice=voice,
                     alsa_device=alsa_device,
                 )
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------------
