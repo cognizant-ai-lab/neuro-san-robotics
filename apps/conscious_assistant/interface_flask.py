@@ -170,17 +170,15 @@ def speak_text_streaming(
     on_chunk_start=None,
 ) -> None:
     """
-    Speak the given text using streaming TTS with parallel conversion.
+    Speak the given text using TTS without chunking.
 
-    This function uses parallel chunk conversion - converting chunk N+1
-    while playing chunk N - to minimize latency. It also supports a callback
-    that is called when each chunk starts playing, enabling progressive
-    text display in the UI.
+    Speaks the full text at once for better prosody/tone.
+    The on_chunk_start callback is called once with the full text.
 
     Args:
         text: Text to speak
         on_chunk_start: Optional callback(chunk_text, chunk_idx, total_chunks)
-                        called when each chunk starts playing
+                        called when speech starts (with full text as single chunk)
     """
     if not TTS_AVAILABLE or tts_say is None:
         logging.info("TTS not available, skipping speech: %s", text[:50])
@@ -192,9 +190,13 @@ def speak_text_streaming(
         return
 
     try:
-        logging.info("Speaking (streaming): %s", clean_text[:50])
-        tts_say(clean_text, on_chunk_start=on_chunk_start)
-    except Exception as e:
+        logging.info("Speaking: %s", clean_text[:50])
+        # Call callback with full text as single chunk before speaking
+        if on_chunk_start:
+            on_chunk_start(clean_text, 0, 1)
+        # Speak without chunking for better prosody
+        tts_say(clean_text, chunked=False)
+    except Exception:
         logging.exception("TTS failed for text: %s", clean_text[:50])
 
 
