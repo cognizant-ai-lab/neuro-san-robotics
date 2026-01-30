@@ -132,15 +132,15 @@ speech_queue = queue.Queue()
 def sanitize_speech_text(text: str) -> str:
     """
     Remove tool-trace garbage from speech text.
-    
+
     Sometimes the agent embeds function call traces like:
     'functions.say_out_loud ...: <text>'
-    
+
     This function strips those out to get clean speech text.
     """
     if not text:
         return ""
-    
+
     # Remove lines that look like function call traces
     lines = text.split('\n')
     clean_lines = []
@@ -152,17 +152,26 @@ def sanitize_speech_text(text: str) -> str:
         if re.match(r'^(CALL_TOOL|TOOL_CALL|call)\s*:', line.strip(), re.IGNORECASE):
             continue
         clean_lines.append(line)
-    
+
     return '\n'.join(clean_lines).strip()
 
 
-def speak_text(text: str) -> None:
+def speak_text_streaming(
+    text: str,
+    on_chunk_start=None,
+) -> None:
     """
-    Speak the given text using TTS.
+    Speak the given text using streaming TTS with parallel conversion.
 
-    This is the hardwired TTS function that gets called automatically
-    whenever a 'say:' block is detected, ensuring speech always happens
-    regardless of whether the agent's tool call worked.
+    This function uses parallel chunk conversion - converting chunk N+1
+    while playing chunk N - to minimize latency. It also supports a callback
+    that is called when each chunk starts playing, enabling progressive
+    text display in the UI.
+
+    Args:
+        text: Text to speak
+        on_chunk_start: Optional callback(chunk_text, chunk_idx, total_chunks)
+                        called when each chunk starts playing
     """
     if not TTS_AVAILABLE or tts_say is None:
         logging.info("TTS not available, skipping speech: %s", text[:50])
@@ -174,10 +183,23 @@ def speak_text(text: str) -> None:
         return
 
     try:
-        logging.info("Speaking: %s", clean_text[:50])
-        tts_say(clean_text)
+        logging.info("Speaking (streaming): %s", clean_text[:50])
+        tts_say(clean_text, on_chunk_start=on_chunk_start)
     except Exception as e:
         logging.exception("TTS failed for text: %s", clean_text[:50])
+
+
+def speak_text(text: str) -> None:
+    """
+    Speak the given text using TTS.
+
+    This is the hardwired TTS function that gets called automatically
+    whenever a 'say:' block is detected, ensuring speech always happens
+    regardless of whether the agent's tool call worked.
+
+    Uses streaming TTS with parallel conversion for minimal latency.
+    """
+    speak_text_streaming(text, on_chunk_start=None)
 
 
 def perform_random_robot_motion() -> None:
@@ -328,23 +350,31 @@ def conscious_thinking_process():
                 )
 
             if speeches_to_emit:
-                # Hardwired TTS: queue each speech block for audio playback
-                # NOTE: We intentionally speak FIRST, then render text in the UI.
+                # Streaming TTS with progressive text display
+                # Text appears in UI as each chunk starts playing
+                logging.info("Starting streaming TTS with progressive text display")
+
+                def emit_chunk_to_ui(chunk_text, chunk_idx, total_chunks):
+                    """Callback when each chunk starts playing."""
+                    logging.debug(
+                        "Emitting chunk %d/%d to UI: %s...",
+                        chunk_idx + 1, total_chunks, chunk_text[:30]
+                    )
+                    socketio.emit(
+                        "update_speech_chunk",
+                        {
+                            "chunk": chunk_text,
+                            "chunk_idx": chunk_idx,
+                            "total_chunks": total_chunks,
+                        },
+                        namespace="/chat",
+                    )
+
                 for speech_text in speeches_to_emit:
-                    speech_queue.put(speech_text)
+                    # Speak with streaming and progressive UI updates
+                    speak_text_streaming(speech_text, on_chunk_start=emit_chunk_to_ui)
 
-                # Wait for all speech to complete before showing the text
-                # This makes the robot audio lead, then the UI catches up.
-                logging.info("Waiting for TTS playback to complete before updating UI...")
-                speech_queue.join()
-                logging.info("TTS playback complete; now updating UI with speech text")
-
-                # Now emit the full speech content to the UI
-                socketio.emit(
-                    "update_speech",
-                    {"data": "\n".join(speeches_to_emit)},
-                    namespace="/chat",
-                )
+                logging.info("Streaming TTS complete")
 
             # Execute any deferred robot actions AFTER speech and UI update
             # This ensures the robot speaks and shows response first, then performs actions
@@ -353,9 +383,9 @@ def conscious_thinking_process():
                     results = execute_deferred_actions()
                     if results:
                         logging.info("Executed %d deferred robot actions", len(results))
-                except Exception as e:
+                except Exception:
                     logging.exception("Failed to execute deferred robot actions")
-            
+
             # Signal that processing is complete and user can send new input
             socketio.emit("processing_complete", namespace="/chat")
 
@@ -380,40 +410,41 @@ def index():
 def transcribe_audio():
     """
     Transcribe audio using OpenAI Whisper API.
-    
+
     Expects a multipart/form-data POST with an 'audio' file.
     Returns JSON with 'text' field containing the transcription.
     """
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
         return jsonify({
-            "error": "OpenAI API key not configured. Please set OPENAI_API_KEY environment variable."
+            "error": "OpenAI API key not configured. Set OPENAI_API_KEY env var."
         }), 503
-    
+
     if "audio" not in request.files:
         return jsonify({"error": "No audio file provided"}), 400
-    
+
     audio_file = request.files["audio"]
     if audio_file.filename == "":
         return jsonify({"error": "Empty audio file"}), 400
-    
-    MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
+
+    max_file_size = 25 * 1024 * 1024  # 25MB
     audio_file.seek(0, os.SEEK_END)
     file_size = audio_file.tell()
     audio_file.seek(0)
-    
-    if file_size > MAX_FILE_SIZE:
-        return jsonify({"error": f"Audio file too large. Maximum size is 25MB, got {file_size / 1024 / 1024:.1f}MB"}), 413
-    
+
+    if file_size > max_file_size:
+        size_mb = file_size / 1024 / 1024
+        return jsonify({"error": f"Audio file too large. Max 25MB, got {size_mb:.1f}MB"}), 413
+
     if file_size == 0:
         return jsonify({"error": "Audio file is empty"}), 400
-    
+
     # Minimum file size check - very short recordings produce corrupted files
-    MIN_AUDIO_SIZE = 1000  # 1KB minimum
-    if file_size < MIN_AUDIO_SIZE:
+    min_audio_size = 1000  # 1KB minimum
+    if file_size < min_audio_size:
         logging.warning("Audio file too small (%d bytes), likely a quick tap", file_size)
-        return jsonify({"error": "Recording too short. Please hold the mic button longer."}), 400
-    
+        return jsonify({"error": "Recording too short. Hold the mic button longer."}), 400
+
     temp_file = None
     try:
         suffix = ".webm"  # Default to webm
@@ -423,28 +454,28 @@ def transcribe_audio():
             suffix = ".mp3"
         elif audio_file.filename.endswith(".m4a"):
             suffix = ".m4a"
-        
+
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         audio_file.save(temp_file.name)
         temp_file.close()
-        
+
         try:
             from openai import OpenAI
             client = OpenAI(api_key=openai_api_key)
-            
+
             with open(temp_file.name, "rb") as f:
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1",
                     file=f,
                     language="en"  # Optimize for English
                 )
-            
+
             return jsonify({"text": transcript.text})
-        
+
         except Exception as e:
             print(f"OpenAI API error: {e}")
             return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
-    
+
     finally:
         if temp_file and os.path.exists(temp_file.name):
             try:
@@ -476,14 +507,14 @@ cleaned_up = False
 
 def cleanup(from_request=False):
     """Tear things down on exit."""
-    global cleaned_up
+    global cleaned_up  # pylint: disable=global-statement
     if cleaned_up:
         return
     cleaned_up = True
-    
+
     print("Bye!")
     tear_down_conscious_assistant(conscious_session)
-    
+
     if from_request:
         try:
             from flask import has_request_context
@@ -494,7 +525,7 @@ def cleanup(from_request=False):
                 else:
                     app.logger.warning("Werkzeug shutdown function not available")
         except Exception as e:
-            app.logger.warning(f"Server shutdown failed: {e}")
+            app.logger.warning("Server shutdown failed: %s", e)
 
 
 @app.route("/shutdown", methods=["POST"])

@@ -421,6 +421,45 @@
             element.scrollTop = element.scrollHeight;
         });
 
+        // Track current streaming speech message for progressive text display
+        var currentStreamingMsg = null;
+        var currentStreamingText = '';
+
+        socket.on('update_speech_chunk', function(data) {
+            // Progressive text display: show text chunk-by-chunk as robot speaks
+            var element = document.getElementById('chat-history');
+            if (!chatHistoryInitialized) {
+                element.innerHTML = '';
+                chatHistoryInitialized = true;
+            }
+
+            // First chunk: create a new speech message element
+            if (data.chunk_idx === 0) {
+                currentStreamingMsg = document.createElement('div');
+                currentStreamingMsg.className = 'speech-msg streaming';
+                currentStreamingText = '';
+                element.appendChild(currentStreamingMsg);
+            }
+
+            // Append chunk text to the current message
+            if (currentStreamingMsg) {
+                // Add space between chunks if needed
+                if (currentStreamingText && !currentStreamingText.endsWith(' ')) {
+                    currentStreamingText += ' ';
+                }
+                currentStreamingText += data.chunk;
+                currentStreamingMsg.innerHTML = currentStreamingText.replace(/\n/g, '<br>');
+                element.scrollTop = element.scrollHeight;
+
+                // Last chunk: remove streaming class
+                if (data.chunk_idx === data.total_chunks - 1) {
+                    currentStreamingMsg.classList.remove('streaming');
+                    currentStreamingMsg = null;
+                    currentStreamingText = '';
+                }
+            }
+        });
+
         socket.on('update_user_input', function(data) {
             var element = document.getElementById('chat-history');
             if (!chatHistoryInitialized) {
