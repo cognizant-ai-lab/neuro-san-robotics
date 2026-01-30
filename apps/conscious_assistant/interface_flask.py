@@ -439,11 +439,17 @@ def handle_user_input(json, *_):
     """
     Handles user input.
 
-    :param json: A json object
+    :param json: A json object containing:
+        - data: The user's input text
+        - skip_echo: Optional boolean to skip echoing back to chat (used when
+                     client has already displayed the text, e.g., from voice input)
     """
     user_input = json["data"]
+    skip_echo = json.get("skip_echo", False)
     user_input_queue.put(user_input)
-    socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
+    # Only emit update_user_input if client hasn't already displayed it
+    if not skip_echo:
+        socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
 
 
 cleaned_up = False

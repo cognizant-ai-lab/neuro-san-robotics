@@ -74,24 +74,55 @@
         var mediaRecorder = null;
         var audioChunks = [];
         var whisperStream = null;
+        var preWarmedStream = null;  // Pre-warmed audio stream for instant recording
         var isTranscribing = false;
         var AUTO_SEND = true;  // Auto-send transcription when recording stops
         var recordingStartTime = 0;  // Track when recording started
         var MIN_RECORDING_DURATION_MS = 300;  // Minimum recording duration in milliseconds
         var MIN_AUDIO_SIZE_BYTES = 1000;  // Minimum audio blob size in bytes
 
+        // Audio constraints optimized for speech recognition
+        var audioConstraints = {
+            audio: {
+                channelCount: 1,  // Mono audio (smaller file size)
+                sampleRate: 16000,  // Lower sample rate for speech (default is 48000)
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+            }
+        };
+
+        // Pre-warm the audio stream so recording starts instantly
+        async function preWarmAudioStream() {
+            if (preWarmedStream) {
+                return preWarmedStream;
+            }
+            
+            try {
+                console.log('Pre-warming audio stream...');
+                preWarmedStream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+                micPermissionGranted = true;
+                console.log('Audio stream pre-warmed and ready');
+                return preWarmedStream;
+            } catch (err) {
+                console.error('Failed to pre-warm audio stream:', err);
+                return null;
+            }
+        }
+
         // Pre-warm microphone permission on first use
         async function ensureMicPermission() {
-            if (micPermissionGranted) {
+            if (micPermissionGranted && preWarmedStream) {
                 return true;
             }
             
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                stream.getTracks().forEach(track => track.stop());
-                micPermissionGranted = true;
-                console.log('Microphone permission granted');
-                return true;
+                // Pre-warm the stream instead of just getting permission
+                const stream = await preWarmAudioStream();
+                if (stream) {
+                    return true;
+                }
+                return false;
             } catch (err) {
                 console.error('Microphone permission denied:', err);
                 alert('Microphone access is required for voice input. Please allow microphone access in your browser settings.');
@@ -107,16 +138,17 @@
             }
 
             try {
-                // Request audio with optimized constraints for faster processing
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        channelCount: 1,  // Mono audio (smaller file size)
-                        sampleRate: 16000,  // Lower sample rate for speech (default is 48000)
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    }
-                });
+                // Use pre-warmed stream if available for instant recording start
+                // This eliminates the delay that causes the beginning of speech to be clipped
+                var stream;
+                if (preWarmedStream && preWarmedStream.active) {
+                    console.log('Using pre-warmed audio stream for instant recording');
+                    stream = preWarmedStream;
+                    preWarmedStream = null;  // Clear so we get a fresh one next time
+                } else {
+                    console.log('No pre-warmed stream, requesting new one...');
+                    stream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+                }
                 whisperStream = stream;
                 audioChunks = [];
 
@@ -154,6 +186,12 @@
                         whisperStream = null;
                     }
                     
+                    // Pre-warm a new stream for the next recording (non-blocking)
+                    // This ensures the next recording starts instantly
+                    preWarmAudioStream().catch(err => {
+                        console.log('Failed to pre-warm next stream:', err);
+                    });
+                    
                     // Check recording duration
                     var recordingDuration = Date.now() - recordingStartTime;
                     console.log('Recording duration: ' + recordingDuration + 'ms, chunks: ' + audioChunks.length);
@@ -184,6 +222,19 @@
                     isTranscribing = true;
                     document.getElementById('floating-mic-button').classList.add('transcribing');
                     
+                    // Show transcribing indicator in chat immediately
+                    var chatElement = document.getElementById('chat-history');
+                    if (!chatHistoryInitialized) {
+                        chatElement.innerHTML = '';
+                        chatHistoryInitialized = true;
+                    }
+                    var transcribingIndicator = document.createElement('div');
+                    transcribingIndicator.className = 'user-msg transcribing-indicator';
+                    transcribingIndicator.innerHTML = '<em>Transcribing...</em>';
+                    transcribingIndicator.id = 'transcribing-indicator';
+                    chatElement.appendChild(transcribingIndicator);
+                    chatElement.scrollTop = chatElement.scrollHeight;
+                    
                     // Send to server for transcription
                     try {
                         const formData = new FormData();
@@ -202,19 +253,40 @@
                         const data = await response.json();
                         const text = (data.text || '').trim();
                         
+                        // Remove transcribing indicator
+                        var indicator = document.getElementById('transcribing-indicator');
+                        if (indicator) {
+                            indicator.remove();
+                        }
+                        
                         if (text) {
+                            // Show user's text in chat immediately (before sending to server)
+                            chatElement.innerHTML += '<div class="user-msg">' + text.replace(/\n/g, '<br>') + '</div>';
+                            chatElement.scrollTop = chatElement.scrollHeight;
+                            
                             document.getElementById('user-input').value = text;
                             console.log('Transcription successful:', text);
                             
-                            // Auto-send if enabled
+                            // Auto-send if enabled (this will also emit to server for processing)
                             if (AUTO_SEND) {
-                                sendUserInput();
+                                // Send to server with skip_echo flag since we already displayed the text
+                                var userInput = document.getElementById('user-input').value.trim();
+                                if (userInput) {
+                                    socket.emit('user_input', {data: userInput, skip_echo: true});
+                                    document.getElementById('user-input').value = '';
+                                    setInputDisabled(true);
+                                }
                             }
                         } else {
                             console.log('No speech detected in transcription');
                             alert('No speech detected. Please try again.');
                         }
                     } catch (err) {
+                        // Remove transcribing indicator on error
+                        var indicator = document.getElementById('transcribing-indicator');
+                        if (indicator) {
+                            indicator.remove();
+                        }
                         console.error('Transcription error:', err);
                         alert('Transcription failed: ' + err.message + '\n\nMake sure OPENAI_API_KEY is set on the server.');
                     } finally {
