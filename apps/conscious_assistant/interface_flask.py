@@ -33,11 +33,15 @@ KEY  = BASE_DIR / "certs" / "key.pem"
 # Import TTS function for hardwired speech
 try:
     from coded_tools.unigo2.tts_go2 import say as tts_say
+    from coded_tools.unigo2.tts_go2 import say_cached as tts_say_cached
+    from coded_tools.unigo2.tts_go2 import prewarm_audio_cache
     TTS_AVAILABLE = True
 except ImportError:
     logging.warning("TTS module not available - speech will be text-only")
     TTS_AVAILABLE = False
     tts_say = None
+    tts_say_cached = None
+    prewarm_audio_cache = None
 
 # Import robot macros for motion during acknowledgment
 try:
@@ -128,6 +132,11 @@ user_input_queue = queue.Queue()
 # Speech queue for TTS - allows non-blocking speech processing
 speech_queue = queue.Queue()
 
+# Pre-warm audio cache with acknowledgment phrases for instant playback
+if TTS_AVAILABLE and prewarm_audio_cache is not None:
+    logging.info("Pre-warming TTS audio cache with acknowledgment phrases...")
+    prewarm_audio_cache(ACKNOWLEDGMENT_PHRASES)
+
 
 def sanitize_speech_text(text: str) -> str:
     """
@@ -158,20 +167,17 @@ def sanitize_speech_text(text: str) -> str:
 
 def speak_text_streaming(
     text: str,
-    on_chunk_start=None,
+    on_speech_complete=None,
 ) -> None:
     """
-    Speak the given text using streaming TTS with parallel conversion.
+    Speak the given text using TTS without chunking.
 
-    This function uses parallel chunk conversion - converting chunk N+1
-    while playing chunk N - to minimize latency. It also supports a callback
-    that is called when each chunk starts playing, enabling progressive
-    text display in the UI.
+    Speaks the full text at once for better prosody/tone.
+    The callback is called AFTER speech completes to update the UI.
 
     Args:
         text: Text to speak
-        on_chunk_start: Optional callback(chunk_text, chunk_idx, total_chunks)
-                        called when each chunk starts playing
+        on_speech_complete: Optional callback(text) called after speech finishes
     """
     if not TTS_AVAILABLE or tts_say is None:
         logging.info("TTS not available, skipping speech: %s", text[:50])
@@ -183,9 +189,13 @@ def speak_text_streaming(
         return
 
     try:
-        logging.info("Speaking (streaming): %s", clean_text[:50])
-        tts_say(clean_text, on_chunk_start=on_chunk_start)
-    except Exception as e:
+        logging.info("Speaking: %s", clean_text[:50])
+        # Speak without chunking for better prosody
+        tts_say(clean_text, chunked=False)
+        # Call callback AFTER speech completes to update UI
+        if on_speech_complete:
+            on_speech_complete(clean_text)
+    except Exception:
         logging.exception("TTS failed for text: %s", clean_text[:50])
 
 
@@ -197,9 +207,9 @@ def speak_text(text: str) -> None:
     whenever a 'say:' block is detected, ensuring speech always happens
     regardless of whether the agent's tool call worked.
 
-    Uses streaming TTS with parallel conversion for minimal latency.
+    Speaks full text at once for better prosody.
     """
-    speak_text_streaming(text, on_chunk_start=None)
+    speak_text_streaming(text, on_speech_complete=None)
 
 
 def perform_random_robot_motion() -> None:
@@ -257,11 +267,21 @@ def speech_worker():
             if text is None:
                 break
             logging.info("Speech worker: starting TTS for text: %s...", text[:50] if text else "")
-            speak_text(text)
-            logging.info("Speech worker: TTS completed")
+
+            # Try cached audio first (instant playback for pre-warmed phrases)
+            if TTS_AVAILABLE and tts_say_cached is not None:
+                if tts_say_cached(text):
+                    logging.info("Speech worker: played from cache (instant)")
+                else:
+                    # Not in cache, fall back to regular TTS
+                    speak_text(text)
+                    logging.info("Speech worker: TTS completed (not cached)")
+            else:
+                speak_text(text)
+                logging.info("Speech worker: TTS completed")
         except queue.Empty:
             continue
-        except Exception as e:
+        except Exception:
             logging.exception("Speech worker error")
         finally:
             if got_item:
@@ -350,31 +370,23 @@ def conscious_thinking_process():
                 )
 
             if speeches_to_emit:
-                # Streaming TTS with progressive text display
-                # Text appears in UI as each chunk starts playing
-                logging.info("Starting streaming TTS with progressive text display")
+                # TTS with UI update after speech completes
+                logging.info("Starting TTS for %d speech blocks", len(speeches_to_emit))
 
-                def emit_chunk_to_ui(chunk_text, chunk_idx, total_chunks):
-                    """Callback when each chunk starts playing."""
-                    logging.debug(
-                        "Emitting chunk %d/%d to UI: %s...",
-                        chunk_idx + 1, total_chunks, chunk_text[:30]
-                    )
+                def emit_speech_to_ui(speech_text):
+                    """Callback after speech completes to update UI."""
+                    logging.debug("Emitting speech to UI: %s...", speech_text[:30])
                     socketio.emit(
-                        "update_speech_chunk",
-                        {
-                            "chunk": chunk_text,
-                            "chunk_idx": chunk_idx,
-                            "total_chunks": total_chunks,
-                        },
+                        "update_speech",
+                        {"data": speech_text},
                         namespace="/chat",
                     )
 
                 for speech_text in speeches_to_emit:
-                    # Speak with streaming and progressive UI updates
-                    speak_text_streaming(speech_text, on_chunk_start=emit_chunk_to_ui)
+                    # Speak first, then update UI after speech completes
+                    speak_text_streaming(speech_text, on_speech_complete=emit_speech_to_ui)
 
-                logging.info("Streaming TTS complete")
+                logging.info("TTS complete")
 
             # Execute any deferred robot actions AFTER speech and UI update
             # This ensures the robot speaks and shows response first, then performs actions

@@ -56,6 +56,119 @@ ALSA_MIXER_CONTROL = os.environ.get("GO2_ALSA_MIXER", "Master")
 # Default volume percentage to set before each playback (0-100)
 DEFAULT_VOLUME_PERCENT = int(os.environ.get("GO2_TTS_VOLUME", "100"))
 
+# Lock file for TTS to prevent audio overlap
+TTS_LOCK_FILE = "/tmp/go2_tts.lock"
+
+
+# ---------------------------------------------------------------------
+# Audio Cache for Pre-converted Phrases
+# ---------------------------------------------------------------------
+
+# Cache for pre-converted audio: phrase -> audio bytes
+_audio_cache: Dict[str, bytes] = {}
+_cache_lock = threading.Lock()
+
+
+def prewarm_audio_cache(phrases: List[str]) -> int:
+    """
+    Pre-convert a list of phrases to audio and cache them for instant playback.
+
+    Call this at startup with frequently-used phrases (e.g., acknowledgments)
+    so they can be played instantly without conversion delay.
+
+    Args:
+        phrases: List of phrases to pre-convert
+
+    Returns:
+        Number of phrases successfully cached
+    """
+    if not _has("piper"):
+        logging.warning("Piper not available, skipping audio cache prewarm")
+        return 0
+
+    if not os.path.isfile(PIPER_MODEL) or not os.path.isfile(PIPER_CONFIG):
+        logging.warning("Piper model/config not found, skipping audio cache prewarm")
+        return 0
+
+    cached_count = 0
+    logging.info("Pre-warming audio cache with %d phrases...", len(phrases))
+
+    for phrase in phrases:
+        clean_phrase = sanitize_tts_text(phrase)
+        if not clean_phrase:
+            continue
+
+        # Skip if already cached
+        with _cache_lock:
+            if clean_phrase in _audio_cache:
+                cached_count += 1
+                continue
+
+        try:
+            audio_data = _convert_text_to_audio_piper(clean_phrase)
+            with _cache_lock:
+                _audio_cache[clean_phrase] = audio_data
+            cached_count += 1
+            logging.debug("Cached phrase: %s", clean_phrase[:30])
+        except Exception:
+            logging.exception("Failed to cache phrase: %s", phrase[:30])
+
+    logging.info("Audio cache prewarm complete: %d/%d phrases cached",
+                 cached_count, len(phrases))
+    return cached_count
+
+
+def get_cached_audio(text: str) -> Optional[bytes]:
+    """
+    Get pre-converted audio from cache if available.
+
+    Args:
+        text: Text to look up (will be sanitized before lookup)
+
+    Returns:
+        Cached audio bytes if found, None otherwise
+    """
+    clean_text = sanitize_tts_text(text)
+    with _cache_lock:
+        return _audio_cache.get(clean_text)
+
+
+def say_cached(
+    text: str,
+    alsa_device: str | None = None,
+    volume: float = 1.0,
+) -> bool:
+    """
+    Play pre-cached audio if available, otherwise return False.
+
+    This is the fastest way to play audio - no conversion needed.
+    Use for frequently-used phrases like acknowledgments.
+
+    Args:
+        text: Text to speak (must have been pre-cached)
+        alsa_device: ALSA device for Linux (default from env var)
+        volume: Volume level 0.0-1.0 (default 1.0)
+
+    Returns:
+        True if cached audio was played, False if not in cache
+    """
+    audio_data = get_cached_audio(text)
+    if audio_data is None:
+        return False
+
+    # Set volume and play
+    volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
+    _set_alsa_volume(volume_percent)
+
+    with open(TTS_LOCK_FILE, "w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            _play_audio_bytes(audio_data, alsa_device)
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+    return True
+
 
 # ---------------------------------------------------------------------
 # Text Sanitization
@@ -410,8 +523,6 @@ def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None
 # ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
-
-TTS_LOCK_FILE = "/tmp/go2_tts.lock"
 
 
 def _say_single_chunk(
