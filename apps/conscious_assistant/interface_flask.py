@@ -48,6 +48,15 @@ except ImportError:
     ROBOT_AVAILABLE = False
     Go2Macros = None
 
+# Import deferred action executor for robot actions after speech
+try:
+    from coded_tools.unigo2.robot_macros import execute_deferred_actions
+    DEFERRED_ACTIONS_AVAILABLE = True
+except ImportError:
+    logging.warning("execute_deferred_actions not available - deferred robot actions disabled")
+    DEFERRED_ACTIONS_AVAILABLE = False
+    execute_deferred_actions = None
+
 THINKING_INTERVAL = 30.0
 
 # Robot motion configuration
@@ -336,6 +345,16 @@ def conscious_thinking_process():
                     {"data": "\n".join(speeches_to_emit)},
                     namespace="/chat",
                 )
+
+            # Execute any deferred robot actions AFTER speech and UI update
+            # This ensures the robot speaks and shows response first, then performs actions
+            if DEFERRED_ACTIONS_AVAILABLE and execute_deferred_actions is not None:
+                try:
+                    results = execute_deferred_actions()
+                    if results:
+                        logging.info("Executed %d deferred robot actions", len(results))
+                except Exception as e:
+                    logging.exception("Failed to execute deferred robot actions")
             
             # Signal that processing is complete and user can send new input
             socketio.emit("processing_complete", namespace="/chat")
