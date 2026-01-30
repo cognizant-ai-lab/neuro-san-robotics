@@ -2,12 +2,13 @@
 go2_tts.py — Offline TTS for Unitree Go2 EDU speaker (Linux/Jetson) and macOS.
 
 Linux / Unitree Go2:
-- PRIMARY: Piper TTS (neural, offline, natural voice)
-- FALLBACK: espeak-ng -> ALSA via aplay
+- PRIMARY: Piper TTS (neural, offline, British female voice - en_GB-cori-high)
+- FALLBACK: espeak-ng -> ALSA via aplay (British female voice - en-gb+f3)
 
 macOS:
 - Native 'say' command (truly blocking, prevents audio overlap)
-- Set GO2_MAC_VOICE env var to specify voice (e.g., "Samantha")
+- Default voice: Kate (British female)
+- Set GO2_MAC_VOICE env var to specify a different voice
 
 Tested with Piper CLI requiring:
   piper -m MODEL -c CONFIG --output-raw | aplay
@@ -31,12 +32,12 @@ from neuro_san.interfaces.coded_tool import CodedTool
 
 PIPER_MODEL = os.environ.get(
     "GO2_PIPER_MODEL",
-    "/home/unitree/piper_models/en_US-amy-medium.onnx",
+    "/home/unitree/piper_models/en_GB-cori-high.onnx",
 )
 
 PIPER_CONFIG = os.environ.get(
     "GO2_PIPER_CONFIG",
-    "/home/unitree/piper_models/en_US-amy-medium.onnx.json",
+    "/home/unitree/piper_models/en_GB-cori-high.onnx.json",
 )
 
 DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "plughw:0,0")
@@ -173,7 +174,7 @@ def _linux_say_via_espeak(
     text: str,
     rate: int = 150,
     volume: float = 1.0,
-    voice: str = "en-us+f3",
+    voice: str = "en-gb+f3",
     alsa_device: str | None = None,
 ) -> None:
     if not _has("espeak-ng"):
@@ -208,7 +209,7 @@ def _linux_say_via_espeak(
 # macOS: native 'say' command (preferred - truly blocking)
 # ---------------------------------------------------------------------
 
-MAC_VOICE = os.environ.get("GO2_MAC_VOICE", "")
+MAC_VOICE = os.environ.get("GO2_MAC_VOICE", "Kate")
 
 
 def _mac_say_via_subprocess(
@@ -235,7 +236,7 @@ def say(
     text: str,
     rate: int = 150,
     volume: float = 1.0,
-    voice: str = "en-us+f3",
+    voice: str = "en-gb+f3",
     alsa_device: str | None = None,
 ) -> None:
     system = platform.system()
@@ -282,7 +283,7 @@ class Go2TTSTool(CodedTool):
                 text=text,
                 rate=int(args.get("rate", 150)),
                 volume=float(args.get("volume", 1.0)),
-                voice=args.get("voice", "en-us+f3"),
+                voice=args.get("voice", "en-gb+f3"),
                 alsa_device=args.get("alsa_device"),
             )
             return f"TTS OK: {text}"
