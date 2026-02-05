@@ -1,24 +1,35 @@
 """
-go2_tts.py — Offline TTS for Unitree Go2 EDU speaker (Linux/Jetson) and macOS.
+go2_tts.py — TTS for Unitree Go2 EDU speaker (Linux/Jetson) and macOS.
+
+TTS Engine Priority (configurable via GO2_TTS_ENGINE env var):
+1. "openai" - OpenAI TTS API with true streaming (lowest latency, requires internet)
+2. "piper" - Piper TTS (neural, offline, British female voice)
+3. "espeak" - espeak-ng (offline fallback)
+4. "auto" (default) - Try OpenAI first, fall back to Piper, then espeak
 
 Linux / Unitree Go2:
-- PRIMARY: Piper TTS (neural, offline, British female voice - en_GB-cori-high)
-- FALLBACK: espeak-ng -> ALSA via aplay (British female voice - en-gb+f3)
+- OpenAI TTS: True streaming via chunk transfer encoding (recommended)
+- Piper TTS: Neural, offline, British female voice - en_GB-cori-high
+- espeak-ng: Fallback via ALSA
 
 macOS:
+- OpenAI TTS: True streaming (recommended)
 - Native 'say' command (truly blocking, prevents audio overlap)
-- Default voice: Kate (British female)
-- Set GO2_MAC_VOICE env var to specify a different voice
 
 Features:
 - Text sanitization: Removes symbols/formatting that cause TTS to say "asterisk" etc.
-- Chunked TTS: Splits long text into sentences and speaks chunks while converting next
+- True streaming: Audio plays as it's generated (OpenAI)
+- Chunked TTS: Splits long text for Piper/espeak fallback
 
-Tested with Piper CLI requiring:
-  piper -m MODEL -c CONFIG --output-raw | aplay
+Environment Variables:
+- GO2_TTS_ENGINE: "openai", "piper", "espeak", or "auto" (default: "auto")
+- OPENAI_API_KEY: Required for OpenAI TTS
+- GO2_OPENAI_VOICE: OpenAI voice (default: "coral")
+- GO2_OPENAI_MODEL: OpenAI model (default: "gpt-4o-mini-tts")
 """
 
 import argparse
+import asyncio
 import fcntl
 import logging
 import os
@@ -37,6 +48,18 @@ from neuro_san.interfaces.coded_tool import CodedTool
 # Configuration (override via env vars if needed)
 # ---------------------------------------------------------------------
 
+# TTS Engine selection: "openai", "piper", "espeak", or "auto"
+TTS_ENGINE = os.environ.get("GO2_TTS_ENGINE", "auto").lower()
+
+# OpenAI TTS configuration
+OPENAI_VOICE = os.environ.get("GO2_OPENAI_VOICE", "coral")
+OPENAI_MODEL = os.environ.get("GO2_OPENAI_MODEL", "gpt-4o-mini-tts")
+OPENAI_INSTRUCTIONS = os.environ.get(
+    "GO2_OPENAI_INSTRUCTIONS",
+    "Speak in a friendly, conversational tone with natural pacing."
+)
+
+# Piper TTS configuration
 PIPER_MODEL = os.environ.get(
     "GO2_PIPER_MODEL",
     "/home/unitree/piper_models/en_GB-cori-high.onnx",
@@ -58,6 +81,290 @@ DEFAULT_VOLUME_PERCENT = int(os.environ.get("GO2_TTS_VOLUME", "100"))
 
 # Lock file for TTS to prevent audio overlap
 TTS_LOCK_FILE = "/tmp/go2_tts.lock"
+
+
+# ---------------------------------------------------------------------
+# OpenAI TTS with True Streaming
+# ---------------------------------------------------------------------
+
+def _is_openai_available() -> bool:
+    """Check if OpenAI TTS is available (API key set)."""
+    return bool(os.environ.get("OPENAI_API_KEY"))
+
+
+def _openai_say_streaming(
+    text: str,
+    voice: str = OPENAI_VOICE,
+    model: str = OPENAI_MODEL,
+    instructions: str = OPENAI_INSTRUCTIONS,
+    alsa_device: str | None = None,
+    volume: float = 1.0,
+) -> None:
+    """
+    Speak text using OpenAI TTS with true streaming.
+
+    Audio starts playing as soon as the first chunks arrive from the API,
+    providing the lowest possible latency.
+
+    Args:
+        text: Text to speak (should already be sanitized)
+        voice: OpenAI voice name (default from env var)
+        model: OpenAI model (default from env var)
+        instructions: Voice instructions for tone/style
+        alsa_device: ALSA device for Linux (default from env var)
+        volume: Volume level 0.0-1.0 (default 1.0)
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise RuntimeError("openai package not installed. Run: pip install openai")
+
+    client = OpenAI()
+    system = platform.system()
+    device = alsa_device or DEFAULT_ALSA_DEVICE
+
+    logging.info(
+        "GO2_TTS: OpenAI streaming TTS (voice=%s, model=%s)",
+        voice, model
+    )
+
+    # Set ALSA volume before playback
+    if system == "Linux":
+        volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
+        _set_alsa_volume(volume_percent)
+
+    # Request PCM format for lowest latency (no decoding overhead)
+    # PCM is 24kHz, 16-bit signed, little-endian
+    with client.audio.speech.with_streaming_response.create(
+        model=model,
+        voice=voice,
+        input=text,
+        instructions=instructions,
+        response_format="pcm",
+    ) as response:
+        if system == "Linux":
+            # Stream directly to aplay
+            aplay_cmd = [
+                "aplay",
+                "-D", device,
+                "-r", "24000",  # OpenAI PCM is 24kHz
+                "-f", "S16_LE",
+                "-c", "1",
+                "-t", "raw",
+            ]
+
+            aplay_proc = subprocess.Popen(
+                aplay_cmd,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            try:
+                for chunk in response.iter_bytes(chunk_size=4096):
+                    if aplay_proc.stdin:
+                        aplay_proc.stdin.write(chunk)
+            finally:
+                if aplay_proc.stdin:
+                    aplay_proc.stdin.close()
+                aplay_proc.wait()
+
+                if aplay_proc.returncode != 0:
+                    stderr = aplay_proc.stderr.read() if aplay_proc.stderr else b""
+                    logging.warning(
+                        "aplay returned %d: %s",
+                        aplay_proc.returncode,
+                        stderr.decode(errors="ignore")
+                    )
+
+        elif system == "Darwin":
+            # On macOS, use afplay with a temp file or ffplay for streaming
+            # For simplicity, collect chunks and play via afplay
+            import tempfile
+
+            audio_data = b"".join(response.iter_bytes(chunk_size=4096))
+
+            with tempfile.NamedTemporaryFile(suffix=".raw", delete=False) as f:
+                f.write(audio_data)
+                temp_path = f.name
+
+            try:
+                # Convert raw PCM to playable format and play
+                # ffplay can handle raw PCM directly
+                if shutil.which("ffplay"):
+                    subprocess.run(
+                        [
+                            "ffplay",
+                            "-autoexit",
+                            "-nodisp",
+                            "-f", "s16le",
+                            "-ar", "24000",
+                            "-ac", "1",
+                            temp_path,
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+                else:
+                    # Fallback: convert to wav and use afplay
+                    wav_path = temp_path + ".wav"
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-f", "s16le",
+                            "-ar", "24000",
+                            "-ac", "1",
+                            "-i", temp_path,
+                            "-y",
+                            wav_path,
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+                    subprocess.run(["afplay", wav_path], check=True)
+                    os.unlink(wav_path)
+            finally:
+                os.unlink(temp_path)
+
+        else:
+            raise RuntimeError(f"OpenAI TTS not supported on OS={system}")
+
+    logging.info("GO2_TTS: OpenAI streaming complete")
+
+
+async def _openai_say_streaming_async(
+    text: str,
+    voice: str = OPENAI_VOICE,
+    model: str = OPENAI_MODEL,
+    instructions: str = OPENAI_INSTRUCTIONS,
+    alsa_device: str | None = None,
+    volume: float = 1.0,
+) -> None:
+    """
+    Async version of OpenAI TTS streaming.
+
+    Uses the async OpenAI client for better integration with async code.
+    """
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        raise RuntimeError("openai package not installed. Run: pip install openai")
+
+    client = AsyncOpenAI()
+    system = platform.system()
+    device = alsa_device or DEFAULT_ALSA_DEVICE
+
+    logging.info(
+        "GO2_TTS: OpenAI async streaming TTS (voice=%s, model=%s)",
+        voice, model
+    )
+
+    # Set ALSA volume before playback
+    if system == "Linux":
+        volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
+        _set_alsa_volume(volume_percent)
+
+    async with client.audio.speech.with_streaming_response.create(
+        model=model,
+        voice=voice,
+        input=text,
+        instructions=instructions,
+        response_format="pcm",
+    ) as response:
+        if system == "Linux":
+            aplay_cmd = [
+                "aplay",
+                "-D", device,
+                "-r", "24000",
+                "-f", "S16_LE",
+                "-c", "1",
+                "-t", "raw",
+            ]
+
+            aplay_proc = await asyncio.create_subprocess_exec(
+                *aplay_cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            try:
+                async for chunk in response.iter_bytes(chunk_size=4096):
+                    if aplay_proc.stdin:
+                        aplay_proc.stdin.write(chunk)
+                        await aplay_proc.stdin.drain()
+            finally:
+                if aplay_proc.stdin:
+                    aplay_proc.stdin.close()
+                    await aplay_proc.stdin.wait_closed()
+                await aplay_proc.wait()
+
+        elif system == "Darwin":
+            import tempfile
+
+            chunks = []
+            async for chunk in response.iter_bytes(chunk_size=4096):
+                chunks.append(chunk)
+            audio_data = b"".join(chunks)
+
+            with tempfile.NamedTemporaryFile(suffix=".raw", delete=False) as f:
+                f.write(audio_data)
+                temp_path = f.name
+
+            try:
+                if shutil.which("ffplay"):
+                    proc = await asyncio.create_subprocess_exec(
+                        "ffplay",
+                        "-autoexit",
+                        "-nodisp",
+                        "-f", "s16le",
+                        "-ar", "24000",
+                        "-ac", "1",
+                        temp_path,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await proc.wait()
+                else:
+                    wav_path = temp_path + ".wav"
+                    proc = await asyncio.create_subprocess_exec(
+                        "ffmpeg",
+                        "-f", "s16le",
+                        "-ar", "24000",
+                        "-ac", "1",
+                        "-i", temp_path,
+                        "-y",
+                        wav_path,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await proc.wait()
+                    proc = await asyncio.create_subprocess_exec("afplay", wav_path)
+                    await proc.wait()
+                    os.unlink(wav_path)
+            finally:
+                os.unlink(temp_path)
+
+        else:
+            raise RuntimeError(f"OpenAI TTS not supported on OS={system}")
+
+    logging.info("GO2_TTS: OpenAI async streaming complete")
+
+
+def _is_piper_available() -> bool:
+    """Check if Piper TTS is available."""
+    return (
+        _has("piper")
+        and os.path.isfile(PIPER_MODEL)
+        and os.path.isfile(PIPER_CONFIG)
+    )
+
+
+def _should_use_openai() -> bool:
+    """Determine if OpenAI TTS should be used based on configuration."""
+    if TTS_ENGINE == "openai":
+        return True
+    if TTS_ENGINE == "auto" and _is_openai_available():
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------
@@ -572,11 +879,11 @@ def say_streaming(
     on_chunk_start: Optional[Callable[[str, int, int], None]] = None,
 ) -> None:
     """
-    Speak text using streaming TTS with parallel conversion.
+    Speak text using streaming TTS.
 
-    Converts chunk N+1 in background while playing chunk N, reducing latency.
-    Uses small chunks (~50 chars) for fast initial response.
-    Optionally calls a callback when each chunk starts playing (for UI updates).
+    If OpenAI is available and configured, uses true streaming where audio
+    plays as it's generated. Otherwise falls back to Piper with parallel
+    chunk conversion.
 
     Args:
         text: Text to speak (will be sanitized to remove symbols/formatting)
@@ -596,12 +903,7 @@ def say_streaming(
         logging.warning("TTS: Empty text after sanitization, skipping")
         return
 
-    # Split into chunks
-    chunks = split_into_chunks(clean_text, max_chunk_size)
-    if not chunks:
-        return
-
-    logging.info("TTS streaming: %d chunks to speak", len(chunks))
+    logging.info("TTS streaming: text length=%d chars", len(clean_text))
 
     # Set ALSA volume once at the start
     volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
@@ -610,7 +912,26 @@ def say_streaming(
     with open(TTS_LOCK_FILE, "w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
-            if system == "Linux" and _has("piper"):
+            # Use OpenAI streaming if available (true streaming, no chunking needed)
+            if _should_use_openai():
+                logging.info("TTS: Using OpenAI streaming")
+                if on_chunk_start:
+                    on_chunk_start(clean_text, 0, 1)
+                _openai_say_streaming(
+                    clean_text,
+                    volume=volume,
+                    alsa_device=alsa_device,
+                )
+                return
+
+            # Fall back to chunked Piper/espeak
+            chunks = split_into_chunks(clean_text, max_chunk_size)
+            if not chunks:
+                return
+
+            logging.info("TTS: Using Piper/espeak with %d chunks", len(chunks))
+
+            if system == "Linux" and _is_piper_available():
                 # Use parallel conversion for Piper TTS
                 _say_streaming_piper(
                     chunks, alsa_device, on_chunk_start
@@ -682,13 +1003,13 @@ def _say_streaming_piper(
         if on_chunk_start:
             try:
                 on_chunk_start(chunk_text, chunk_idx, total_chunks)
-            except Exception as e:
+            except Exception:
                 logging.exception("on_chunk_start callback failed")
 
         # Play the audio
         try:
             _play_audio_bytes(audio_data, alsa_device)
-        except Exception as e:
+        except Exception:
             logging.exception("Failed to play chunk %d", chunk_idx)
 
     # Wait for converter to finish
@@ -712,9 +1033,11 @@ def say(
     """
     Speak text using TTS with automatic sanitization and optional chunking.
 
-    When chunked=True (default), uses streaming TTS with parallel conversion
-    to minimize latency - converts chunk N+1 while playing chunk N.
-    Uses small chunks (~50 chars) for fast initial response.
+    When OpenAI is available and configured (GO2_TTS_ENGINE="openai" or "auto"),
+    uses true streaming where audio plays as it's generated - no chunking needed.
+
+    When using Piper (offline), chunked=True uses parallel conversion to minimize
+    latency - converts chunk N+1 while playing chunk N.
 
     Args:
         text: Text to speak (will be sanitized to remove symbols/formatting)
@@ -748,13 +1071,21 @@ def say(
         with open(TTS_LOCK_FILE, "w", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             try:
-                _say_single_chunk(
-                    clean_text,
-                    rate=rate,
-                    volume=volume,
-                    voice=voice,
-                    alsa_device=alsa_device,
-                )
+                # Use OpenAI if available
+                if _should_use_openai():
+                    _openai_say_streaming(
+                        clean_text,
+                        volume=volume,
+                        alsa_device=alsa_device,
+                    )
+                else:
+                    _say_single_chunk(
+                        clean_text,
+                        rate=rate,
+                        volume=volume,
+                        voice=voice,
+                        alsa_device=alsa_device,
+                    )
             finally:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
 
@@ -763,6 +1094,41 @@ def say(
 # CodedTool wrapper
 # ---------------------------------------------------------------------
 
+async def say_async(
+    text: str,
+    volume: float = 1.0,
+    alsa_device: str | None = None,
+) -> None:
+    """
+    Async version of say() for use in async contexts.
+
+    Currently only supports OpenAI TTS. Falls back to sync say() for other engines.
+
+    Args:
+        text: Text to speak (will be sanitized)
+        volume: Volume level 0.0-1.0 (default 1.0)
+        alsa_device: ALSA device for Linux (default from env var)
+    """
+    clean_text = sanitize_tts_text(text)
+    if not clean_text:
+        logging.warning("TTS: Empty text after sanitization, skipping")
+        return
+
+    if _should_use_openai():
+        await _openai_say_streaming_async(
+            clean_text,
+            volume=volume,
+            alsa_device=alsa_device,
+        )
+    else:
+        # Fall back to sync version in thread pool
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: say(text, volume=volume, alsa_device=alsa_device),
+        )
+
+
 class Go2TTSTool(CodedTool):
     async def async_invoke(self, args: Dict[str, Any], sly_data: Dict[str, Any]) -> Any:
         text = args.get("text")
@@ -770,13 +1136,21 @@ class Go2TTSTool(CodedTool):
             return "Missing required 'text'"
 
         try:
-            say(
-                text=text,
-                rate=int(args.get("rate", 150)),
-                volume=float(args.get("volume", 1.0)),
-                voice=args.get("voice", "en-gb+f3"),
-                alsa_device=args.get("alsa_device"),
-            )
+            # Use async version if OpenAI is available for better performance
+            if _should_use_openai():
+                await say_async(
+                    text=text,
+                    volume=float(args.get("volume", 1.0)),
+                    alsa_device=args.get("alsa_device"),
+                )
+            else:
+                say(
+                    text=text,
+                    rate=int(args.get("rate", 150)),
+                    volume=float(args.get("volume", 1.0)),
+                    voice=args.get("voice", "en-gb+f3"),
+                    alsa_device=args.get("alsa_device"),
+                )
             return f"TTS OK: {text}"
         except Exception as e:
             logging.exception("TTS failed")
@@ -788,9 +1162,20 @@ class Go2TTSTool(CodedTool):
 # ---------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser("Offline TTS for Unitree Go2")
+    parser = argparse.ArgumentParser("TTS for Unitree Go2")
     parser.add_argument("text", nargs="*", help="Text to speak")
+    parser.add_argument(
+        "--engine",
+        choices=["openai", "piper", "espeak", "auto"],
+        default=None,
+        help="TTS engine to use (overrides GO2_TTS_ENGINE env var)",
+    )
     args = parser.parse_args()
+
+    # Override engine if specified
+    if args.engine:
+        global TTS_ENGINE
+        TTS_ENGINE = args.engine
 
     text = " ".join(args.text) if args.text else "Hello from Unitree!"
     say(text)
