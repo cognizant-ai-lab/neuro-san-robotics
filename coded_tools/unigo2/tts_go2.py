@@ -26,6 +26,7 @@ Environment Variables:
 - OPENAI_API_KEY: Required for OpenAI TTS
 - GO2_OPENAI_VOICE: OpenAI voice (default: "coral")
 - GO2_OPENAI_MODEL: OpenAI model (default: "gpt-4o-mini-tts")
+- GO2_OPENAI_VOLUME_GAIN: Volume amplification factor (default: "2.0" for 2x louder)
 """
 
 import argparse
@@ -58,6 +59,9 @@ OPENAI_INSTRUCTIONS = os.environ.get(
     "GO2_OPENAI_INSTRUCTIONS",
     "Speak in a friendly, conversational tone with natural pacing."
 )
+# Volume gain for OpenAI TTS (1.0 = normal, 2.0 = 2x louder, etc.)
+# This applies software amplification to the PCM audio data
+OPENAI_VOLUME_GAIN = float(os.environ.get("GO2_OPENAI_VOLUME_GAIN", "2.0"))
 
 # Piper TTS configuration
 PIPER_MODEL = os.environ.get(
@@ -92,6 +96,37 @@ def _is_openai_available() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY"))
 
 
+def _amplify_pcm_chunk(chunk: bytes, gain: float) -> bytes:
+    """
+    Amplify a PCM audio chunk by applying a gain factor.
+
+    Args:
+        chunk: Raw PCM audio data (16-bit signed little-endian)
+        gain: Volume gain factor (1.0 = no change, 2.0 = 2x louder)
+
+    Returns:
+        Amplified PCM audio data
+    """
+    if gain == 1.0:
+        return chunk
+
+    import struct
+
+    # PCM is 16-bit signed little-endian, so 2 bytes per sample
+    num_samples = len(chunk) // 2
+    samples = struct.unpack(f"<{num_samples}h", chunk)
+
+    # Apply gain with clipping to prevent overflow
+    amplified = []
+    for sample in samples:
+        new_sample = int(sample * gain)
+        # Clip to 16-bit signed range
+        new_sample = max(-32768, min(32767, new_sample))
+        amplified.append(new_sample)
+
+    return struct.pack(f"<{num_samples}h", *amplified)
+
+
 def _openai_say_streaming(
     text: str,
     voice: str = OPENAI_VOICE,
@@ -123,9 +158,12 @@ def _openai_say_streaming(
     system = platform.system()
     device = alsa_device or DEFAULT_ALSA_DEVICE
 
+    # Apply volume gain for louder output
+    gain = OPENAI_VOLUME_GAIN
+
     logging.info(
-        "GO2_TTS: OpenAI streaming TTS (voice=%s, model=%s)",
-        voice, model
+        "GO2_TTS: OpenAI streaming TTS (voice=%s, model=%s, gain=%.1f)",
+        voice, model, gain
     )
 
     # Set ALSA volume before playback
@@ -162,7 +200,9 @@ def _openai_say_streaming(
             try:
                 for chunk in response.iter_bytes(chunk_size=4096):
                     if aplay_proc.stdin:
-                        aplay_proc.stdin.write(chunk)
+                        # Apply volume gain to PCM audio
+                        amplified_chunk = _amplify_pcm_chunk(chunk, gain)
+                        aplay_proc.stdin.write(amplified_chunk)
             finally:
                 if aplay_proc.stdin:
                     aplay_proc.stdin.close()
@@ -253,9 +293,12 @@ async def _openai_say_streaming_async(
     system = platform.system()
     device = alsa_device or DEFAULT_ALSA_DEVICE
 
+    # Apply volume gain for louder output
+    gain = OPENAI_VOLUME_GAIN
+
     logging.info(
-        "GO2_TTS: OpenAI async streaming TTS (voice=%s, model=%s)",
-        voice, model
+        "GO2_TTS: OpenAI async streaming TTS (voice=%s, model=%s, gain=%.1f)",
+        voice, model, gain
     )
 
     # Set ALSA volume before playback
@@ -289,7 +332,9 @@ async def _openai_say_streaming_async(
             try:
                 async for chunk in response.iter_bytes(chunk_size=4096):
                     if aplay_proc.stdin:
-                        aplay_proc.stdin.write(chunk)
+                        # Apply volume gain to PCM audio
+                        amplified_chunk = _amplify_pcm_chunk(chunk, gain)
+                        aplay_proc.stdin.write(amplified_chunk)
                         await aplay_proc.stdin.drain()
             finally:
                 if aplay_proc.stdin:
