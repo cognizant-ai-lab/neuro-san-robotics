@@ -61,7 +61,7 @@ OPENAI_INSTRUCTIONS = os.environ.get(
 )
 # Volume gain for OpenAI TTS (1.0 = normal, 2.0 = 2x louder, etc.)
 # This applies software amplification to the PCM audio data
-OPENAI_VOLUME_GAIN = float(os.environ.get("GO2_OPENAI_VOLUME_GAIN", "2.0"))
+OPENAI_VOLUME_GAIN = float(os.environ.get("GO2_OPENAI_VOLUME_GAIN", "3.0"))
 
 # Piper TTS configuration
 PIPER_MODEL = os.environ.get(
