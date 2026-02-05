@@ -33,15 +33,11 @@ KEY  = BASE_DIR / "certs" / "key.pem"
 # Import TTS function for hardwired speech
 try:
     from coded_tools.unigo2.tts_go2 import say as tts_say
-    from coded_tools.unigo2.tts_go2 import say_cached as tts_say_cached
-    from coded_tools.unigo2.tts_go2 import prewarm_audio_cache
     TTS_AVAILABLE = True
 except ImportError:
     logging.warning("TTS module not available - speech will be text-only")
     TTS_AVAILABLE = False
     tts_say = None
-    tts_say_cached = None
-    prewarm_audio_cache = None
 
 # Import robot macros for motion during acknowledgment
 try:
@@ -132,10 +128,6 @@ user_input_queue = queue.Queue()
 # Speech queue for TTS - allows non-blocking speech processing
 speech_queue = queue.Queue()
 
-# Pre-warm audio cache with acknowledgment phrases for instant playback
-if TTS_AVAILABLE and prewarm_audio_cache is not None:
-    logging.info("Pre-warming TTS audio cache with acknowledgment phrases...")
-    prewarm_audio_cache(ACKNOWLEDGMENT_PHRASES)
 
 
 def sanitize_speech_text(text: str) -> str:
@@ -267,18 +259,8 @@ def speech_worker():
             if text is None:
                 break
             logging.info("Speech worker: starting TTS for text: %s...", text[:50] if text else "")
-
-            # Try cached audio first (instant playback for pre-warmed phrases)
-            if TTS_AVAILABLE and tts_say_cached is not None:
-                if tts_say_cached(text):
-                    logging.info("Speech worker: played from cache (instant)")
-                else:
-                    # Not in cache, fall back to regular TTS
-                    speak_text(text)
-                    logging.info("Speech worker: TTS completed (not cached)")
-            else:
-                speak_text(text)
-                logging.info("Speech worker: TTS completed")
+            speak_text(text)
+            logging.info("Speech worker: TTS completed")
         except queue.Empty:
             continue
         except Exception:
