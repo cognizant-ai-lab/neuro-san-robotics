@@ -1,6 +1,32 @@
 # neuro-san-robotics
 Neuro SAN Robotics
 
+## Start Cailey
+
+1. Physically start Caily with a short press followed by a long press
+on its power button.
+2. Find Cailey's IP address and ssh into it:
+    ```shell
+    ssh unitree@10.194.17.33
+    ```
+    **Note 1**: its IP address might change. If it does, you'll have to plug in a monitor
+    on its back, log in and check its network settings.  
+    **Note 2**: Ask around for the password.
+3. Navigate to the following folder:
+   ```shell
+   cd exp/neuro-san-robotics-hormoz
+   ```
+4. Setup the environment:
+   ```shell
+   source setmyenv.sh
+   ```
+5. Start the app
+   ```shell
+   python apps/conscious_assistant/interface_flask.py
+   ```
+You can now navigate to https://10.194.17.33:5001 (check the IP address)
+to interact with Cailey.
+
 ## Setup
 
 ### Clone the repo
