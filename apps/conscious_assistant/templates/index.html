@@ -25,9 +25,6 @@
                 <form id="user-input-section" autocomplete="off">
                     <textarea id="user-input" rows="3" placeholder="Communicate with CAIL-E the conscious dog... (type 'exit' to disconnect)" aria-label="Type your message"></textarea>
                     <div class="button-group">
-                        <button type="button" id="mic-button" aria-label="Voice input">
-                            <span class="mic-icon">🎤</span>
-                        </button>
                         <button type="button" id="send-button" onclick="sendUserInput()">
                             <span class="button-text">Send</span>
                         </button>
@@ -71,26 +68,61 @@
         var chatHistoryInitialized = false;
         var isRecording = false;
         var micPermissionGranted = false;
+        var isProcessing = false;  // Track when robot is processing a response
         
         // Whisper (OpenAI) speech recognition variables
         var mediaRecorder = null;
         var audioChunks = [];
         var whisperStream = null;
+        var preWarmedStream = null;  // Pre-warmed audio stream for instant recording
         var isTranscribing = false;
         var AUTO_SEND = true;  // Auto-send transcription when recording stops
+        var recordingStartTime = 0;  // Track when recording started
+        var MIN_RECORDING_DURATION_MS = 300;  // Minimum recording duration in milliseconds
+        var MIN_AUDIO_SIZE_BYTES = 1000;  // Minimum audio blob size in bytes
+
+        // Audio constraints optimized for speech recognition
+        var audioConstraints = {
+            audio: {
+                channelCount: 1,  // Mono audio (smaller file size)
+                sampleRate: 16000,  // Lower sample rate for speech (default is 48000)
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+            }
+        };
+
+        // Pre-warm the audio stream so recording starts instantly
+        async function preWarmAudioStream() {
+            if (preWarmedStream) {
+                return preWarmedStream;
+            }
+            
+            try {
+                console.log('Pre-warming audio stream...');
+                preWarmedStream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+                micPermissionGranted = true;
+                console.log('Audio stream pre-warmed and ready');
+                return preWarmedStream;
+            } catch (err) {
+                console.error('Failed to pre-warm audio stream:', err);
+                return null;
+            }
+        }
 
         // Pre-warm microphone permission on first use
         async function ensureMicPermission() {
-            if (micPermissionGranted) {
+            if (micPermissionGranted && preWarmedStream) {
                 return true;
             }
             
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                stream.getTracks().forEach(track => track.stop());
-                micPermissionGranted = true;
-                console.log('Microphone permission granted');
-                return true;
+                // Pre-warm the stream instead of just getting permission
+                const stream = await preWarmAudioStream();
+                if (stream) {
+                    return true;
+                }
+                return false;
             } catch (err) {
                 console.error('Microphone permission denied:', err);
                 alert('Microphone access is required for voice input. Please allow microphone access in your browser settings.');
@@ -106,16 +138,17 @@
             }
 
             try {
-                // Request audio with optimized constraints for faster processing
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        channelCount: 1,  // Mono audio (smaller file size)
-                        sampleRate: 16000,  // Lower sample rate for speech (default is 48000)
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    }
-                });
+                // Use pre-warmed stream if available for instant recording start
+                // This eliminates the delay that causes the beginning of speech to be clipped
+                var stream;
+                if (preWarmedStream && preWarmedStream.active) {
+                    console.log('Using pre-warmed audio stream for instant recording');
+                    stream = preWarmedStream;
+                    preWarmedStream = null;  // Clear so we get a fresh one next time
+                } else {
+                    console.log('No pre-warmed stream, requesting new one...');
+                    stream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+                }
                 whisperStream = stream;
                 audioChunks = [];
 
@@ -145,19 +178,62 @@
                 };
                 
                 mediaRecorder.onstop = async function() {
-                    console.log('MediaRecorder stopped, transcribing...');
-                    isTranscribing = true;
-                    document.getElementById('mic-button').classList.add('transcribing');
+                    console.log('MediaRecorder stopped, processing...');
                     
-                    // Stop all tracks
+                    // Stop all tracks first
                     if (whisperStream) {
                         whisperStream.getTracks().forEach(track => track.stop());
                         whisperStream = null;
                     }
                     
+                    // Pre-warm a new stream for the next recording (non-blocking)
+                    // This ensures the next recording starts instantly
+                    preWarmAudioStream().catch(err => {
+                        console.log('Failed to pre-warm next stream:', err);
+                    });
+                    
+                    // Check recording duration
+                    var recordingDuration = Date.now() - recordingStartTime;
+                    console.log('Recording duration: ' + recordingDuration + 'ms, chunks: ' + audioChunks.length);
+                    
+                    if (recordingDuration < MIN_RECORDING_DURATION_MS) {
+                        console.log('Recording too short (' + recordingDuration + 'ms < ' + MIN_RECORDING_DURATION_MS + 'ms), discarding');
+                        audioChunks = [];
+                        return;
+                    }
+                    
+                    // Check if we have any audio chunks
+                    if (audioChunks.length === 0) {
+                        console.log('No audio chunks recorded, discarding');
+                        return;
+                    }
+                    
                     // Create blob from chunks
                     const audioBlob = new Blob(audioChunks, { type: mimeType || 'audio/webm' });
                     audioChunks = [];
+                    
+                    // Check minimum audio size
+                    if (audioBlob.size < MIN_AUDIO_SIZE_BYTES) {
+                        console.log('Audio too small (' + audioBlob.size + ' bytes < ' + MIN_AUDIO_SIZE_BYTES + ' bytes), discarding');
+                        return;
+                    }
+                    
+                    console.log('Audio blob size: ' + audioBlob.size + ' bytes, transcribing...');
+                    isTranscribing = true;
+                    document.getElementById('floating-mic-button').classList.add('transcribing');
+                    
+                    // Show transcribing indicator in chat immediately
+                    var chatElement = document.getElementById('chat-history');
+                    if (!chatHistoryInitialized) {
+                        chatElement.innerHTML = '';
+                        chatHistoryInitialized = true;
+                    }
+                    var transcribingIndicator = document.createElement('div');
+                    transcribingIndicator.className = 'user-msg transcribing-indicator';
+                    transcribingIndicator.innerHTML = '<em>Transcribing...</em>';
+                    transcribingIndicator.id = 'transcribing-indicator';
+                    chatElement.appendChild(transcribingIndicator);
+                    chatElement.scrollTop = chatElement.scrollHeight;
                     
                     // Send to server for transcription
                     try {
@@ -177,31 +253,53 @@
                         const data = await response.json();
                         const text = (data.text || '').trim();
                         
+                        // Remove transcribing indicator
+                        var indicator = document.getElementById('transcribing-indicator');
+                        if (indicator) {
+                            indicator.remove();
+                        }
+                        
                         if (text) {
+                            // Show user's text in chat immediately (before sending to server)
+                            chatElement.innerHTML += '<div class="user-msg">' + text.replace(/\n/g, '<br>') + '</div>';
+                            chatElement.scrollTop = chatElement.scrollHeight;
+                            
                             document.getElementById('user-input').value = text;
                             console.log('Transcription successful:', text);
                             
-                            // Auto-send if enabled
+                            // Auto-send if enabled (this will also emit to server for processing)
                             if (AUTO_SEND) {
-                                sendUserInput();
+                                // Send to server with skip_echo flag since we already displayed the text
+                                var userInput = document.getElementById('user-input').value.trim();
+                                if (userInput) {
+                                    socket.emit('user_input', {data: userInput, skip_echo: true});
+                                    document.getElementById('user-input').value = '';
+                                    setInputDisabled(true);
+                                }
                             }
                         } else {
                             console.log('No speech detected in transcription');
                             alert('No speech detected. Please try again.');
                         }
                     } catch (err) {
+                        // Remove transcribing indicator on error
+                        var indicator = document.getElementById('transcribing-indicator');
+                        if (indicator) {
+                            indicator.remove();
+                        }
                         console.error('Transcription error:', err);
                         alert('Transcription failed: ' + err.message + '\n\nMake sure OPENAI_API_KEY is set on the server.');
                     } finally {
                         isTranscribing = false;
-                        document.getElementById('mic-button').classList.remove('transcribing');
+                        document.getElementById('floating-mic-button').classList.remove('transcribing');
                     }
                 };
                 
                 // Start recording with timeslice for more frequent data chunks (every 100ms)
                 mediaRecorder.start(100);
                 isRecording = true;
-                document.getElementById('mic-button').classList.add('recording');
+                recordingStartTime = Date.now();
+                document.getElementById('floating-mic-button').classList.add('recording');
                 console.log('Whisper recording started with optimized settings');
                 
             } catch (err) {
@@ -216,42 +314,10 @@
             if (mediaRecorder && mediaRecorder.state !== 'inactive') {
                 mediaRecorder.stop();
                 isRecording = false;
-                document.getElementById('mic-button').classList.remove('recording');
+                document.getElementById('floating-mic-button').classList.remove('recording');
                 console.log('Stopping Whisper recording...');
             }
         }
-
-        // Setup mic button push-to-talk event handlers
-        document.addEventListener('DOMContentLoaded', function() {
-            const micButton = document.getElementById('mic-button');
-            
-            async function startIfPossible(e) {
-                e.preventDefault();
-                if (!isRecording && !isTranscribing) {
-                    const hasPermission = await ensureMicPermission();
-                    if (hasPermission) {
-                        await startWhisperRecording();
-                    }
-                }
-            }
-            
-            function stopIfRecording(e) {
-                e.preventDefault();
-                if (isRecording) {
-                    stopWhisperRecording();
-                }
-            }
-            
-            // Mouse events
-            micButton.addEventListener('mousedown', startIfPossible);
-            micButton.addEventListener('mouseup', stopIfRecording);
-            micButton.addEventListener('mouseleave', stopIfRecording);
-            
-            // Touch events for mobile
-            micButton.addEventListener('touchstart', startIfPossible, {passive: false});
-            micButton.addEventListener('touchend', stopIfRecording);
-            micButton.addEventListener('touchcancel', stopIfRecording);
-        });
 
         // Spacebar hotkey for speech input (hold to talk, release to stop)
         var spacebarPressed = false;
@@ -263,6 +329,11 @@
                 e.preventDefault();
                 spacebarPressed = true;
                 spacebarStartTime = Date.now();
+                
+                if (isProcessing) {
+                    console.log('Cannot record while robot is processing');
+                    return;
+                }
                 
                 if (!isRecording && !isTranscribing) {
                     // Use async function to handle permission check
@@ -298,6 +369,38 @@
             console.log('Websocket connected!');
         });
 
+        // Functions to enable/disable input controls during robot processing
+        function setInputDisabled(disabled) {
+            isProcessing = disabled;
+            var textarea = document.getElementById('user-input');
+            var sendButton = document.getElementById('send-button');
+            var floatingMicButton = document.getElementById('floating-mic-button');
+            
+            textarea.disabled = disabled;
+            sendButton.disabled = disabled;
+            
+            if (disabled) {
+                textarea.classList.add('disabled');
+                sendButton.classList.add('disabled');
+                floatingMicButton.classList.add('disabled');
+            } else {
+                textarea.classList.remove('disabled');
+                sendButton.classList.remove('disabled');
+                floatingMicButton.classList.remove('disabled');
+            }
+        }
+
+        // Listen for processing state changes from server
+        socket.on('processing_started', function() {
+            console.log('Robot is processing...');
+            setInputDisabled(true);
+        });
+
+        socket.on('processing_complete', function() {
+            console.log('Robot finished processing');
+            setInputDisabled(false);
+        });
+
         socket.on('update_thoughts', function(data) {
             var element = document.getElementById('assistant-thoughts');
             if (!thoughtsInitialized) {
@@ -318,6 +421,45 @@
             element.scrollTop = element.scrollHeight;
         });
 
+        // Track current streaming speech message for progressive text display
+        var currentStreamingMsg = null;
+        var currentStreamingText = '';
+
+        socket.on('update_speech_chunk', function(data) {
+            // Progressive text display: show text chunk-by-chunk as robot speaks
+            var element = document.getElementById('chat-history');
+            if (!chatHistoryInitialized) {
+                element.innerHTML = '';
+                chatHistoryInitialized = true;
+            }
+
+            // First chunk: create a new speech message element
+            if (data.chunk_idx === 0) {
+                currentStreamingMsg = document.createElement('div');
+                currentStreamingMsg.className = 'speech-msg streaming';
+                currentStreamingText = '';
+                element.appendChild(currentStreamingMsg);
+            }
+
+            // Append chunk text to the current message
+            if (currentStreamingMsg) {
+                // Add space between chunks if needed
+                if (currentStreamingText && !currentStreamingText.endsWith(' ')) {
+                    currentStreamingText += ' ';
+                }
+                currentStreamingText += data.chunk;
+                currentStreamingMsg.innerHTML = currentStreamingText.replace(/\n/g, '<br>');
+                element.scrollTop = element.scrollHeight;
+
+                // Last chunk: remove streaming class
+                if (data.chunk_idx === data.total_chunks - 1) {
+                    currentStreamingMsg.classList.remove('streaming');
+                    currentStreamingMsg = null;
+                    currentStreamingText = '';
+                }
+            }
+        });
+
         socket.on('update_user_input', function(data) {
             var element = document.getElementById('chat-history');
             if (!chatHistoryInitialized) {
@@ -329,11 +471,16 @@
         });
 
         function sendUserInput() {
+            if (isProcessing) {
+                console.log('Cannot send input while robot is processing');
+                return;
+            }
             var userInput = document.getElementById('user-input').value.trim();
             if (userInput) {
-                // socket.emit('user_input', {data: userInput}, '/chat');
                 socket.emit('user_input', {data: userInput});
                 document.getElementById('user-input').value = '';
+                // Disable input immediately after sending
+                setInputDisabled(true);
             }
         }
 
@@ -361,6 +508,10 @@
 
         document.getElementById('floating-mic-button').addEventListener('mousedown', async function(e) {
             e.preventDefault();
+            if (isProcessing) {
+                console.log('Cannot record while robot is processing');
+                return;
+            }
             if (!isRecording && !isTranscribing) {
                 const hasPermission = await ensureMicPermission();
                 if (hasPermission) {
@@ -387,6 +538,10 @@
 
         document.getElementById('floating-mic-button').addEventListener('touchstart', async function(e) {
             e.preventDefault();
+            if (isProcessing) {
+                console.log('Cannot record while robot is processing');
+                return;
+            }
             if (!isRecording && !isTranscribing) {
                 const hasPermission = await ensureMicPermission();
                 if (hasPermission) {

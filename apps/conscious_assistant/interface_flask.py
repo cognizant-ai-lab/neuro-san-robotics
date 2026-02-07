@@ -48,6 +48,15 @@ except ImportError:
     ROBOT_AVAILABLE = False
     Go2Macros = None
 
+# Import deferred action executor for robot actions after speech
+try:
+    from coded_tools.unigo2.robot_macros import execute_deferred_actions
+    DEFERRED_ACTIONS_AVAILABLE = True
+except ImportError:
+    logging.warning("execute_deferred_actions not available - deferred robot actions disabled")
+    DEFERRED_ACTIONS_AVAILABLE = False
+    execute_deferred_actions = None
+
 THINKING_INTERVAL = 30.0
 
 # Robot motion configuration
@@ -65,41 +74,41 @@ ALLOWED_ROBOT_ACTIONS = [
 # Acknowledgment phrases to speak immediately when user input is received
 ACKNOWLEDGMENT_PHRASES = [
     "Got it",
-    "I'm on it",
+    "I'm on it...",
     "Let me check",
-    "One moment",
+    "One moment...",
     "Sure thing",
     "Okay",
     "Understood",
-    "Working on it",
-    "Let me see",
+    "Working on it...",
+    "Let me see...",
     "Give me a second",
     "Right away",
     "On it",
     "You got it",
-    "Absolutely",
-    "Let me think",
-    "Hold on",
-    "Just a sec",
-    "Coming right up",
+    "Absolutely...",
+    "Let me think...",
+    "Hold on...",
+    "Just a sec...",
+    "Coming right up...",
     "Perfect",
     "I hear you",
-    "Hmm",
+    "Hmm...",
     "Uh-huh",
     "Oh - okay",
     "Alright",
     "Thinking...",
-    "Give me a sec",
-    "Um",
+    "Give me a sec...",
+    "Um...",
     "Let me check with my agents...",
-    "One minute please",
+    "One minute please...",
     "I'm a bit hungry",
     "Haven't had my coffee yet today",
-    "Just a moment please",
-    "Let me grab my thinking cap",
-    "My LLM is warming up",
-    "Loading neural pathways",
-    "Consulting my artificial brain",
+    "Just a moment please...",
+    "Let me grab my thinking cap...",
+    "My LLM is warming up...",
+    "Loading neural pathways...",
+    "Let me consult my artificial brain for a sec...",
     "I'm just a dog, but ok.",
     "Beep boop beep",
     "Bark",
@@ -120,18 +129,19 @@ user_input_queue = queue.Queue()
 speech_queue = queue.Queue()
 
 
+
 def sanitize_speech_text(text: str) -> str:
     """
     Remove tool-trace garbage from speech text.
-    
+
     Sometimes the agent embeds function call traces like:
     'functions.say_out_loud ...: <text>'
-    
+
     This function strips those out to get clean speech text.
     """
     if not text:
         return ""
-    
+
     # Remove lines that look like function call traces
     lines = text.split('\n')
     clean_lines = []
@@ -143,17 +153,23 @@ def sanitize_speech_text(text: str) -> str:
         if re.match(r'^(CALL_TOOL|TOOL_CALL|call)\s*:', line.strip(), re.IGNORECASE):
             continue
         clean_lines.append(line)
-    
+
     return '\n'.join(clean_lines).strip()
 
 
-def speak_text(text: str) -> None:
+def speak_text_streaming(
+    text: str,
+    on_speech_complete=None,
+) -> None:
     """
-    Speak the given text using TTS.
+    Speak the given text using TTS without chunking.
 
-    This is the hardwired TTS function that gets called automatically
-    whenever a 'say:' block is detected, ensuring speech always happens
-    regardless of whether the agent's tool call worked.
+    Speaks the full text at once for better prosody/tone.
+    The callback is called AFTER speech completes to update the UI.
+
+    Args:
+        text: Text to speak
+        on_speech_complete: Optional callback(text) called after speech finishes
     """
     if not TTS_AVAILABLE or tts_say is None:
         logging.info("TTS not available, skipping speech: %s", text[:50])
@@ -166,9 +182,26 @@ def speak_text(text: str) -> None:
 
     try:
         logging.info("Speaking: %s", clean_text[:50])
-        tts_say(clean_text)
-    except Exception as e:
+        # Speak without chunking for better prosody
+        tts_say(clean_text, chunked=False)
+        # Call callback AFTER speech completes to update UI
+        if on_speech_complete:
+            on_speech_complete(clean_text)
+    except Exception:
         logging.exception("TTS failed for text: %s", clean_text[:50])
+
+
+def speak_text(text: str) -> None:
+    """
+    Speak the given text using TTS.
+
+    This is the hardwired TTS function that gets called automatically
+    whenever a 'say:' block is detected, ensuring speech always happens
+    regardless of whether the agent's tool call worked.
+
+    Speaks full text at once for better prosody.
+    """
+    speak_text_streaming(text, on_speech_complete=None)
 
 
 def perform_random_robot_motion() -> None:
@@ -230,7 +263,7 @@ def speech_worker():
             logging.info("Speech worker: TTS completed")
         except queue.Empty:
             continue
-        except Exception as e:
+        except Exception:
             logging.exception("Speech worker error")
         finally:
             if got_item:
@@ -282,6 +315,8 @@ def conscious_thinking_process():
                 if thoughts is None:
                     continue
                 thoughts = f"\n{timestamp} user: " + "[Silence]"
+                # Emit processing_started for silence-triggered processing
+                socketio.emit("processing_started", namespace="/chat")
 
             thoughts, conscious_thread = conscious_thinker(conscious_session, conscious_thread, thoughts)
             print(thoughts)
@@ -317,21 +352,36 @@ def conscious_thinking_process():
                 )
 
             if speeches_to_emit:
-                socketio.emit(
-                    "update_speech",
-                    {"data": "\n".join(speeches_to_emit)},
-                    namespace="/chat",
-                )
-                # Hardwired TTS: Queue each speech block for audio playback
+                # TTS with UI update after speech completes
+                logging.info("Starting TTS for %d speech blocks", len(speeches_to_emit))
+
+                def emit_speech_to_ui(speech_text):
+                    """Callback after speech completes to update UI."""
+                    logging.debug("Emitting speech to UI: %s...", speech_text[:30])
+                    socketio.emit(
+                        "update_speech",
+                        {"data": speech_text},
+                        namespace="/chat",
+                    )
+
                 for speech_text in speeches_to_emit:
-                    speech_queue.put(speech_text)
-                
-                # Wait for all speech to complete before continuing to next turn
-                # This prevents the agent from starting a new conversation turn
-                # while the robot is still speaking the previous response
-                logging.info("Waiting for TTS playback to complete...")
-                speech_queue.join()
-                logging.info("TTS playback complete, ready for next turn")
+                    # Speak first, then update UI after speech completes
+                    speak_text_streaming(speech_text, on_speech_complete=emit_speech_to_ui)
+
+                logging.info("TTS complete")
+
+            # Execute any deferred robot actions AFTER speech and UI update
+            # This ensures the robot speaks and shows response first, then performs actions
+            if DEFERRED_ACTIONS_AVAILABLE and execute_deferred_actions is not None:
+                try:
+                    results = execute_deferred_actions()
+                    if results:
+                        logging.info("Executed %d deferred robot actions", len(results))
+                except Exception:
+                    logging.exception("Failed to execute deferred robot actions")
+
+            # Signal that processing is complete and user can send new input
+            socketio.emit("processing_complete", namespace="/chat")
 
 
 @socketio.on("connect", namespace="/chat")
@@ -354,34 +404,41 @@ def index():
 def transcribe_audio():
     """
     Transcribe audio using OpenAI Whisper API.
-    
+
     Expects a multipart/form-data POST with an 'audio' file.
     Returns JSON with 'text' field containing the transcription.
     """
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
         return jsonify({
-            "error": "OpenAI API key not configured. Please set OPENAI_API_KEY environment variable."
+            "error": "OpenAI API key not configured. Set OPENAI_API_KEY env var."
         }), 503
-    
+
     if "audio" not in request.files:
         return jsonify({"error": "No audio file provided"}), 400
-    
+
     audio_file = request.files["audio"]
     if audio_file.filename == "":
         return jsonify({"error": "Empty audio file"}), 400
-    
-    MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
+
+    max_file_size = 25 * 1024 * 1024  # 25MB
     audio_file.seek(0, os.SEEK_END)
     file_size = audio_file.tell()
     audio_file.seek(0)
-    
-    if file_size > MAX_FILE_SIZE:
-        return jsonify({"error": f"Audio file too large. Maximum size is 25MB, got {file_size / 1024 / 1024:.1f}MB"}), 413
-    
+
+    if file_size > max_file_size:
+        size_mb = file_size / 1024 / 1024
+        return jsonify({"error": f"Audio file too large. Max 25MB, got {size_mb:.1f}MB"}), 413
+
     if file_size == 0:
         return jsonify({"error": "Audio file is empty"}), 400
-    
+
+    # Minimum file size check - very short recordings produce corrupted files
+    min_audio_size = 1000  # 1KB minimum
+    if file_size < min_audio_size:
+        logging.warning("Audio file too small (%d bytes), likely a quick tap", file_size)
+        return jsonify({"error": "Recording too short. Hold the mic button longer."}), 400
+
     temp_file = None
     try:
         suffix = ".webm"  # Default to webm
@@ -391,28 +448,28 @@ def transcribe_audio():
             suffix = ".mp3"
         elif audio_file.filename.endswith(".m4a"):
             suffix = ".m4a"
-        
+
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         audio_file.save(temp_file.name)
         temp_file.close()
-        
+
         try:
             from openai import OpenAI
             client = OpenAI(api_key=openai_api_key)
-            
+
             with open(temp_file.name, "rb") as f:
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1",
                     file=f,
                     language="en"  # Optimize for English
                 )
-            
+
             return jsonify({"text": transcript.text})
-        
+
         except Exception as e:
             print(f"OpenAI API error: {e}")
             return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
-    
+
     finally:
         if temp_file and os.path.exists(temp_file.name):
             try:
@@ -426,11 +483,17 @@ def handle_user_input(json, *_):
     """
     Handles user input.
 
-    :param json: A json object
+    :param json: A json object containing:
+        - data: The user's input text
+        - skip_echo: Optional boolean to skip echoing back to chat (used when
+                     client has already displayed the text, e.g., from voice input)
     """
     user_input = json["data"]
+    skip_echo = json.get("skip_echo", False)
     user_input_queue.put(user_input)
-    socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
+    # Only emit update_user_input if client hasn't already displayed it
+    if not skip_echo:
+        socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
 
 
 cleaned_up = False
@@ -438,14 +501,14 @@ cleaned_up = False
 
 def cleanup(from_request=False):
     """Tear things down on exit."""
-    global cleaned_up
+    global cleaned_up  # pylint: disable=global-statement
     if cleaned_up:
         return
     cleaned_up = True
-    
+
     print("Bye!")
     tear_down_conscious_assistant(conscious_session)
-    
+
     if from_request:
         try:
             from flask import has_request_context
@@ -456,7 +519,7 @@ def cleanup(from_request=False):
                 else:
                     app.logger.warning("Werkzeug shutdown function not available")
         except Exception as e:
-            app.logger.warning(f"Server shutdown failed: {e}")
+            app.logger.warning("Server shutdown failed: %s", e)
 
 
 @app.route("/shutdown", methods=["POST"])
