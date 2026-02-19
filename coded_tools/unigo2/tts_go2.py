@@ -74,7 +74,7 @@ PIPER_CONFIG = os.environ.get(
     "/home/unitree/piper_models/en_GB-cori-high.onnx.json",
 )
 
-DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "plughw:0,0")
+DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "plughw:2,0")
 
 # ALSA mixer control name for volume (common names: "Master", "PCM", "Speaker")
 # Set via env var if the default doesn't work on your hardware
@@ -204,13 +204,16 @@ def _openai_say_streaming(
                         amplified_chunk = _amplify_pcm_chunk(chunk, gain)
                         aplay_proc.stdin.write(amplified_chunk)
             finally:
-                if aplay_proc.stdin:
-                    aplay_proc.stdin.close()
+                try:
+                    if aplay_proc.stdin:
+                        aplay_proc.stdin.close()
+                except BrokenPipeError:
+                    pass
                 aplay_proc.wait()
 
                 if aplay_proc.returncode != 0:
                     stderr = aplay_proc.stderr.read() if aplay_proc.stderr else b""
-                    logging.warning(
+                    logging.error(
                         "aplay returned %d: %s",
                         aplay_proc.returncode,
                         stderr.decode(errors="ignore")
@@ -337,10 +340,21 @@ async def _openai_say_streaming_async(
                         aplay_proc.stdin.write(amplified_chunk)
                         await aplay_proc.stdin.drain()
             finally:
-                if aplay_proc.stdin:
-                    aplay_proc.stdin.close()
-                    await aplay_proc.stdin.wait_closed()
+                try:
+                    if aplay_proc.stdin:
+                        aplay_proc.stdin.close()
+                        await aplay_proc.stdin.wait_closed()
+                except BrokenPipeError:
+                    pass
                 await aplay_proc.wait()
+
+                if aplay_proc.returncode != 0:
+                    stderr = (await aplay_proc.stderr.read()) if aplay_proc.stderr else b""
+                    logging.error(
+                        "aplay returned %d: %s",
+                        aplay_proc.returncode,
+                        stderr.decode(errors="ignore")
+                    )
 
         elif system == "Darwin":
             import tempfile
