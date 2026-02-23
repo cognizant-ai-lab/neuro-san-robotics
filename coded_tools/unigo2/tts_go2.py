@@ -74,7 +74,7 @@ PIPER_CONFIG = os.environ.get(
     "/home/unitree/piper_models/en_GB-cori-high.onnx.json",
 )
 
-DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "plughw:2,0")
+DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "plughw:0,0")
 
 # ALSA mixer control name for volume (common names: "Master", "PCM", "Speaker")
 # Set via env var if the default doesn't work on your hardware
