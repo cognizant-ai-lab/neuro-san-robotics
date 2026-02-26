@@ -74,7 +74,7 @@ PIPER_CONFIG = os.environ.get(
     "/home/unitree/piper_models/en_GB-cori-high.onnx.json",
 )
 
-DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "plughw:0,0")
+DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "auto")
 
 # ALSA mixer control name for volume (common names: "Master", "PCM", "Speaker")
 # Set via env var if the default doesn't work on your hardware
@@ -156,7 +156,7 @@ def _openai_say_streaming(
 
     client = OpenAI()
     system = platform.system()
-    device = alsa_device or DEFAULT_ALSA_DEVICE
+    device = alsa_device or _RESOLVED_ALSA_DEVICE
 
     # Apply volume gain for louder output
     gain = OPENAI_VOLUME_GAIN
@@ -294,7 +294,7 @@ async def _openai_say_streaming_async(
 
     client = AsyncOpenAI()
     system = platform.system()
-    device = alsa_device or DEFAULT_ALSA_DEVICE
+    device = alsa_device or _RESOLVED_ALSA_DEVICE
 
     # Apply volume gain for louder output
     gain = OPENAI_VOLUME_GAIN
@@ -641,6 +641,46 @@ def _has(cmd: str) -> bool:
     return shutil.which(cmd) is not None
 
 
+def _detect_usb_audio_device() -> str:
+    """
+    Detect the first USB Audio playback device by parsing 'aplay -l'.
+
+    Returns:
+        ALSA device string like "plughw:2,0", or "default" if not found.
+    """
+    try:
+        result = subprocess.run(
+            ["aplay", "-l"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        for line in result.stdout.splitlines():
+            if "USB Audio" in line and line.startswith("card "):
+                # e.g. "card 2: UACDemoV10 [UACDemoV1.0], device 0: USB Audio [USB Audio]"
+                card = line.split(":")[0].replace("card ", "").strip()
+                device = line.split("device ")[1].split(":")[0].strip()
+                detected = f"plughw:{card},{device}"
+                logging.info("Auto-detected USB audio device: %s", detected)
+                return detected
+    except Exception as e:
+        logging.warning("Failed to auto-detect USB audio device: %s", e)
+    logging.warning("No USB Audio device found, falling back to 'default'")
+    return "default"
+
+
+def _resolve_alsa_device(device: str) -> str:
+    """Resolve an ALSA device string, auto-detecting if set to 'auto'."""
+    if device == "auto":
+        return _detect_usb_audio_device()
+    return device
+
+
+# Resolve once at import time so we don't re-run aplay -l on every TTS call
+_RESOLVED_ALSA_DEVICE = _resolve_alsa_device(DEFAULT_ALSA_DEVICE)
+
+
 def _set_alsa_volume(volume_percent: int = DEFAULT_VOLUME_PERCENT) -> None:
     """
     Set ALSA mixer volume before playback to ensure consistent volume.
@@ -701,7 +741,7 @@ def _linux_say_via_piper(
             f"  CONFIG={PIPER_CONFIG}"
         )
 
-    device = alsa_device or DEFAULT_ALSA_DEVICE
+    device = alsa_device or _RESOLVED_ALSA_DEVICE
 
     # Set ALSA volume before playback to ensure consistent volume
     # This prevents volume drift that can occur on some systems
@@ -765,7 +805,7 @@ def _linux_say_via_espeak(
         raise RuntimeError("espeak-ng not installed")
 
     amp = max(0, min(200, int(volume * 200)))
-    device = alsa_device or DEFAULT_ALSA_DEVICE
+    device = alsa_device or _RESOLVED_ALSA_DEVICE
 
     espeak_cmd = [
         "espeak-ng",
@@ -872,7 +912,7 @@ def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None
         audio_data: Raw audio bytes (22050 Hz, 16-bit signed LE, mono)
         alsa_device: ALSA device to use (default from env var)
     """
-    device = alsa_device or DEFAULT_ALSA_DEVICE
+    device = alsa_device or _RESOLVED_ALSA_DEVICE
 
     aplay_cmd = [
         "aplay",
