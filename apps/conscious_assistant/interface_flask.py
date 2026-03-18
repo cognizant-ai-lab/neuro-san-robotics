@@ -68,7 +68,10 @@ ALLOWED_ROBOT_ACTIONS = [
     "rise_sit",
     "step_backward",
     "step_forward",
-    "stretch"      
+    "stretch",
+    "scrape",
+    "content",
+    "pose"
 ]
 
 # Acknowledgment phrases to speak immediately when user input is received
