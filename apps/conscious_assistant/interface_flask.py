@@ -62,16 +62,12 @@ THINKING_INTERVAL = 30.0
 # Robot motion configuration
 ROBOT_MOTION_PROBABILITY = 0.5  # 50% chance of performing robot motion
 ALLOWED_ROBOT_ACTIONS = [
-    "look_left",
-    "look_right",
     "sit",
     "rise_sit",
     "step_backward",
     "step_forward",
     "stretch",
-    "scrape",
-    "content",
-    "pose"
+    "content"
 ]
 
 # Acknowledgment phrases to speak immediately when user input is received
