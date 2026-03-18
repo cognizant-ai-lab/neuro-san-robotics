@@ -80,7 +80,7 @@ If there are no new facts to add to memory and the user is being silent, call yo
 
 If you choose to perform a physical action, call your robot_macros tool with one of the following actions:
 ["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit", "look_left", "look_right",
-"step_forward", "step_backward", "shake", "stretch", "dance", "dance2", "heart_pose", "hand_stand","scrape", "content"]
+"step_forward", "step_backward", "shake", "stretch", "dance", "dance2", "heart_pose", "hand_stand", "scrape", "content"]
             """,
             "allow": {
                 "to_upstream": {
