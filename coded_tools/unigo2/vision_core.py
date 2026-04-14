@@ -42,6 +42,17 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    """Parse integer environment variables with a safe fallback."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
 def _is_jetson_platform() -> bool:
     """Detect whether we're running on NVIDIA Jetson hardware."""
     if _env_flag("VISION_FORCE_JETSON", default=False):
@@ -202,6 +213,127 @@ class UnitreeVideoCapture:
     def set(self, prop_id: int, value: float) -> bool:
         # The Unitree camera service chooses its own output size.
         return False
+
+
+def _opencv_gui_available() -> bool:
+    """
+    Return whether it is safe to use OpenCV HighGUI windows on this machine.
+
+    On Linux, OpenCV window backends usually require an X11/Wayland session.
+    CAIL-E is typically headless, so we default to non-GUI mode there.
+    """
+    if _env_flag("VISION_HEADLESS", default=False):
+        return False
+
+    if _env_flag("VISION_FORCE_GUI", default=False):
+        return True
+
+    system_name = platform.system().lower()
+    if system_name == "linux":
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+    return True
+
+
+def _annotate_frame_with_summary(
+    frame: np.ndarray,
+    results: Optional[Dict[str, Any]],
+    vision: "VisionCore",
+) -> np.ndarray:
+    """Create a saved preview image with detections and a summary caption."""
+    annotated = frame.copy()
+    if results is not None:
+        annotated = vision.visualize_detections(frame, results)
+        summary = results.get("summary", "No detections")
+    else:
+        summary = "No detections"
+
+    cv2.putText(
+        annotated,
+        summary,
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 255),
+        2
+    )
+    return annotated
+
+
+def _save_frame_snapshot(
+    frame: np.ndarray,
+    results: Optional[Dict[str, Any]],
+    vision: "VisionCore",
+    *,
+    prefix: str = "detection",
+) -> str:
+    """Save an annotated frame and return the output filename."""
+    filename = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+    annotated = _annotate_frame_with_summary(frame, results, vision)
+    cv2.imwrite(filename, annotated)
+    return filename
+
+
+def _run_headless_camera_demo(
+    cap,
+    vision: "VisionCore",
+    *,
+    enable_face_recognition: bool = False,
+) -> None:
+    """
+    Run a short non-GUI smoke test for headless robots.
+
+    Captures a few frames, runs detection on the last good frame, saves a preview
+    image to disk, and exits cleanly.
+    """
+    warmup_frames = max(1, _env_int("VISION_HEADLESS_WARMUP_FRAMES", 5))
+    last_frame = None
+
+    for _ in range(warmup_frames):
+        ret, frame = cap.read()
+        if ret and frame is not None and frame.size > 0:
+            last_frame = frame
+        time.sleep(0.05)
+
+    if last_frame is None:
+        print("[Headless] Failed to capture a frame from the camera.")
+        return
+
+    process_frame = cv2.resize(last_frame, (320, 240))
+    orig_h, orig_w = last_frame.shape[:2]
+    proc_h, proc_w = process_frame.shape[:2]
+    scale_x = orig_w / proc_w
+    scale_y = orig_h / proc_h
+
+    results = vision.detect_all(
+        process_frame,
+        detect_faces=enable_face_recognition,
+        verbose=False,
+    )
+
+    for obj in results['objects']:
+        obj['bbox'] = [
+            int(obj['bbox'][0] * scale_x),
+            int(obj['bbox'][1] * scale_y),
+            int(obj['bbox'][2] * scale_x),
+            int(obj['bbox'][3] * scale_y)
+        ]
+
+    for face in results['faces']:
+        if face['bbox']:
+            face['bbox'] = [
+                int(face['bbox'][0] * scale_x),
+                int(face['bbox'][1] * scale_y),
+                int(face['bbox'][2] * scale_x),
+                int(face['bbox'][3] * scale_y)
+            ]
+
+    output_path = _save_frame_snapshot(last_frame, results, vision, prefix="headless_detection")
+    print("[Headless] No GUI session detected. Saved annotated snapshot instead of opening a window.")
+    print(f"[Headless] Output: {output_path}")
+    print(f"[Headless] Summary: {results['summary']}")
+    print(f"[Headless] Objects: {len(results['objects'])}")
+    print(f"[Headless] Faces: {len(results['faces'])}")
 
 
 def _discover_v4l2_devices(limit: int = 6) -> List[str]:
@@ -1453,240 +1585,251 @@ if __name__ == "__main__":
             f"[Camera] Using {camera_info['description']} via {camera_info['backend']} "
             f"at {actual_width}x{actual_height}"
         )
+        gui_available = _opencv_gui_available()
+
         print("\nWebcam opened successfully!")
-        print("\n" + "!" * 60)
-        print("IMPORTANT: Click on the OpenCV window to activate it!")
-        print("Then press keys while the window is in focus:")
-        print("  Q - Quit")
-        print("  S - Save detection")
-        print("  A - Add face to database")
-        print("  V - Toggle verbose mode")
-        print("  F - Toggle face recognition (turn OFF for speed)")
-        print("!" * 60 + "\n")
 
-        frame_count = 0
-        current_frame = None
-        current_results = None
-        current_annotated = None
-        verbose_mode = False
+        if not gui_available:
+            print("\n[Headless] No display detected; running a non-interactive smoke test.")
+            _run_headless_camera_demo(
+                cap,
+                vision,
+                enable_face_recognition=False,
+            )
+            cap.release()
+        else:
+            print("\n" + "!" * 60)
+            print("IMPORTANT: Click on the OpenCV window to activate it!")
+            print("Then press keys while the window is in focus:")
+            print("  Q - Quit")
+            print("  S - Save detection")
+            print("  A - Add face to database")
+            print("  V - Toggle verbose mode")
+            print("  F - Toggle face recognition (turn OFF for speed)")
+            print("!" * 60 + "\n")
 
-        # Performance monitoring
-        fps_start_time = time.time()
-        fps_frame_count = 0
-        fps = 0.0
+            frame_count = 0
+            current_frame = None
+            current_results = None
+            current_annotated = None
+            verbose_mode = False
 
-        # Detection timing
-        last_detection_time = time.time()
-        detection_interval = 0.0  # Will store actual detection time
+            # Performance monitoring
+            fps_start_time = time.time()
+            fps_frame_count = 0
+            fps = 0.0
 
-        # ============================================================
-        # PERFORMANCE OPTIMIZATION: Run face recognition less frequently
-        # Face recognition is 10x slower than object detection
-        # Only run it every N object detections
-        # ============================================================
-        face_recognition_interval = 10  # Run face recognition every 10 object detections
-        detection_count = 0
-
-        # Create named window
-        window_name = 'VisionCore - Click here and press Q/S/A/V'
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("Failed to grab frame")
-                break
-
-            current_frame = frame
+            # Detection timing
+            last_detection_time = time.time()
+            detection_interval = 0.0  # Will store actual detection time
 
             # ============================================================
-            # PROCESS EVERY 3RD FRAME (balance speed and smoothness)
-            # Adjust this number based on your hardware:
-            # - MacBook/Desktop CPU with ONNX: every 2-3 frames (faster!)
-            # - MacBook/Desktop CPU with PyTorch: every 5-10 frames (slow)
-            # - Jetson with TensorRT: every 1 frame (can handle real-time)
-            # This processes ~10 detections per second
+            # PERFORMANCE OPTIMIZATION: Run face recognition less frequently
+            # Face recognition is 10x slower than object detection
+            # Only run it every N object detections
             # ============================================================
-            if frame_count % 3 == 0:
-                detection_start = time.time()
+            face_recognition_interval = 10  # Run face recognition every 10 object detections
+            detection_count = 0
+
+            # Create named window
+            window_name = 'VisionCore - Click here and press Q/S/A/V'
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    print("Failed to grab frame")
+                    break
+
+                current_frame = frame
 
                 # ============================================================
-                # DOWNSCALE FRAME BEFORE PROCESSING (CPU optimization)
-                # This is MUCH better than changing webcam resolution
-                # Captures at native resolution, then downscales for processing
-                # Smaller = faster inference, but detection quality suffers
+                # PROCESS EVERY 3RD FRAME (balance speed and smoothness)
+                # Adjust this number based on your hardware:
+                # - MacBook/Desktop CPU with ONNX: every 2-3 frames (faster!)
+                # - MacBook/Desktop CPU with PyTorch: every 5-10 frames (slow)
+                # - Jetson with TensorRT: every 1 frame (can handle real-time)
+                # This processes ~10 detections per second
                 # ============================================================
-                process_frame = cv2.resize(frame, (320, 240))  # Aggressive downscale
-                # process_frame = cv2.resize(frame, (480, 360))  # Moderate downscale
-                # process_frame = frame  # Use full resolution (slowest)
+                if frame_count % 3 == 0:
+                    detection_start = time.time()
 
-                # Calculate scale factors for bbox correction
-                orig_h, orig_w = frame.shape[:2]
-                proc_h, proc_w = process_frame.shape[:2]
-                scale_x = orig_w / proc_w
-                scale_y = orig_h / proc_h
+                    # ============================================================
+                    # DOWNSCALE FRAME BEFORE PROCESSING (CPU optimization)
+                    # This is MUCH better than changing webcam resolution
+                    # Captures at native resolution, then downscales for processing
+                    # Smaller = faster inference, but detection quality suffers
+                    # ============================================================
+                    process_frame = cv2.resize(frame, (320, 240))  # Aggressive downscale
+                    # process_frame = cv2.resize(frame, (480, 360))  # Moderate downscale
+                    # process_frame = frame  # Use full resolution (slowest)
 
-                # ============================================================
-                # SMART FACE RECOGNITION
-                # Only run face recognition every Nth detection to save time
-                # Object detection: ~30-50ms
-                # Face recognition: ~200-500ms (10x slower!)
-                # ============================================================
-                run_face_recognition = False
-                if face_recognition_interval > 0:
-                    run_face_recognition = (detection_count % face_recognition_interval == 0)
+                    # Calculate scale factors for bbox correction
+                    orig_h, orig_w = frame.shape[:2]
+                    proc_h, proc_w = process_frame.shape[:2]
+                    scale_x = orig_w / proc_w
+                    scale_y = orig_h / proc_h
 
-                if verbose_mode and run_face_recognition:
-                    print(f"[Frame {frame_count}] Running face recognition...")
+                    # ============================================================
+                    # SMART FACE RECOGNITION
+                    # Only run face recognition every Nth detection to save time
+                    # Object detection: ~30-50ms
+                    # Face recognition: ~200-500ms (10x slower!)
+                    # ============================================================
+                    run_face_recognition = False
+                    if face_recognition_interval > 0:
+                        run_face_recognition = (detection_count % face_recognition_interval == 0)
 
-                # Run detection on downscaled frame
-                current_results = vision.detect_all(
-                    process_frame,
-                    detect_faces=run_face_recognition,  # Only run faces periodically
-                    verbose=verbose_mode
-                )
+                    if verbose_mode and run_face_recognition:
+                        print(f"[Frame {frame_count}] Running face recognition...")
 
-                # ============================================================
-                # SCALE BOUNDING BOXES BACK TO ORIGINAL FRAME SIZE
-                # Detections are on downscaled frame, need to scale back up
-                # ============================================================
-                for obj in current_results['objects']:
-                    obj['bbox'] = [
-                        int(obj['bbox'][0] * scale_x),  # x1
-                        int(obj['bbox'][1] * scale_y),  # y1
-                        int(obj['bbox'][2] * scale_x),  # x2
-                        int(obj['bbox'][3] * scale_y)   # y2
-                    ]
+                    # Run detection on downscaled frame
+                    current_results = vision.detect_all(
+                        process_frame,
+                        detect_faces=run_face_recognition,  # Only run faces periodically
+                        verbose=verbose_mode
+                    )
 
-                for face in current_results['faces']:
-                    if face['bbox']:
-                        face['bbox'] = [
-                            int(face['bbox'][0] * scale_x),  # x
-                            int(face['bbox'][1] * scale_y),  # y
-                            int(face['bbox'][2] * scale_x),  # w
-                            int(face['bbox'][3] * scale_y)   # h
+                    # ============================================================
+                    # SCALE BOUNDING BOXES BACK TO ORIGINAL FRAME SIZE
+                    # Detections are on downscaled frame, need to scale back up
+                    # ============================================================
+                    for obj in current_results['objects']:
+                        obj['bbox'] = [
+                            int(obj['bbox'][0] * scale_x),  # x1
+                            int(obj['bbox'][1] * scale_y),  # y1
+                            int(obj['bbox'][2] * scale_x),  # x2
+                            int(obj['bbox'][3] * scale_y)   # y2
                         ]
 
-                detection_count += 1
-                detection_interval = time.time() - detection_start
-
-                # Visualize results on ORIGINAL frame (with scaled boxes)
-                current_annotated = vision.visualize_detections(frame, current_results)
-
-                # Display summary on image
-                cv2.putText(
-                    current_annotated,
-                    current_results['summary'],
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 255),
-                    2
-                )
-
-                # Calculate FPS
-                fps_frame_count += 1
-                if time.time() - fps_start_time >= 1.0:
-                    fps = fps_frame_count / (time.time() - fps_start_time)
-                    fps_start_time = time.time()
-                    fps_frame_count = 0
-
-            # ============================================================
-            # ADD UI OVERLAY
-            # ============================================================
-            display_frame = current_annotated if current_annotated is not None else frame
-            h, w = display_frame.shape[:2]
-
-            # Semi-transparent black bar at bottom
-            overlay = display_frame.copy()
-            cv2.rectangle(overlay, (0, h-80), (w, h), (0, 0, 0), -1)
-            display_frame = cv2.addWeighted(overlay, 0.5, display_frame, 0.5, 0)
-
-            # Instruction text
-            cv2.putText(display_frame, "Q:Quit | S:Save | A:Add Face | V:Verbose | F:Toggle Faces",
-                       (10, h-55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            cv2.putText(display_frame, "Click this window first, then press keys!",
-                       (10, h-30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
-            # Performance stats
-            face_status = f"ON (every {face_recognition_interval})" if face_recognition_interval > 0 else "OFF"
-            backend_display = vision.backend if hasattr(vision, 'backend') else "Unknown"
-            cv2.putText(display_frame, f"FPS: {fps:.1f} | {backend_display} | {detection_interval*1000:.0f}ms | Faces: {face_status}",
-                       (10, h-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-
-            # Show frame
-            cv2.imshow(window_name, display_frame)
-
-            frame_count += 1
-
-            # ============================================================
-            # KEYBOARD INPUT HANDLING
-            # ============================================================
-            key = cv2.waitKey(1) & 0xFF
-
-            if key == ord('q') or key == ord('Q'):
-                print("\n[KEY DETECTED] Quitting...")
-                break
-
-            elif key == ord('s') or key == ord('S'):
-                print("\n[KEY DETECTED] Save requested...")
-                if current_annotated is not None and current_results is not None:
-                    filename = f"detection_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-                    cv2.imwrite(filename, current_annotated)
-                    print(f"✓ Saved detection to: {filename}")
-                    print(f"  Summary: {current_results['summary']}")
-                    print(f"  Objects: {len(current_results['objects'])}")
-                    print(f"  Faces: {len(current_results['faces'])}")
-                else:
-                    print("✗ No detection to save yet. Wait for processing...")
-
-            elif key == ord('a') or key == ord('A'):
-                print("\n[KEY DETECTED] Add face requested...")
-                print("\n" + "="*40)
-                person_name = input("Enter person's name: ").strip()
-
-                if person_name:
-                    # Extract face region if detected
-                    if current_results and current_results['faces']:
-                        face = current_results['faces'][0]
+                    for face in current_results['faces']:
                         if face['bbox']:
-                            x, y, w, h = face['bbox']
-                            # Add padding around face
-                            padding = 20
-                            x = max(0, x - padding)
-                            y = max(0, y - padding)
-                            w = w + 2 * padding
-                            h = h + 2 * padding
+                            face['bbox'] = [
+                                int(face['bbox'][0] * scale_x),  # x
+                                int(face['bbox'][1] * scale_y),  # y
+                                int(face['bbox'][2] * scale_x),  # w
+                                int(face['bbox'][3] * scale_y)   # h
+                            ]
 
-                            face_img = current_frame[y:y+h, x:x+w]
-                            success = vision.add_face_to_database(person_name, face_img)
+                    detection_count += 1
+                    detection_interval = time.time() - detection_start
+
+                    # Visualize results on ORIGINAL frame (with scaled boxes)
+                    current_annotated = vision.visualize_detections(frame, current_results)
+
+                    # Display summary on image
+                    cv2.putText(
+                        current_annotated,
+                        current_results['summary'],
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 255),
+                        2
+                    )
+
+                    # Calculate FPS
+                    fps_frame_count += 1
+                    if time.time() - fps_start_time >= 1.0:
+                        fps = fps_frame_count / (time.time() - fps_start_time)
+                        fps_start_time = time.time()
+                        fps_frame_count = 0
+
+                # ============================================================
+                # ADD UI OVERLAY
+                # ============================================================
+                display_frame = current_annotated if current_annotated is not None else frame
+                h, w = display_frame.shape[:2]
+
+                # Semi-transparent black bar at bottom
+                overlay = display_frame.copy()
+                cv2.rectangle(overlay, (0, h-80), (w, h), (0, 0, 0), -1)
+                display_frame = cv2.addWeighted(overlay, 0.5, display_frame, 0.5, 0)
+
+                # Instruction text
+                cv2.putText(display_frame, "Q:Quit | S:Save | A:Add Face | V:Verbose | F:Toggle Faces",
+                           (10, h-55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.putText(display_frame, "Click this window first, then press keys!",
+                           (10, h-30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+                # Performance stats
+                face_status = f"ON (every {face_recognition_interval})" if face_recognition_interval > 0 else "OFF"
+                backend_display = vision.backend if hasattr(vision, 'backend') else "Unknown"
+                cv2.putText(display_frame, f"FPS: {fps:.1f} | {backend_display} | {detection_interval*1000:.0f}ms | Faces: {face_status}",
+                           (10, h-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+                # Show frame
+                cv2.imshow(window_name, display_frame)
+
+                frame_count += 1
+
+                # ============================================================
+                # KEYBOARD INPUT HANDLING
+                # ============================================================
+                key = cv2.waitKey(1) & 0xFF
+
+                if key == ord('q') or key == ord('Q'):
+                    print("\n[KEY DETECTED] Quitting...")
+                    break
+
+                elif key == ord('s') or key == ord('S'):
+                    print("\n[KEY DETECTED] Save requested...")
+                    if current_frame is not None and current_results is not None:
+                        filename = _save_frame_snapshot(current_frame, current_results, vision)
+                        print(f"✓ Saved detection to: {filename}")
+                        print(f"  Summary: {current_results['summary']}")
+                        print(f"  Objects: {len(current_results['objects'])}")
+                        print(f"  Faces: {len(current_results['faces'])}")
+                    else:
+                        print("✗ No detection to save yet. Wait for processing...")
+
+                elif key == ord('a') or key == ord('A'):
+                    print("\n[KEY DETECTED] Add face requested...")
+                    print("\n" + "="*40)
+                    person_name = input("Enter person's name: ").strip()
+
+                    if person_name:
+                        # Extract face region if detected
+                        if current_results and current_results['faces']:
+                            face = current_results['faces'][0]
+                            if face['bbox']:
+                                x, y, w, h = face['bbox']
+                                # Add padding around face
+                                padding = 20
+                                x = max(0, x - padding)
+                                y = max(0, y - padding)
+                                w = w + 2 * padding
+                                h = h + 2 * padding
+
+                                face_img = current_frame[y:y+h, x:x+w]
+                                success = vision.add_face_to_database(person_name, face_img)
+                            else:
+                                success = vision.add_face_to_database(person_name, current_frame)
                         else:
+                            print("No face detected. Using full frame...")
                             success = vision.add_face_to_database(person_name, current_frame)
+
+                        if success:
+                            print(f"✓ Successfully added '{person_name}' to database!")
+                        else:
+                            print("✗ Failed to add face to database")
+                        print("="*40 + "\n")
+
+                elif key == ord('v') or key == ord('V'):
+                    verbose_mode = not verbose_mode
+                    print(f"\n[KEY DETECTED] Verbose mode: {'ON' if verbose_mode else 'OFF'}")
+
+                elif key == ord('f') or key == ord('F'):
+                    # Toggle face recognition
+                    if face_recognition_interval == 0:
+                        face_recognition_interval = 10
+                        print(f"\n[KEY DETECTED] Face recognition: ON (every {face_recognition_interval} frames)")
                     else:
-                        print("No face detected. Using full frame...")
-                        success = vision.add_face_to_database(person_name, current_frame)
+                        face_recognition_interval = 0
+                        print(f"\n[KEY DETECTED] Face recognition: OFF (⚡ maximum speed)")
 
-                    if success:
-                        print(f"✓ Successfully added '{person_name}' to database!")
-                    else:
-                        print("✗ Failed to add face to database")
-                    print("="*40 + "\n")
-
-            elif key == ord('v') or key == ord('V'):
-                verbose_mode = not verbose_mode
-                print(f"\n[KEY DETECTED] Verbose mode: {'ON' if verbose_mode else 'OFF'}")
-
-            elif key == ord('f') or key == ord('F'):
-                # Toggle face recognition
-                if face_recognition_interval == 0:
-                    face_recognition_interval = 10
-                    print(f"\n[KEY DETECTED] Face recognition: ON (every {face_recognition_interval} frames)")
-                else:
-                    face_recognition_interval = 0
-                    print(f"\n[KEY DETECTED] Face recognition: OFF (⚡ maximum speed)")
-
-        cap.release()
-        cv2.destroyAllWindows()
+            cap.release()
+            cv2.destroyAllWindows()
 
     # ============================================================
     # FINAL STATISTICS
