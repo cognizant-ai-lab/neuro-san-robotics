@@ -24,6 +24,20 @@ class _FakeVision:
         return frame.copy()
 
 
+class _FakeScaledVision:
+    def detect_all(self, frame, detect_faces=False, verbose=False):
+        return {
+            "objects": [
+                {"class_name": "person", "confidence": 0.90, "bbox": [10, 5, 30, 25]},
+            ],
+            "faces": [],
+            "summary": "Objects: 1 person(s)",
+        }
+
+    def visualize_detections(self, frame, results):
+        return frame.copy()
+
+
 class SceneObserverTests(unittest.TestCase):
     def test_summarize_observed_objects_deduplicates_and_sorts(self):
         objects = [
@@ -61,6 +75,15 @@ class SceneObserverTests(unittest.TestCase):
             "/api/observation/latest.jpg?t=123456789",
         )
         self.assertTrue(observation["timestamp"].startswith("["))
+
+    def test_detect_scene_scales_boxes_back_to_original_frame(self):
+        observer = SceneObserver()
+        frame = np.ones((100, 200, 3), dtype=np.uint8)
+
+        with patch("apps.conscious_assistant.scene_observer._env_int", side_effect=lambda name, default: 100 if name == "VISION_OBSERVER_MAX_WIDTH" else default):
+            results = observer._detect_scene(_FakeScaledVision(), frame)
+
+        self.assertEqual(results["objects"][0]["bbox"], [20, 10, 60, 50])
 
 
 if __name__ == "__main__":

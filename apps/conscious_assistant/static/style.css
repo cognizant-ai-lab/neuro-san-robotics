@@ -187,19 +187,56 @@ body::before {
     line-height: 1.5;
 }
 
-.observation-image {
+.observation-history {
+    max-height: 320px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.observation-entry {
+    background: rgba(18, 23, 40, 0.88);
+    border: 1px solid rgba(255, 215, 0, 0.14);
+    border-radius: 16px;
+    padding: 10px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+}
+
+.observation-entry-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.observation-entry-title {
+    color: #ffd700;
+    font-size: 0.78em;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+}
+
+.observation-entry-time {
+    color: #8fa3bf;
+    font-size: 0.8em;
+}
+
+.observation-entry-image {
     width: 100%;
     display: block;
-    border-radius: 14px;
+    border-radius: 12px;
     border: 1px solid rgba(255, 215, 0, 0.2);
     box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
     object-fit: cover;
 }
 
-.observation-caption {
-    margin-top: 10px;
+.observation-entry-caption {
+    margin-top: 8px;
     color: #ffe4a0;
-    font-size: 0.95em;
+    font-size: 0.9em;
     line-height: 1.5;
 }
 

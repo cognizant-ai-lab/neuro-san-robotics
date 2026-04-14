@@ -65,7 +65,7 @@ except ImportError:
     DEFERRED_ACTIONS_AVAILABLE = False
     execute_deferred_actions = None
 
-THINKING_INTERVAL = 30.0
+THINKING_INTERVAL = 15.0
 
 # Robot motion configuration
 ROBOT_MOTION_PROBABILITY = 0.5  # 50% chance of performing robot motion
@@ -305,7 +305,7 @@ def conscious_thinking_process():
         while True:
             timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
             try:
-                # Wait up to 30 seconds for user input
+                # Wait up to the configured interval for user input
                 user_input = user_input_queue.get(timeout=THINKING_INTERVAL)
                 if user_input == "exit":
                     break

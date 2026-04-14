@@ -33,6 +33,28 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    """Parse integer environment variables with a safe fallback."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse float environment variables with a safe fallback."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
 def summarize_observed_objects(objects: List[Dict[str, Any]]) -> List[str]:
     """
     Convert raw detection dictionaries into de-duplicated object names.
@@ -113,8 +135,11 @@ class SceneObserver:
             return None
 
         use_tensorrt = _env_flag("VISION_USE_JETSON_CONFIG", default=False)
-        input_size = 640 if use_tensorrt else 256
-        confidence_threshold = 0.65 if use_tensorrt else 0.60
+        input_size = _env_int("VISION_OBSERVER_INPUT_SIZE", 640)
+        confidence_threshold = _env_float(
+            "VISION_OBSERVER_CONFIDENCE",
+            0.65 if use_tensorrt else 0.55,
+        )
 
         try:
             self._vision = VisionCore(
@@ -186,6 +211,49 @@ class SceneObserver:
         )
         return annotated
 
+    def _detect_scene(self, vision, frame):
+        """
+        Run object detection on a resized copy of the frame and scale boxes back.
+
+        This mirrors the `vision_core.py` demo structure more closely than the
+        original full-resolution direct call and gives snapshot captures a more
+        accurate, higher-resolution detection pass.
+        """
+        max_width = max(64, _env_int("VISION_OBSERVER_MAX_WIDTH", 640))
+        orig_h, orig_w = frame.shape[:2]
+
+        if orig_w > max_width:
+            scale = max_width / float(orig_w)
+            proc_w = max(1, int(orig_w * scale))
+            proc_h = max(1, int(orig_h * scale))
+            process_frame = cv2.resize(frame, (proc_w, proc_h))
+        else:
+            process_frame = frame
+            proc_h, proc_w = frame.shape[:2]
+
+        scale_x = orig_w / proc_w
+        scale_y = orig_h / proc_h
+        results = vision.detect_all(process_frame, detect_faces=False, verbose=False)
+
+        for detected_object in results.get("objects", []):
+            detected_object["bbox"] = [
+                int(detected_object["bbox"][0] * scale_x),
+                int(detected_object["bbox"][1] * scale_y),
+                int(detected_object["bbox"][2] * scale_x),
+                int(detected_object["bbox"][3] * scale_y),
+            ]
+
+        for face in results.get("faces", []):
+            if face.get("bbox"):
+                face["bbox"] = [
+                    int(face["bbox"][0] * scale_x),
+                    int(face["bbox"][1] * scale_y),
+                    int(face["bbox"][2] * scale_x),
+                    int(face["bbox"][3] * scale_y),
+                ]
+
+        return results
+
     def _write_latest_image(self, annotated_frame) -> int:
         self.image_dir.mkdir(parents=True, exist_ok=True)
         tmp_path = self.image_path.with_suffix(".tmp.jpg")
@@ -217,7 +285,7 @@ class SceneObserver:
             if frame is None:
                 return None
 
-            results = vision.detect_all(frame, detect_faces=False, verbose=False)
+            results = self._detect_scene(vision, frame)
             object_names = summarize_observed_objects(results.get("objects", []))
             annotated = self._annotate_frame(vision, frame, results)
             updated_at_ms = self._write_latest_image(annotated)
