@@ -9,3 +9,9 @@ python-dotenv==1.0.1
 
 # For asynchronous file operations
 aiofiles>=24.1.0
+
+# Vision dependencies
+ultralytics>=8.4.7
+deepface>=0.0.97
+tf-keras>=2.20.1
+opencv-python>=4.13.0.90
