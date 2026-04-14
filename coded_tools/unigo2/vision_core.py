@@ -28,6 +28,10 @@ import json
 
 
 CameraSource = Union[int, str]
+_UNITREE_CHANNEL_STATE: Dict[str, Any] = {
+    "initialized": False,
+    "ifname": None,
+}
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -92,6 +96,114 @@ def _camera_backend_label(backend: Optional[int]) -> str:
     return f"backend {backend}"
 
 
+def _load_unitree_video_sdk():
+    """Load the Unitree camera client from whichever package layout is installed."""
+    import_errors = []
+
+    try:
+        from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+        from unitree_sdk2py.go2.video.video_client import VideoClient
+        return ChannelFactoryInitialize, VideoClient
+    except Exception as exc:
+        import_errors.append(exc)
+
+    try:
+        from unitree_sdk2_python.unitree_sdk2py.core.channel import ChannelFactoryInitialize
+        from unitree_sdk2_python.unitree_sdk2py.go2.video.video_client import VideoClient
+        return ChannelFactoryInitialize, VideoClient
+    except Exception as exc:
+        import_errors.append(exc)
+
+    error_messages = ", ".join(str(exc) for exc in import_errors if str(exc))
+    raise ImportError(
+        "Unitree camera SDK not available"
+        + (f": {error_messages}" if error_messages else "")
+    )
+
+
+def _unitree_camera_interface(default_ifname: Optional[str] = None) -> Optional[str]:
+    """Resolve the preferred network interface for Unitree SDK camera access."""
+    return (
+        default_ifname
+        or os.environ.get("VISION_CAMERA_INTERFACE")
+        or os.environ.get("GO2_CAMERA_INTERFACE")
+        or os.environ.get("CYCLONEDDS_NETWORK_INTERFACE")
+        or os.environ.get("IFNAME")
+    )
+
+
+def _unitree_camera_available() -> bool:
+    """Return whether the Unitree front-camera SDK can be imported."""
+    try:
+        _load_unitree_video_sdk()
+        return True
+    except ImportError:
+        return False
+
+
+class UnitreeVideoCapture:
+    """Small VideoCapture-compatible wrapper around Unitree's Go2 VideoClient."""
+
+    def __init__(self, ifname: Optional[str] = None, timeout: float = 3.0):
+        self.ifname = _unitree_camera_interface(ifname)
+        self.timeout = timeout
+        self._opened = False
+        self._last_frame: Optional[np.ndarray] = None
+        self._initialize()
+
+    def _initialize(self) -> None:
+        channel_factory_initialize, video_client_cls = _load_unitree_video_sdk()
+
+        channel_ifname = self.ifname
+        if not _UNITREE_CHANNEL_STATE["initialized"]:
+            if channel_ifname:
+                channel_factory_initialize(0, channel_ifname)
+            else:
+                channel_factory_initialize(0)
+            _UNITREE_CHANNEL_STATE["initialized"] = True
+            _UNITREE_CHANNEL_STATE["ifname"] = channel_ifname
+
+        self._client = video_client_cls()
+        self._client.SetTimeout(self.timeout)
+        self._client.Init()
+        self._opened = True
+
+    def isOpened(self) -> bool:
+        return self._opened
+
+    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+        if not self._opened:
+            return False, None
+
+        code, data = self._client.GetImageSample()
+        if code != 0 or not data:
+            return False, None
+
+        image_data = np.frombuffer(bytes(data), dtype=np.uint8)
+        frame = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+        if frame is None or frame.size == 0:
+            return False, None
+
+        self._last_frame = frame
+        return True, frame
+
+    def release(self) -> None:
+        self._opened = False
+
+    def get(self, prop_id: int) -> float:
+        if self._last_frame is None:
+            return 0.0
+        if prop_id == cv2.CAP_PROP_FRAME_WIDTH:
+            return float(self._last_frame.shape[1])
+        if prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
+            return float(self._last_frame.shape[0])
+        return 0.0
+
+    def set(self, prop_id: int, value: float) -> bool:
+        # The Unitree camera service chooses its own output size.
+        return False
+
+
 def _discover_v4l2_devices(limit: int = 6) -> List[str]:
     """Return available /dev/video* devices in numeric order."""
     devices = []
@@ -116,6 +228,7 @@ def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[
 
     if isinstance(camera_source, int):
         return {
+            "kind": "opencv",
             "source": camera_source,
             "backend": None,
             "description": f"camera index {camera_source}",
@@ -128,16 +241,32 @@ def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[
     if raw_source.lstrip("+-").isdigit():
         index = int(raw_source)
         return {
+            "kind": "opencv",
             "source": index,
             "backend": None,
             "description": f"camera index {index}",
         }
 
     lowered = raw_source.lower()
+    if lowered in {"unitree", "go2"} or lowered.startswith(("unitree:", "go2:")):
+        _, _, interface_text = raw_source.partition(":")
+        interface_name = interface_text.strip() or None
+        description = "Unitree Go2 front camera"
+        if interface_name:
+            description += f" via {interface_name}"
+        return {
+            "kind": "unitree",
+            "source": raw_source,
+            "backend": None,
+            "description": description,
+            "ifname": interface_name,
+        }
+
     if lowered.startswith(("jetson:", "csi:", "sensor:")):
         _, _, sensor_text = raw_source.partition(":")
         sensor_id = int(sensor_text.strip() or "0")
         return {
+            "kind": "opencv",
             "source": build_jetson_camera_pipeline(sensor_id=sensor_id),
             "backend": getattr(cv2, "CAP_GSTREAMER", None),
             "description": f"Jetson CSI sensor {sensor_id}",
@@ -146,6 +275,7 @@ def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[
     if lowered.startswith("gstreamer:"):
         pipeline = raw_source.split(":", 1)[1].strip()
         return {
+            "kind": "opencv",
             "source": pipeline,
             "backend": getattr(cv2, "CAP_GSTREAMER", None),
             "description": "custom GStreamer pipeline",
@@ -153,6 +283,7 @@ def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[
 
     if "!" in raw_source:
         return {
+            "kind": "opencv",
             "source": raw_source,
             "backend": getattr(cv2, "CAP_GSTREAMER", None),
             "description": "inline GStreamer pipeline",
@@ -160,12 +291,14 @@ def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[
 
     if raw_source.startswith("/dev/video"):
         return {
+            "kind": "opencv",
             "source": raw_source,
             "backend": getattr(cv2, "CAP_V4L2", None),
             "description": raw_source,
         }
 
     return {
+        "kind": "opencv",
         "source": raw_source,
         "backend": None,
         "description": raw_source,
@@ -180,10 +313,11 @@ def get_camera_candidates(
     Build camera candidates in a robot-friendly order.
 
     Priority:
-    1. Explicit source override (`VISION_CAMERA_SOURCE`, `/dev/videoN`, index, or pipeline)
-    2. Jetson CSI sensors via GStreamer
-    3. Present V4L2 devices under `/dev/video*`
-    4. Plain OpenCV camera indices for laptop/desktop webcams
+    1. Explicit source override (`VISION_CAMERA_SOURCE`, `unitree:eth0`, `/dev/videoN`, index, or pipeline)
+    2. Unitree Go2 front camera via SDK2 (on Jetson/robot installs)
+    3. Jetson CSI sensors via GStreamer
+    4. Present V4L2 devices under `/dev/video*`
+    5. Plain OpenCV camera indices for laptop/desktop webcams
     """
     normalized = _normalize_camera_source(camera_source)
     if normalized is not None:
@@ -201,10 +335,25 @@ def get_camera_candidates(
             return
         seen.add(key)
         candidates.append({
+            "kind": "opencv",
             "source": source,
             "backend": backend,
             "description": description,
         })
+
+    if _is_jetson_platform() and _unitree_camera_available():
+        unitree_ifname = _unitree_camera_interface()
+        unitree_description = "Unitree Go2 front camera"
+        if unitree_ifname:
+            unitree_description += f" via {unitree_ifname}"
+        candidates.append({
+            "kind": "unitree",
+            "source": "unitree",
+            "backend": None,
+            "description": unitree_description,
+            "ifname": unitree_ifname,
+        })
+        seen.add(("unitree", None))
 
     if _is_jetson_platform():
         for sensor_id in range(2):
@@ -240,16 +389,20 @@ def open_camera(
     attempts: List[str] = []
 
     for candidate in get_camera_candidates(camera_source):
+        kind = candidate.get("kind", "opencv")
         source = candidate["source"]
         backend = candidate["backend"]
         description = candidate["description"]
-        backend_label = _camera_backend_label(backend)
+        backend_label = "Unitree SDK2" if kind == "unitree" else _camera_backend_label(backend)
 
         if verbose:
             print(f"[VisionCore] [Camera] Trying {description} via {backend_label}")
 
         try:
-            capture = cv2.VideoCapture(source, backend) if backend is not None else cv2.VideoCapture(source)
+            if kind == "unitree":
+                capture = UnitreeVideoCapture(ifname=candidate.get("ifname"))
+            else:
+                capture = cv2.VideoCapture(source, backend) if backend is not None else cv2.VideoCapture(source)
         except Exception as exc:
             attempts.append(f"{description} via {backend_label}: exception while opening ({exc})")
             continue
@@ -1273,7 +1426,7 @@ if __name__ == "__main__":
             print(f"[Camera] Requested source override: {requested_camera_source}")
         for attempt in camera_info.get("attempts", []):
             print(f"  - {attempt}")
-        print("[Camera] Hint: set VISION_CAMERA_SOURCE to an explicit source, e.g. 'jetson:0', '/dev/video2', or a full GStreamer pipeline.")
+        print("[Camera] Hint: set VISION_CAMERA_SOURCE to an explicit source, e.g. 'unitree:eth0', 'jetson:0', '/dev/video2', or a full GStreamer pipeline.")
 
         # Create a test image with text
         test_image = np.zeros((480, 640, 3), dtype=np.uint8)

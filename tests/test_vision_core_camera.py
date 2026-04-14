@@ -54,14 +54,25 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertIn("sensor-id=1", candidate["source"])
         self.assertEqual(candidate["description"], "Jetson CSI sensor 1")
         self.assertEqual(candidate["backend"], getattr(vision_core.cv2, "CAP_GSTREAMER", None))
+        self.assertEqual(candidate["kind"], "opencv")
+
+    def test_normalize_unitree_camera_source(self):
+        candidate = vision_core._normalize_camera_source("unitree:eth0")
+
+        self.assertEqual(candidate["kind"], "unitree")
+        self.assertEqual(candidate["ifname"], "eth0")
+        self.assertIn("Unitree Go2 front camera", candidate["description"])
 
     @patch.object(vision_core, "_discover_v4l2_devices", return_value=["/dev/video2", "/dev/video4"])
+    @patch.object(vision_core, "_unitree_camera_interface", return_value=None)
+    @patch.object(vision_core, "_unitree_camera_available", return_value=True)
     @patch.object(vision_core, "_is_jetson_platform", return_value=True)
     def test_default_candidates_cover_jetson_v4l2_and_index_fallbacks(self, *_):
         candidates = vision_core.get_camera_candidates(max_indices=3)
         descriptions = [candidate["description"] for candidate in candidates]
 
-        self.assertEqual(descriptions[:2], ["Jetson CSI sensor 0", "Jetson CSI sensor 1"])
+        self.assertEqual(descriptions[0], "Unitree Go2 front camera")
+        self.assertEqual(descriptions[1:3], ["Jetson CSI sensor 0", "Jetson CSI sensor 1"])
         self.assertIn("/dev/video2", descriptions)
         self.assertIn("/dev/video4", descriptions)
         self.assertIn("camera index 0", descriptions)
@@ -93,6 +104,30 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertEqual(info["height"], 600)
         self.assertTrue(first.released)
         self.assertTrue(second.released)
+
+    def test_open_camera_uses_unitree_capture_for_unitree_candidates(self):
+        fake_capture = _FakeCapture(
+            opened=True,
+            frames=[(True, np.ones((4, 5, 3), dtype=np.uint8))],
+            width=5,
+            height=4,
+        )
+        candidates = [{
+            "kind": "unitree",
+            "source": "unitree",
+            "backend": None,
+            "description": "Unitree Go2 front camera via eth0",
+            "ifname": "eth0",
+        }]
+
+        with patch.object(vision_core, "get_camera_candidates", return_value=candidates):
+            with patch.object(vision_core, "UnitreeVideoCapture", return_value=fake_capture) as capture_cls:
+                capture, info = vision_core.open_camera(verbose=False, warmup_reads=1)
+
+        capture_cls.assert_called_once_with(ifname="eth0")
+        self.assertIs(capture, fake_capture)
+        self.assertEqual(info["description"], "Unitree Go2 front camera via eth0")
+        self.assertEqual(info["backend"], "Unitree SDK2")
 
 
 if __name__ == "__main__":
