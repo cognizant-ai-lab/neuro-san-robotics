@@ -14,3 +14,13 @@ piper-tts>=1.2 ; sys_platform == "linux"
 
 # WebSocket support for Flask-SocketIO in threading mode
 simple-websocket>=0.10,<2.0
+
+# vision dependencies
+ultralytics>=8.4.7
+deepface>=0.0.97
+tf-keras>=2.20.1
+opencv-python>=4.13.0.90
+
+# optional for using ONNX for vision backend
+# onnx>=1.20.1
+# onnxruntime>=1.23.2
