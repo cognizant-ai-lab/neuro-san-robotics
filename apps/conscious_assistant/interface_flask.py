@@ -67,8 +67,7 @@ THINKING_INTERVAL = 30.0
 # Robot motion configuration
 ROBOT_MOTION_PROBABILITY = 0.5  # 50% chance of performing robot motion
 ALLOWED_ROBOT_ACTIONS = [
-    "sit",
-    "rise_sit",
+    "sit_rise",
     "step_backward",
     "step_forward",
     "stretch",

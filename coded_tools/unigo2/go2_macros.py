@@ -103,6 +103,12 @@ class Go2Macros:
             self.cli.RiseSit()
         self._log("Rise sit")
 
+    def sit_rise(self):
+        if self.cli:
+            self.cli.Sit()
+            self.cli.RiseSit()
+        self._log("Sit rise")
+
     # ----------------------------
     # ORIENTATION / LOOK DIRECTION
     # ----------------------------

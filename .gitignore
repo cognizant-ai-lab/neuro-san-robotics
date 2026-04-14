@@ -9,6 +9,11 @@ __pycache__/
 # C extensions
 *.so
 
+# Json files
+Topic*.json
+
+*.pt
+
 # Distribution / packaging
 .Python
 build/

@@ -84,6 +84,9 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
     elif action == "sit":
         go2.sit()
         logging.info("===== GO2 sitting...")
+    elif action == "sit_rise":
+        go2.sit()
+        logging.info("===== GO2 sitting...")
     elif action == "rise_sit":
         go2.rise_sit()
         logging.info("===== GO2 rise sit...")
