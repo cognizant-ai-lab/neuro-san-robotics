@@ -23,10 +23,13 @@ from flask import Flask
 from flask import jsonify
 from flask import render_template
 from flask import request
+from flask import send_file
 from flask_socketio import SocketIO
 
 from apps.conscious_assistant.conscious_assistant import conscious_thinker
 from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
+from apps.conscious_assistant.scene_observer import SceneObserver
+from apps.conscious_assistant.scene_observer import build_scene_input
 from apps.conscious_assistant.conscious_assistant import tear_down_conscious_assistant
 
 
@@ -130,6 +133,19 @@ user_input_queue = queue.Queue()
 
 # Speech queue for TTS - allows non-blocking speech processing
 speech_queue = queue.Queue()
+scene_observer = SceneObserver()
+
+
+def emit_observation_update(observation=None, sid=None):
+    """Send the latest observation image and caption data to clients."""
+    payload = observation or scene_observer.latest_observation()
+    if not payload:
+        return
+
+    emit_kwargs = {"namespace": "/chat"}
+    if sid is not None:
+        emit_kwargs["to"] = sid
+    socketio.emit("update_observation", payload, **emit_kwargs)
 
 
 
@@ -315,9 +331,19 @@ def conscious_thinking_process():
                 logging.info("Acknowledgment speech complete, proceeding with agent")
 
             except queue.Empty:
-                if thoughts is None:
+                observation = scene_observer.observe()
+                if observation is not None:
+                    emit_observation_update(observation)
+
+                scene_input = None
+                if observation and observation.get("objects"):
+                    scene_input = build_scene_input(timestamp, observation["objects"])
+                    logging.info("Scene observer detected objects: %s", ", ".join(observation["objects"]))
+
+                if scene_input is None and thoughts is None:
                     continue
-                thoughts = f"\n{timestamp} user: " + "[Silence]"
+
+                thoughts = scene_input or (f"\n{timestamp} user: " + "[Silence]")
                 # Emit processing_started for silence-triggered processing
                 socketio.emit("processing_started", namespace="/chat")
 
@@ -391,6 +417,7 @@ def conscious_thinking_process():
 def on_connect():
     """Start background task on connect."""
     global thread_started  # pylint: disable=global-statement
+    emit_observation_update(sid=request.sid)
     if not thread_started:
         thread_started = True
         # let socketio manage the green-thread
@@ -401,6 +428,15 @@ def on_connect():
 def index():
     """Return the html."""
     return render_template("index.html")
+
+
+@app.route("/api/observation/latest.jpg")
+def latest_observation_image():
+    """Return the latest retained observation image, if available."""
+    image_path = scene_observer.latest_image_path()
+    if not image_path.exists():
+        return "", 404
+    return send_file(image_path, mimetype="image/jpeg", conditional=False, max_age=0)
 
 
 @app.route("/api/transcribe", methods=["POST"])
@@ -510,6 +546,7 @@ def cleanup(from_request=False):
     cleaned_up = True
 
     print("Bye!")
+    scene_observer.cleanup()
     tear_down_conscious_assistant(conscious_session)
 
     if from_request:

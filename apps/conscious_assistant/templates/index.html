@@ -40,6 +40,21 @@
                     <span id="toggle-text">Show Thoughts</span>
                 </button>
             </div>
+            <div id="observation-panel" class="observation-panel">
+                <div class="observation-meta">
+                    <span class="observation-title">Latest View</span>
+                    <span id="observation-timestamp" class="observation-timestamp">No photo yet</span>
+                </div>
+                <div id="observation-placeholder" class="observation-placeholder">
+                    The latest camera frame will appear here.
+                </div>
+                <img
+                    id="observation-image"
+                    class="observation-image hidden"
+                    alt="Latest camera observation from CAIL-E"
+                >
+                <div id="observation-caption" class="observation-caption">No observation yet.</div>
+            </div>
             <div id="assistant-thoughts" class="chat-box">
                 <div class="empty-state">Internal processing stream will appear here...</div>
             </div>
@@ -409,6 +424,30 @@
             }
             element.innerHTML += '<div class="thought-msg">' + data.data.replace(/\n/g, '<br>') + '</div>';
             element.scrollTop = element.scrollHeight;
+        });
+
+        socket.on('update_observation', function(data) {
+            var panel = document.getElementById('observation-panel');
+            var image = document.getElementById('observation-image');
+            var placeholder = document.getElementById('observation-placeholder');
+            var caption = document.getElementById('observation-caption');
+            var timestamp = document.getElementById('observation-timestamp');
+
+            panel.classList.add('has-image');
+
+            if (data.image_url) {
+                image.src = data.image_url;
+                image.classList.remove('hidden');
+                placeholder.classList.add('hidden');
+            }
+
+            timestamp.textContent = data.timestamp || 'Latest observation';
+
+            if (data.objects && data.objects.length > 0) {
+                caption.textContent = 'saw: ' + data.objects.join(', ');
+            } else {
+                caption.textContent = data.summary || 'No detections';
+            }
         });
 
         socket.on('update_speech', function(data) {
