@@ -5,12 +5,17 @@ import os
 import queue
 import random
 import re
+import sys
 import tempfile
 import threading
 import time
 from datetime import datetime
 
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # pylint: disable=import-error
 import schedule
@@ -116,8 +121,8 @@ ACKNOWLEDGMENT_PHRASES = [
     "Bark bark",
 ]
 
-os.environ["AGENT_MANIFEST_FILE"] = "registries/manifest.hocon"
-os.environ["AGENT_TOOL_PATH"] = "coded_tools"
+os.environ.setdefault("AGENT_MANIFEST_FILE", str(REPO_ROOT / "registries" / "manifest.hocon"))
+os.environ.setdefault("AGENT_TOOL_PATH", str(REPO_ROOT / "coded_tools"))
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")

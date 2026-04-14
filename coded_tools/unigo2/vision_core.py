@@ -16,12 +16,281 @@ Performance optimizations:
 """
 
 import os
+import platform
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import cv2
 import numpy as np
-from typing import List, Dict, Tuple, Optional, Any
-from pathlib import Path
 import json
-from datetime import datetime
+
+
+CameraSource = Union[int, str]
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse common boolean environment variable values."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_jetson_platform() -> bool:
+    """Detect whether we're running on NVIDIA Jetson hardware."""
+    if _env_flag("VISION_FORCE_JETSON", default=False):
+        return True
+
+    if platform.machine().lower() != "aarch64":
+        return False
+
+    if Path("/etc/nv_tegra_release").exists():
+        return True
+
+    model_path = Path("/proc/device-tree/model")
+    try:
+        return "jetson" in model_path.read_text(encoding="utf-8", errors="ignore").lower()
+    except OSError:
+        return False
+
+
+def build_jetson_camera_pipeline(
+    sensor_id: int = 0,
+    capture_width: int = 1280,
+    capture_height: int = 720,
+    display_width: Optional[int] = None,
+    display_height: Optional[int] = None,
+    framerate: int = 30,
+    flip_method: int = 0,
+) -> str:
+    """Build a Jetson CSI camera pipeline that OpenCV can consume via GStreamer."""
+    display_width = display_width or capture_width
+    display_height = display_height or capture_height
+
+    return (
+        f"nvarguscamerasrc sensor-id={sensor_id} ! "
+        f"video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, "
+        f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
+        f"nvvidconv flip-method={flip_method} ! "
+        f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
+        "videoconvert ! "
+        "video/x-raw, format=(string)BGR ! "
+        "appsink drop=true sync=false"
+    )
+
+
+def _camera_backend_label(backend: Optional[int]) -> str:
+    """Return a human-readable backend name for logging."""
+    if backend is None:
+        return "default backend"
+    if backend == getattr(cv2, "CAP_GSTREAMER", None):
+        return "GStreamer"
+    if backend == getattr(cv2, "CAP_V4L2", None):
+        return "V4L2"
+    return f"backend {backend}"
+
+
+def _discover_v4l2_devices(limit: int = 6) -> List[str]:
+    """Return available /dev/video* devices in numeric order."""
+    devices = []
+    for path in Path("/dev").glob("video*"):
+        suffix = path.name.removeprefix("video")
+        if suffix.isdigit():
+            devices.append(path)
+
+    devices.sort(key=lambda path: int(path.name.removeprefix("video")))
+    return [str(path) for path in devices[: max(0, limit)]]
+
+
+def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[Dict[str, Any]]:
+    """Normalize a camera source override into a single candidate descriptor."""
+    if camera_source is None:
+        camera_source = (
+            os.environ.get("VISION_CAMERA_SOURCE")
+            or os.environ.get("GO2_CAMERA_SOURCE")
+        )
+        if not camera_source:
+            return None
+
+    if isinstance(camera_source, int):
+        return {
+            "source": camera_source,
+            "backend": None,
+            "description": f"camera index {camera_source}",
+        }
+
+    raw_source = str(camera_source).strip()
+    if not raw_source:
+        return None
+
+    if raw_source.lstrip("+-").isdigit():
+        index = int(raw_source)
+        return {
+            "source": index,
+            "backend": None,
+            "description": f"camera index {index}",
+        }
+
+    lowered = raw_source.lower()
+    if lowered.startswith(("jetson:", "csi:", "sensor:")):
+        _, _, sensor_text = raw_source.partition(":")
+        sensor_id = int(sensor_text.strip() or "0")
+        return {
+            "source": build_jetson_camera_pipeline(sensor_id=sensor_id),
+            "backend": getattr(cv2, "CAP_GSTREAMER", None),
+            "description": f"Jetson CSI sensor {sensor_id}",
+        }
+
+    if lowered.startswith("gstreamer:"):
+        pipeline = raw_source.split(":", 1)[1].strip()
+        return {
+            "source": pipeline,
+            "backend": getattr(cv2, "CAP_GSTREAMER", None),
+            "description": "custom GStreamer pipeline",
+        }
+
+    if "!" in raw_source:
+        return {
+            "source": raw_source,
+            "backend": getattr(cv2, "CAP_GSTREAMER", None),
+            "description": "inline GStreamer pipeline",
+        }
+
+    if raw_source.startswith("/dev/video"):
+        return {
+            "source": raw_source,
+            "backend": getattr(cv2, "CAP_V4L2", None),
+            "description": raw_source,
+        }
+
+    return {
+        "source": raw_source,
+        "backend": None,
+        "description": raw_source,
+    }
+
+
+def get_camera_candidates(
+    camera_source: Optional[CameraSource] = None,
+    max_indices: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Build camera candidates in a robot-friendly order.
+
+    Priority:
+    1. Explicit source override (`VISION_CAMERA_SOURCE`, `/dev/videoN`, index, or pipeline)
+    2. Jetson CSI sensors via GStreamer
+    3. Present V4L2 devices under `/dev/video*`
+    4. Plain OpenCV camera indices for laptop/desktop webcams
+    """
+    normalized = _normalize_camera_source(camera_source)
+    if normalized is not None:
+        return [normalized]
+
+    if max_indices is None:
+        max_indices = int(os.environ.get("VISION_CAMERA_SCAN_LIMIT", "6"))
+
+    candidates: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add_candidate(source: CameraSource, backend: Optional[int], description: str) -> None:
+        key = (str(source), backend)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append({
+            "source": source,
+            "backend": backend,
+            "description": description,
+        })
+
+    if _is_jetson_platform():
+        for sensor_id in range(2):
+            add_candidate(
+                build_jetson_camera_pipeline(sensor_id=sensor_id),
+                getattr(cv2, "CAP_GSTREAMER", None),
+                f"Jetson CSI sensor {sensor_id}",
+            )
+
+    for device_path in _discover_v4l2_devices(limit=max_indices):
+        add_candidate(device_path, getattr(cv2, "CAP_V4L2", None), device_path)
+
+    for camera_index in range(max(0, max_indices)):
+        add_candidate(camera_index, None, f"camera index {camera_index}")
+
+    return candidates
+
+
+def open_camera(
+    camera_source: Optional[CameraSource] = None,
+    *,
+    frame_width: Optional[int] = None,
+    frame_height: Optional[int] = None,
+    warmup_reads: int = 3,
+    verbose: bool = True,
+) -> Tuple[Optional[cv2.VideoCapture], Dict[str, Any]]:
+    """
+    Open the first camera candidate that produces a real frame.
+
+    This avoids the common Jetson/robot failure mode where `VideoCapture(0)`
+    is a valid laptop assumption but not a valid camera source on the robot.
+    """
+    attempts: List[str] = []
+
+    for candidate in get_camera_candidates(camera_source):
+        source = candidate["source"]
+        backend = candidate["backend"]
+        description = candidate["description"]
+        backend_label = _camera_backend_label(backend)
+
+        if verbose:
+            print(f"[VisionCore] [Camera] Trying {description} via {backend_label}")
+
+        try:
+            capture = cv2.VideoCapture(source, backend) if backend is not None else cv2.VideoCapture(source)
+        except Exception as exc:
+            attempts.append(f"{description} via {backend_label}: exception while opening ({exc})")
+            continue
+
+        if not capture or not capture.isOpened():
+            attempts.append(f"{description} via {backend_label}: could not open")
+            if capture:
+                capture.release()
+            continue
+
+        if frame_width is not None:
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
+        if frame_height is not None:
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
+
+        frame_ok = False
+        frame = None
+        for _ in range(max(1, warmup_reads)):
+            frame_ok, frame = capture.read()
+            if frame_ok and frame is not None and getattr(frame, "size", 0) > 0:
+                break
+            time.sleep(0.05)
+
+        if not frame_ok or frame is None or getattr(frame, "size", 0) == 0:
+            attempts.append(f"{description} via {backend_label}: opened but produced no frame")
+            capture.release()
+            continue
+
+        return capture, {
+            "source": source,
+            "backend": backend_label,
+            "description": description,
+            "width": int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            "height": int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            "attempts": attempts,
+        }
+
+    return None, {
+        "camera_source": camera_source,
+        "attempts": attempts,
+    }
 
 
 class VisionCore:
@@ -936,7 +1205,6 @@ if __name__ == "__main__":
     4. Performance monitoring
     """
     import sys
-    import time
 
     print("=" * 60)
     print("VisionCore - Interactive Demo")
@@ -947,8 +1215,12 @@ if __name__ == "__main__":
     # Configure for your use case (Jetson vs Desktop)
     # ============================================================
 
-    # For NVIDIA Jetson Orin (recommended):
-    use_jetson_config = False  # Set to True when running on Jetson
+    jetson_detected = _is_jetson_platform()
+    use_jetson_config = _env_flag("VISION_USE_JETSON_CONFIG", default=False)
+
+    if jetson_detected and not use_jetson_config:
+        print("\n[Config] Jetson detected. Using safe CPU defaults.")
+        print("[Config] Set VISION_USE_JETSON_CONFIG=1 to enable TensorRT-optimized inference.")
 
     if use_jetson_config:
         print("\n[Config] Using Jetson Orin optimized settings")
@@ -986,15 +1258,22 @@ if __name__ == "__main__":
     # WEBCAM CAPTURE
     # Use default webcam resolution (driver-optimized)
     # ============================================================
-    cap = cv2.VideoCapture(0)
+    requested_camera_source = (
+        os.environ.get("VISION_CAMERA_SOURCE")
+        or os.environ.get("GO2_CAMERA_SOURCE")
+    )
+    cap, camera_info = open_camera(
+        camera_source=requested_camera_source,
+        verbose=True,
+    )
 
-    # Read actual webcam resolution
-    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"[Webcam] Using default resolution: {actual_width}x{actual_height}")
-
-    if not cap.isOpened():
-        print("WARNING: Could not open webcam. Using test image instead.")
+    if cap is None:
+        print("WARNING: Could not open any camera. Using test image instead.")
+        if requested_camera_source:
+            print(f"[Camera] Requested source override: {requested_camera_source}")
+        for attempt in camera_info.get("attempts", []):
+            print(f"  - {attempt}")
+        print("[Camera] Hint: set VISION_CAMERA_SOURCE to an explicit source, e.g. 'jetson:0', '/dev/video2', or a full GStreamer pipeline.")
 
         # Create a test image with text
         test_image = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -1015,6 +1294,12 @@ if __name__ == "__main__":
         print(f"Faces detected: {len(results['faces'])}")
 
     else:
+        actual_width = camera_info["width"]
+        actual_height = camera_info["height"]
+        print(
+            f"[Camera] Using {camera_info['description']} via {camera_info['backend']} "
+            f"at {actual_width}x{actual_height}"
+        )
         print("\nWebcam opened successfully!")
         print("\n" + "!" * 60)
         print("IMPORTANT: Click on the OpenCV window to activate it!")
