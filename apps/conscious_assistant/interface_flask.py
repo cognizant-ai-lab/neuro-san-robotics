@@ -109,7 +109,6 @@ def _prime_vision_runtime_imports() -> None:
 _prime_vision_runtime_imports()
 
 # pylint: disable=import-error
-import schedule
 from flask import Flask
 from flask import jsonify
 from flask import render_template
@@ -725,13 +724,6 @@ def add_header(response):
     """Add the header."""
     response.headers["Cache-Control"] = "no-store"
     return response
-
-
-def run_scheduled_tasks():
-    """Run the scheduled tasks."""
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
 
 
 # Register the cleanup function
