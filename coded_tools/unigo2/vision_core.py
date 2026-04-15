@@ -274,32 +274,37 @@ def _save_frame_snapshot(
     return filename
 
 
-def _run_headless_camera_demo(
+def detect_camera_snapshot(
     cap,
     vision: "VisionCore",
     *,
     enable_face_recognition: bool = False,
-) -> None:
+    warmup_frames: Optional[int] = None,
+    process_size: Tuple[int, int] = (320, 240),
+) -> Optional[Dict[str, Any]]:
     """
-    Run a short non-GUI smoke test for headless robots.
+    Capture one detection snapshot from an open camera using the headless demo path.
 
-    Captures a few frames, runs detection on the last good frame, saves a preview
-    image to disk, and exits cleanly.
+    This is the same warmup, resize, inference, and bbox-rescaling flow used by
+    the standalone headless camera demo so other entrypoints can reuse it
+    instead of maintaining their own detection pipeline.
     """
-    warmup_frames = max(1, _env_int("VISION_HEADLESS_WARMUP_FRAMES", 5))
+    if warmup_frames is None:
+        warmup_frames = max(1, _env_int("VISION_HEADLESS_WARMUP_FRAMES", 5))
+
     last_frame = None
-
-    for _ in range(warmup_frames):
+    for _ in range(max(1, warmup_frames)):
         ret, frame = cap.read()
         if ret and frame is not None and frame.size > 0:
             last_frame = frame
         time.sleep(0.05)
 
     if last_frame is None:
-        print("[Headless] Failed to capture a frame from the camera.")
-        return
+        return None
 
-    process_frame = cv2.resize(last_frame, (320, 240))
+    process_width = max(1, int(process_size[0]))
+    process_height = max(1, int(process_size[1]))
+    process_frame = cv2.resize(last_frame, (process_width, process_height))
     orig_h, orig_w = last_frame.shape[:2]
     proc_h, proc_w = process_frame.shape[:2]
     scale_x = orig_w / proc_w
@@ -328,12 +333,46 @@ def _run_headless_camera_demo(
                 int(face['bbox'][3] * scale_y)
             ]
 
-    output_path = _save_frame_snapshot(last_frame, results, vision, prefix="headless_detection")
+    return {
+        "frame": last_frame,
+        "results": results,
+        "annotated": _annotate_frame_with_summary(last_frame, results, vision),
+    }
+
+
+def _run_headless_camera_demo(
+    cap,
+    vision: "VisionCore",
+    *,
+    enable_face_recognition: bool = False,
+) -> None:
+    """
+    Run a short non-GUI smoke test for headless robots.
+
+    Captures a few frames, runs detection on the last good frame, saves a preview
+    image to disk, and exits cleanly.
+    """
+    snapshot = detect_camera_snapshot(
+        cap,
+        vision,
+        enable_face_recognition=enable_face_recognition,
+    )
+
+    if snapshot is None:
+        print("[Headless] Failed to capture a frame from the camera.")
+        return
+
+    output_path = _save_frame_snapshot(
+        snapshot["frame"],
+        snapshot["results"],
+        vision,
+        prefix="headless_detection",
+    )
     print("[Headless] No GUI session detected. Saved annotated snapshot instead of opening a window.")
     print(f"[Headless] Output: {output_path}")
-    print(f"[Headless] Summary: {results['summary']}")
-    print(f"[Headless] Objects: {len(results['objects'])}")
-    print(f"[Headless] Faces: {len(results['faces'])}")
+    print(f"[Headless] Summary: {snapshot['results']['summary']}")
+    print(f"[Headless] Objects: {len(snapshot['results']['objects'])}")
+    print(f"[Headless] Faces: {len(snapshot['results']['faces'])}")
 
 
 def _discover_v4l2_devices(limit: int = 6) -> List[str]:
@@ -575,6 +614,43 @@ def open_camera(
     return None, {
         "camera_source": camera_source,
         "attempts": attempts,
+    }
+
+
+def get_default_vision_core_settings(
+    *,
+    yolo_model: str = "yolov8n.pt",
+    face_model: str = "Facenet",
+    face_db_path: str = "./face_database",
+) -> Dict[str, Any]:
+    """
+    Return the default VisionCore kwargs used by the standalone demo.
+
+    Keeping this in one place lets the Flask observer and the standalone script
+    share the same model, confidence, and input-size defaults.
+    """
+    use_jetson_config = _env_flag("VISION_USE_JETSON_CONFIG", default=False)
+    if use_jetson_config:
+        return {
+            "yolo_model": yolo_model,
+            "face_model": face_model,
+            "face_db_path": face_db_path,
+            "use_tensorrt": True,
+            "confidence_threshold": 0.65,
+            "iou_threshold": 0.45,
+            "input_size": 640,
+            "half_precision": True,
+        }
+
+    return {
+        "yolo_model": yolo_model,
+        "face_model": face_model,
+        "face_db_path": face_db_path,
+        "use_tensorrt": False,
+        "confidence_threshold": 0.60,
+        "iou_threshold": 0.45,
+        "input_size": 256,
+        "half_precision": False,
     }
 
 
@@ -1507,33 +1583,21 @@ if __name__ == "__main__":
         print("\n[Config] Jetson detected. Using safe CPU defaults.")
         print("[Config] Set VISION_USE_JETSON_CONFIG=1 to enable TensorRT-optimized inference.")
 
+    vision_settings = get_default_vision_core_settings(
+        yolo_model="yolov8n.pt",
+        face_model="Facenet",
+        face_db_path="./face_database",
+    )
+
     if use_jetson_config:
         print("\n[Config] Using Jetson Orin optimized settings")
-        vision = VisionCore(
-            yolo_model="yolov8n.pt",        # Fastest model
-            face_model="Facenet",            # Fast face recognition
-            face_db_path="./face_database",
-            use_tensorrt=True,               # ⚡ 2-3x speedup
-            confidence_threshold=0.65,       # Reduces false positives
-            iou_threshold=0.45,              # Standard NMS
-            input_size=640,                  # Balanced resolution
-            half_precision=True              # ⚡ FP16 acceleration
-        )
     else:
         # For desktop/laptop (no TensorRT):
         print("\n[Config] Using desktop/laptop CPU-optimized settings")
         print("[Config] Input size: 256x256 (very fast, good for nearby objects)")
         print("[Config] Will use ONNX if available (2-4x faster than PyTorch)")
-        vision = VisionCore(
-            yolo_model="yolov8n.pt",         # Will auto-use yolov8n.onnx if exists
-            face_model="Facenet",
-            face_db_path="./face_database",
-            use_tensorrt=False,              # No TensorRT on non-Jetson
-            confidence_threshold=0.60,       # Slightly lower for better detection
-            iou_threshold=0.45,
-            input_size=256,                  # Very small for maximum CPU speed
-            half_precision=False
-        )
+
+    vision = VisionCore(**vision_settings)
 
     print("\n" + "=" * 60)
     print("Test 1: Object Detection from Webcam")

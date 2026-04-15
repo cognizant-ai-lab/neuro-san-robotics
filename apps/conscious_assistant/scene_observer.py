@@ -3,7 +3,6 @@ import os
 import tempfile
 import threading
 import time
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,9 +13,16 @@ except ImportError:  # pragma: no cover - exercised in runtime environments
     cv2 = None
 
 try:
-    from coded_tools.unigo2.vision_core import VisionCore, open_camera
+    from coded_tools.unigo2.vision_core import (
+        VisionCore,
+        detect_camera_snapshot,
+        get_default_vision_core_settings,
+        open_camera,
+    )
 except ImportError as exc:  # pragma: no cover - exercised in runtime environments
     VisionCore = None
+    detect_camera_snapshot = None
+    get_default_vision_core_settings = None
     open_camera = None
     _VISION_IMPORT_ERROR = exc
 else:
@@ -24,36 +30,6 @@ else:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    """Parse common boolean environment variable values."""
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    """Parse integer environment variables with a safe fallback."""
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    try:
-        return int(raw_value)
-    except ValueError:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    """Parse float environment variables with a safe fallback."""
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    try:
-        return float(raw_value)
-    except ValueError:
-        return default
 
 
 def _resolve_repo_relative_path(path_text: str) -> str:
@@ -73,31 +49,6 @@ def _resolve_repo_relative_path(path_text: str) -> str:
         return str(repo_candidate)
 
     return str(path)
-
-
-def _default_observer_vision_settings() -> Dict[str, Any]:
-    """
-    Mirror the standalone VisionCore defaults unless explicitly overridden.
-
-    The standalone `vision_core.py` script already works on CAIL-E, so the Flask
-    observer should start from the same runtime configuration instead of inventing
-    its own thresholds and input size.
-    """
-    use_tensorrt = _env_flag("VISION_USE_JETSON_CONFIG", default=False)
-    if use_tensorrt:
-        return {
-            "use_tensorrt": True,
-            "half_precision": True,
-            "input_size": _env_int("VISION_OBSERVER_INPUT_SIZE", 640),
-            "confidence_threshold": _env_float("VISION_OBSERVER_CONFIDENCE", 0.65),
-        }
-
-    return {
-        "use_tensorrt": False,
-        "half_precision": False,
-        "input_size": _env_int("VISION_OBSERVER_INPUT_SIZE", 256),
-        "confidence_threshold": _env_float("VISION_OBSERVER_CONFIDENCE", 0.60),
-    }
 
 
 def summarize_observed_objects(objects: List[Dict[str, Any]]) -> List[str]:
@@ -164,7 +115,13 @@ class SceneObserver:
 
     def available(self) -> bool:
         """Return whether the vision observer can run in this environment."""
-        return VisionCore is not None and open_camera is not None and cv2 is not None
+        return (
+            VisionCore is not None
+            and detect_camera_snapshot is not None
+            and get_default_vision_core_settings is not None
+            and open_camera is not None
+            and cv2 is not None
+        )
 
     def _ensure_vision(self):
         if self._vision is not None:
@@ -179,22 +136,17 @@ class SceneObserver:
                 self._warned_unavailable = True
             return None
 
-        settings = _default_observer_vision_settings()
         yolo_model = _resolve_repo_relative_path(
             os.environ.get("VISION_YOLO_MODEL", "yolov8n.pt")
         )
+        settings = get_default_vision_core_settings(
+            yolo_model=yolo_model,
+            face_model="Facenet",
+            face_db_path=str(REPO_ROOT / "face_database"),
+        )
 
         try:
-            self._vision = VisionCore(
-                yolo_model=yolo_model,
-                face_model="Facenet",
-                face_db_path=str(REPO_ROOT / "face_database"),
-                use_tensorrt=settings["use_tensorrt"],
-                confidence_threshold=settings["confidence_threshold"],
-                iou_threshold=0.45,
-                input_size=settings["input_size"],
-                half_precision=settings["half_precision"],
-            )
+            self._vision = VisionCore(**settings)
             if getattr(self._vision, "yolo", None) is None:
                 logging.error(
                     "Scene observer initialized without a YOLO backend. "
@@ -233,139 +185,6 @@ class SceneObserver:
         )
         return True
 
-    def _read_frame(self):
-        if not self._ensure_camera():
-            return None
-
-        frame_reads = max(1, _env_int("VISION_OBSERVER_WARMUP_FRAMES", 5))
-        last_frame = None
-
-        for _ in range(frame_reads):
-            ret, frame = self._capture.read()
-            if ret and frame is not None and getattr(frame, "size", 0) > 0:
-                last_frame = frame
-            time.sleep(0.05)
-
-        if last_frame is not None:
-            return last_frame
-
-        logging.warning("Scene observer failed to read a frame; reopening camera on next attempt")
-        self._release_capture()
-        return None
-
-    def _read_detection_frames(self) -> List[Any]:
-        """
-        Capture a short burst of frames and return the latest good candidates.
-
-        The standalone interactive demo benefits from repeated frames over a live
-        stream. Capturing a burst here gives the observer a similar chance to
-        avoid a blurred or poorly exposed single snapshot.
-        """
-        initial_frame = self._read_frame()
-        if initial_frame is None:
-            return []
-
-        burst_size = max(1, _env_int("VISION_OBSERVER_BURST_FRAMES", 6))
-        frames = deque([initial_frame], maxlen=burst_size)
-        if self._capture is None:
-            return list(frames)
-
-        for _ in range(burst_size - 1):
-            ret, frame = self._capture.read()
-            if ret and frame is not None and getattr(frame, "size", 0) > 0:
-                frames.append(frame)
-            time.sleep(0.03)
-
-        return list(frames)
-
-    def _annotate_frame(self, vision, frame, results: Dict[str, Any]):
-        annotated = vision.visualize_detections(frame, results)
-        cv2.putText(
-            annotated,
-            results.get("summary", "No detections"),
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 255),
-            2,
-        )
-        return annotated
-
-    def _detect_scene(self, vision, frame):
-        """
-        Run object detection on one or more resized copies of the frame.
-
-        The standalone headless demo resizes to 320x240 before inference. We use
-        that same snapshot path first, then retry with a larger 640x480 frame,
-        and finally with the native frame if the smaller passes find nothing.
-        """
-        orig_h, orig_w = frame.shape[:2]
-        primary_size = (
-            max(64, _env_int("VISION_OBSERVER_PROCESS_WIDTH", 320)),
-            max(48, _env_int("VISION_OBSERVER_PROCESS_HEIGHT", 240)),
-        )
-        fallback_size = (
-            max(primary_size[0], _env_int("VISION_OBSERVER_FALLBACK_WIDTH", 640)),
-            max(primary_size[1], _env_int("VISION_OBSERVER_FALLBACK_HEIGHT", 480)),
-        )
-        candidate_sizes = []
-        for candidate_size in (primary_size, fallback_size, (orig_w, orig_h)):
-            if candidate_size not in candidate_sizes:
-                candidate_sizes.append(candidate_size)
-
-        final_results = {"objects": [], "faces": [], "summary": "No detections"}
-
-        for proc_w, proc_h in candidate_sizes:
-            proc_w = max(1, min(proc_w, orig_w))
-            proc_h = max(1, min(proc_h, orig_h))
-            if proc_w == orig_w and proc_h == orig_h:
-                process_frame = frame
-            else:
-                process_frame = cv2.resize(frame, (proc_w, proc_h))
-
-            scale_x = orig_w / proc_w
-            scale_y = orig_h / proc_h
-            results = vision.detect_all(process_frame, detect_faces=False, verbose=False)
-            logging.info(
-                "Scene observer detection attempt at %sx%s found %d objects and %d faces",
-                proc_w,
-                proc_h,
-                len(results.get("objects", [])),
-                len(results.get("faces", [])),
-            )
-
-            for detected_object in results.get("objects", []):
-                detected_object["bbox"] = [
-                    int(detected_object["bbox"][0] * scale_x),
-                    int(detected_object["bbox"][1] * scale_y),
-                    int(detected_object["bbox"][2] * scale_x),
-                    int(detected_object["bbox"][3] * scale_y),
-                ]
-
-            for face in results.get("faces", []):
-                if face.get("bbox"):
-                    face["bbox"] = [
-                        int(face["bbox"][0] * scale_x),
-                        int(face["bbox"][1] * scale_y),
-                        int(face["bbox"][2] * scale_x),
-                        int(face["bbox"][3] * scale_y),
-                    ]
-
-            final_results = results
-            if results.get("objects") or results.get("faces"):
-                break
-
-        return final_results
-
-    @staticmethod
-    def _score_results(results: Dict[str, Any]) -> float:
-        """Rank detection results so the best frame in a burst can be selected."""
-        objects = results.get("objects", [])
-        faces = results.get("faces", [])
-        object_confidence = sum(float(obj.get("confidence", 0.0)) for obj in objects)
-        face_confidence = sum(float(face.get("confidence", 0.0)) for face in faces)
-        return (len(objects) * 100.0) + (len(faces) * 50.0) + object_confidence + face_confidence
-
     def _write_latest_image(self, annotated_frame) -> int:
         self.image_dir.mkdir(parents=True, exist_ok=True)
         tmp_path = self.image_path.with_suffix(".tmp.jpg")
@@ -393,30 +212,31 @@ class SceneObserver:
             if vision is None:
                 return None
 
-            candidate_frames = self._read_detection_frames()
-            if not candidate_frames:
+            if not self._ensure_camera():
                 return None
 
-            selected_frame = candidate_frames[-1]
-            selected_results = {"objects": [], "faces": [], "summary": "No detections"}
-            best_score = -1.0
+            snapshot = detect_camera_snapshot(
+                self._capture,
+                vision,
+                enable_face_recognition=False,
+            )
+            if snapshot is None:
+                logging.warning("Scene observer snapshot capture returned no frame")
+                self._release_capture()
+                return None
 
-            for frame in candidate_frames:
-                results = self._detect_scene(vision, frame)
-                score = self._score_results(results)
-                if score > best_score:
-                    best_score = score
-                    selected_frame = frame
-                    selected_results = results
-
-            object_names = summarize_observed_objects(selected_results.get("objects", []))
-            annotated = self._annotate_frame(vision, selected_frame, selected_results)
-            updated_at_ms = self._write_latest_image(annotated)
+            results = snapshot["results"]
+            object_names = summarize_observed_objects(results.get("objects", []))
+            logging.info(
+                "Scene observer snapshot summary: %s",
+                results.get("summary", "No detections"),
+            )
+            updated_at_ms = self._write_latest_image(snapshot["annotated"])
             timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
 
             self._last_observation = {
                 "image_url": f"{self.public_image_url}?t={updated_at_ms}",
-                "summary": selected_results.get("summary", "No detections"),
+                "summary": results.get("summary", "No detections"),
                 "objects": object_names,
                 "timestamp": timestamp,
             }
