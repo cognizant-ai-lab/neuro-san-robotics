@@ -4,6 +4,8 @@ from unittest.mock import patch
 import numpy as np
 
 from apps.conscious_assistant.scene_observer import SceneObserver
+from apps.conscious_assistant.scene_observer import REPO_ROOT
+from apps.conscious_assistant.scene_observer import _resolve_repo_relative_path
 from apps.conscious_assistant.scene_observer import build_scene_input
 from apps.conscious_assistant.scene_observer import summarize_observed_objects
 
@@ -38,7 +40,42 @@ class _FakeScaledVision:
         return frame.copy()
 
 
+class _FallbackVision:
+    def __init__(self):
+        self.widths = []
+
+    def detect_all(self, frame, detect_faces=False, verbose=False):
+        self.widths.append(frame.shape[1])
+        if frame.shape[1] <= 320:
+            return {
+                "objects": [],
+                "faces": [],
+                "summary": "No detections",
+            }
+        return {
+            "objects": [
+                {"class_name": "person", "confidence": 0.88, "bbox": [16, 8, 32, 24]},
+            ],
+            "faces": [],
+            "summary": "Objects: 1 person(s)",
+        }
+
+    def visualize_detections(self, frame, results):
+        return frame.copy()
+
+
+class _VisionCtorResult:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.yolo = object()
+
+
 class SceneObserverTests(unittest.TestCase):
+    def test_resolve_repo_relative_path_uses_repo_copy_when_present(self):
+        resolved = _resolve_repo_relative_path("yolov8n.pt")
+
+        self.assertEqual(resolved, str(REPO_ROOT / "yolov8n.pt"))
+
     def test_summarize_observed_objects_deduplicates_and_sorts(self):
         objects = [
             {"class_name": "chair", "confidence": 0.33},
@@ -84,6 +121,71 @@ class SceneObserverTests(unittest.TestCase):
             results = observer._detect_scene(_FakeScaledVision(), frame)
 
         self.assertEqual(results["objects"][0]["bbox"], [20, 10, 60, 50])
+
+    def test_detect_scene_retries_with_fallback_width(self):
+        observer = SceneObserver()
+        frame = np.ones((240, 1280, 3), dtype=np.uint8)
+        vision = _FallbackVision()
+
+        def fake_env_int(name, default):
+            if name == "VISION_OBSERVER_MAX_WIDTH":
+                return 320
+            if name == "VISION_OBSERVER_FALLBACK_WIDTH":
+                return 640
+            return default
+
+        with patch("apps.conscious_assistant.scene_observer._env_int", side_effect=fake_env_int):
+            results = observer._detect_scene(vision, frame)
+
+        self.assertEqual(vision.widths, [320, 640])
+        self.assertEqual(results["objects"][0]["bbox"], [32, 16, 64, 48])
+
+    def test_read_frame_returns_last_good_warmup_frame(self):
+        observer = SceneObserver()
+        frames = [
+            (True, np.zeros((4, 4, 3), dtype=np.uint8)),
+            (True, np.ones((4, 4, 3), dtype=np.uint8)),
+            (True, np.full((4, 4, 3), 2, dtype=np.uint8)),
+        ]
+
+        class _FakeCapture:
+            def __init__(self, frame_pairs):
+                self._frame_pairs = iter(frame_pairs)
+
+            def isOpened(self):
+                return True
+
+            def read(self):
+                return next(self._frame_pairs)
+
+        observer._capture = _FakeCapture(frames)
+
+        with patch.object(observer, "_ensure_camera", return_value=True):
+            with patch("apps.conscious_assistant.scene_observer._env_int", side_effect=lambda name, default: 3 if name == "VISION_OBSERVER_WARMUP_FRAMES" else default):
+                frame = observer._read_frame()
+
+        self.assertEqual(int(frame[0, 0, 0]), 2)
+
+    def test_ensure_vision_uses_repo_resolved_model_path(self):
+        observer = SceneObserver()
+        captured_kwargs = {}
+
+        def fake_ctor(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _VisionCtorResult(**kwargs)
+
+        with patch("apps.conscious_assistant.scene_observer.VisionCore", side_effect=fake_ctor):
+            vision = observer._ensure_vision()
+
+        self.assertIsNotNone(vision)
+        self.assertEqual(
+            captured_kwargs["yolo_model"],
+            str(REPO_ROOT / "yolov8n.pt"),
+        )
+        self.assertEqual(
+            captured_kwargs["face_db_path"],
+            str(REPO_ROOT / "face_database"),
+        )
 
 
 if __name__ == "__main__":

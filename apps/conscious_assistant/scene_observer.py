@@ -55,6 +55,25 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _resolve_repo_relative_path(path_text: str) -> str:
+    """
+    Resolve model/resource paths relative to the repo root when not absolute.
+
+    The standalone vision script is typically run from the repo root, but the
+    Flask app may be launched from elsewhere. Using an absolute path keeps both
+    entrypoints aligned.
+    """
+    path = Path(path_text)
+    if path.is_absolute():
+        return str(path)
+
+    repo_candidate = REPO_ROOT / path
+    if repo_candidate.exists():
+        return str(repo_candidate)
+
+    return str(path)
+
+
 def summarize_observed_objects(objects: List[Dict[str, Any]]) -> List[str]:
     """
     Convert raw detection dictionaries into de-duplicated object names.
@@ -140,10 +159,13 @@ class SceneObserver:
             "VISION_OBSERVER_CONFIDENCE",
             0.65 if use_tensorrt else 0.55,
         )
+        yolo_model = _resolve_repo_relative_path(
+            os.environ.get("VISION_YOLO_MODEL", "yolov8n.pt")
+        )
 
         try:
             self._vision = VisionCore(
-                yolo_model=os.environ.get("VISION_YOLO_MODEL", "yolov8n.pt"),
+                yolo_model=yolo_model,
                 face_model="Facenet",
                 face_db_path=str(REPO_ROOT / "face_database"),
                 use_tensorrt=use_tensorrt,
@@ -152,6 +174,12 @@ class SceneObserver:
                 input_size=input_size,
                 half_precision=use_tensorrt,
             )
+            if getattr(self._vision, "yolo", None) is None:
+                logging.error(
+                    "Scene observer initialized without a YOLO backend. "
+                    "Resolved model path: %s",
+                    yolo_model,
+                )
         except Exception:  # pragma: no cover - hardware/runtime-dependent
             logging.exception("Failed to initialize SceneObserver vision backend")
             self._vision = None
@@ -188,11 +216,17 @@ class SceneObserver:
         if not self._ensure_camera():
             return None
 
-        for _ in range(2):
+        frame_reads = max(1, _env_int("VISION_OBSERVER_WARMUP_FRAMES", 5))
+        last_frame = None
+
+        for _ in range(frame_reads):
             ret, frame = self._capture.read()
             if ret and frame is not None and getattr(frame, "size", 0) > 0:
-                return frame
+                last_frame = frame
             time.sleep(0.05)
+
+        if last_frame is not None:
+            return last_frame
 
         logging.warning("Scene observer failed to read a frame; reopening camera on next attempt")
         self._release_capture()
@@ -213,46 +247,59 @@ class SceneObserver:
 
     def _detect_scene(self, vision, frame):
         """
-        Run object detection on a resized copy of the frame and scale boxes back.
+        Run object detection on one or more resized copies of the frame.
 
-        This mirrors the `vision_core.py` demo structure more closely than the
-        original full-resolution direct call and gives snapshot captures a more
-        accurate, higher-resolution detection pass.
+        The standalone demo downsizes frames before inference and benefits from a
+        few warm-up frames. For one-shot Flask captures we try a fast, demo-like
+        width first and then a larger fallback width before giving up.
         """
-        max_width = max(64, _env_int("VISION_OBSERVER_MAX_WIDTH", 640))
         orig_h, orig_w = frame.shape[:2]
+        primary_width = max(64, _env_int("VISION_OBSERVER_MAX_WIDTH", 320))
+        fallback_width = max(primary_width, _env_int("VISION_OBSERVER_FALLBACK_WIDTH", 640))
+        candidate_widths = []
+        for width in (primary_width, fallback_width):
+            effective_width = min(orig_w, width)
+            if effective_width not in candidate_widths:
+                candidate_widths.append(effective_width)
 
-        if orig_w > max_width:
-            scale = max_width / float(orig_w)
-            proc_w = max(1, int(orig_w * scale))
-            proc_h = max(1, int(orig_h * scale))
-            process_frame = cv2.resize(frame, (proc_w, proc_h))
-        else:
-            process_frame = frame
-            proc_h, proc_w = frame.shape[:2]
+        final_results = {"objects": [], "faces": [], "summary": "No detections"}
 
-        scale_x = orig_w / proc_w
-        scale_y = orig_h / proc_h
-        results = vision.detect_all(process_frame, detect_faces=False, verbose=False)
+        for candidate_width in candidate_widths:
+            if orig_w > candidate_width:
+                scale = candidate_width / float(orig_w)
+                proc_w = max(1, int(orig_w * scale))
+                proc_h = max(1, int(orig_h * scale))
+                process_frame = cv2.resize(frame, (proc_w, proc_h))
+            else:
+                process_frame = frame
+                proc_h, proc_w = frame.shape[:2]
 
-        for detected_object in results.get("objects", []):
-            detected_object["bbox"] = [
-                int(detected_object["bbox"][0] * scale_x),
-                int(detected_object["bbox"][1] * scale_y),
-                int(detected_object["bbox"][2] * scale_x),
-                int(detected_object["bbox"][3] * scale_y),
-            ]
+            scale_x = orig_w / proc_w
+            scale_y = orig_h / proc_h
+            results = vision.detect_all(process_frame, detect_faces=False, verbose=False)
 
-        for face in results.get("faces", []):
-            if face.get("bbox"):
-                face["bbox"] = [
-                    int(face["bbox"][0] * scale_x),
-                    int(face["bbox"][1] * scale_y),
-                    int(face["bbox"][2] * scale_x),
-                    int(face["bbox"][3] * scale_y),
+            for detected_object in results.get("objects", []):
+                detected_object["bbox"] = [
+                    int(detected_object["bbox"][0] * scale_x),
+                    int(detected_object["bbox"][1] * scale_y),
+                    int(detected_object["bbox"][2] * scale_x),
+                    int(detected_object["bbox"][3] * scale_y),
                 ]
 
-        return results
+            for face in results.get("faces", []):
+                if face.get("bbox"):
+                    face["bbox"] = [
+                        int(face["bbox"][0] * scale_x),
+                        int(face["bbox"][1] * scale_y),
+                        int(face["bbox"][2] * scale_x),
+                        int(face["bbox"][3] * scale_y),
+                    ]
+
+            final_results = results
+            if results.get("objects") or results.get("faces"):
+                break
+
+        return final_results
 
     def _write_latest_image(self, annotated_frame) -> int:
         self.image_dir.mkdir(parents=True, exist_ok=True)
