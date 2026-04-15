@@ -10,6 +10,14 @@ python-dotenv==1.0.1
 # For asynchronous file operations
 aiofiles>=24.1.0
 
+# Web app dependencies for apps/conscious_assistant/interface_flask.py
+flask>=2.3,<3.0
+flask-socketio>=5.3,<6.0
+simple-websocket>=0.10,<2.0
+openai>=1.3,<2.0
+pyttsx3>=2.90 ; sys_platform == "darwin"
+piper-tts>=1.2 ; sys_platform == "linux"
+
 # Vision dependencies
 ultralytics>=8.4.7
 deepface>=0.0.97
