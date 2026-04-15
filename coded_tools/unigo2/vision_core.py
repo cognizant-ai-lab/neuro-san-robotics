@@ -694,7 +694,8 @@ class VisionCore:
         confidence_threshold: float = 0.6,  # Increased from 0.5 for better accuracy
         iou_threshold: float = 0.45,        # IoU for Non-Maximum Suppression
         input_size: int = 640,              # Input resolution (lower = faster, higher = more accurate)
-        half_precision: bool = False        # FP16 mode (faster on Jetson, slight accuracy loss)
+        half_precision: bool = False,       # FP16 mode (faster on Jetson, slight accuracy loss)
+        initialize_yolo: bool = True
     ):
         """
         Initialize VisionCore system with optimized parameters.
@@ -774,6 +775,7 @@ class VisionCore:
         self.input_size = input_size
         self.half_precision = half_precision
         self.use_tensorrt = use_tensorrt
+        self.initialize_yolo = initialize_yolo
 
         # ============================================================
         # FACE RECOGNITION CONFIGURATION
@@ -789,7 +791,12 @@ class VisionCore:
         # This loads the model and optionally converts to TensorRT
         # ============================================================
         self.backend = "Unknown"  # Will be set by _init_yolo
-        self._init_yolo(yolo_model)
+        self.yolo = None
+        self.class_names = {}
+        if self.initialize_yolo:
+            self._init_yolo(yolo_model)
+        else:
+            self.backend = "Disabled"
 
         # ============================================================
         # INITIALIZE FACE RECOGNITION (LAZY LOADING)

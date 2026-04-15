@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -59,6 +60,18 @@ class _FakeVision:
 
 
 class VisionCoreCameraTests(unittest.TestCase):
+    def test_vision_core_can_skip_yolo_initialization_for_face_db_updates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(vision_core.VisionCore, "_init_yolo") as init_yolo:
+                vision = vision_core.VisionCore(
+                    face_db_path=temp_dir,
+                    initialize_yolo=False,
+                )
+
+        init_yolo.assert_not_called()
+        self.assertEqual(vision.backend, "Disabled")
+        self.assertIsNone(vision.yolo)
+
     def test_default_vision_core_settings_match_standalone_cpu_defaults(self):
         with patch.object(vision_core, "_env_flag", return_value=False):
             settings = vision_core.get_default_vision_core_settings()

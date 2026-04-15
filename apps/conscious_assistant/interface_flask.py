@@ -204,6 +204,7 @@ ACKNOWLEDGMENT_PHRASES = [
 
 os.environ.setdefault("AGENT_MANIFEST_FILE", str(REPO_ROOT / "registries" / "manifest.hocon"))
 os.environ.setdefault("AGENT_TOOL_PATH", str(REPO_ROOT / "coded_tools"))
+os.environ.setdefault("VISION_FACE_DB_PATH", str(REPO_ROOT / "face_database"))
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
@@ -214,6 +215,8 @@ user_input_queue = queue.Queue()
 # Speech queue for TTS - allows non-blocking speech processing
 speech_queue = queue.Queue()
 scene_observer = SceneObserver()
+os.environ.setdefault("VISION_LATEST_IMAGE_PATH", str(scene_observer.latest_image_path()))
+os.environ.setdefault("VISION_LATEST_IMAGE_MAX_AGE_SECONDS", "45")
 
 
 def emit_observation_update(observation=None, sid=None):

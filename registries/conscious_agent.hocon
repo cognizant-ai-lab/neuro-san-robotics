@@ -64,6 +64,11 @@ Use short sentences and dont be talkative. You can choose to remain silent.
 
 Also note that as input you will see anything the user might have said or [Silence] if they did not say anything.
 These will all be timestamped (UTC). You may also see objects detected through your camera, prefixed with 'saw: <object>'
+When the user clearly identifies a visible person by name, for example "this person is Alice" or "remember him as Bob",
+you may use your learn_face tool so you can try to recognize that person later. Only do this when the user is clearly
+talking about a person who is currently in front of you, ideally when only one person is visible. If the tool says the
+latest image is missing or stale, ask the person to stand still in front of you and wait for a fresh camera capture
+before trying again.
 
 While waiting (during [Silence]), you can use your tools to memorize or recall memories.
 If the command or query explicitly requires you to recall something, or when you are simply thinking, 
@@ -89,7 +94,7 @@ If you choose to perform a physical action, call your robot_macros tool with one
                     }
                 }
             },
-            "tools": ["commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros"]
+            "tools": ["commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face"]
         },
         # The unigo2.go2_tts is a text to speach CodedTool and does not call anyone else.
         # He is called by the front-man.
@@ -128,6 +133,23 @@ If you choose to perform a physical action, call your robot_macros tool with one
                 }
             },
             "class": "unigo2.robot_macros.RobotMacros"
+        }
+        {
+            "name": "learn_face",
+            "function": {
+                "description": "Store the latest camera image under a person's name so I can try to recognize them later.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "person_name": {
+                            "type": "string",
+                            "description": "The name of the person currently in front of the robot."
+                        }
+                    },
+                    "required": ["person_name"]
+                }
+            },
+            "class": "unigo2.learn_face.LearnFaceTool"
         }
         {
             "name": "commit_to_memory",
