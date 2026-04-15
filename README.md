@@ -3,7 +3,7 @@ Neuro SAN Robotics
 
 ## Start Cailey
 
-1. Physically start Caily with a short press followed by a long press
+1. Physically start CAIL-E with a short press followed by a long press
 on its power button.
 2. Find Cailey's IP address and ssh into it:
     ```shell
