@@ -7,7 +7,7 @@ Neuro SAN Robotics
 on its power button.
 2. Find Cailey's IP address and ssh into it:
     ```shell
-    ssh unitree@10.194.17.33
+    ssh unitree@10.194.17.130
     ```
     **Note 1**: its IP address might change. If it does, you'll have to plug in a monitor
     on its back, log in and check its network settings.  
@@ -24,7 +24,7 @@ on its power button.
    ```shell
    python apps/conscious_assistant/interface_flask.py
    ```
-You can now navigate to https://10.194.17.33:5001 (check the IP address)
+You can now navigate to https://10.194.17.130:5001 (check the IP address)
 to interact with Cailey.
 
 ## Setup
