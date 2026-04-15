@@ -77,12 +77,18 @@ class LearnFaceToolTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                result = tool.invoke({"person_name": "Alice Example"}, {})
+                with patch("coded_tools.unigo2.learn_face.VisionCore") as vision_cls:
+                    vision = vision_cls.return_value
+                    vision.add_face_to_database.return_value = True
 
-            saved_images = list((face_db_path / "Alice Example").glob("*.jpg"))
+                    result = tool.invoke({"person_name": "Alice Example"}, {})
 
         self.assertIn("Stored the latest observation image for 'Alice Example'", result)
-        self.assertEqual(len(saved_images), 1)
+        vision_cls.assert_called_once_with(
+            face_db_path=str(face_db_path),
+            initialize_yolo=False,
+        )
+        vision.add_face_to_database.assert_called_once()
 
 
 if __name__ == "__main__":

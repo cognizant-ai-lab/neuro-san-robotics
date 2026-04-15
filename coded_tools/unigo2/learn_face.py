@@ -112,7 +112,8 @@ class LearnFaceTool(CodedTool):
             image=image,
             image_filename=image_filename,
         ):
-            return f"Error: Failed to add '{person_name}' to the face database."
+            detail = getattr(vision, "last_face_db_error", "") or f"Failed to add '{person_name}' to the face database."
+            return f"Error: {detail}"
 
         logging.info(
             "LearnFaceTool stored a new face example for %s from %s into %s",

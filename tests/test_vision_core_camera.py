@@ -1,8 +1,10 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 
 from coded_tools.unigo2 import vision_core
@@ -78,12 +80,24 @@ class _FakeDataFrame:
 
 
 class _FakeDeepFace:
-    def __init__(self, result):
+    def __init__(self, result=None, extracted_faces=None, extract_raises=None):
         self._result = result
+        self._extracted_faces = list(extracted_faces or [])
+        self._extract_raises = extract_raises
+        self.find_kwargs = None
+        self.extract_kwargs = None
+        self.find_calls = 0
 
     def find(self, **kwargs):
-        del kwargs
+        self.find_kwargs = kwargs
+        self.find_calls += 1
         return self._result
+
+    def extract_faces(self, **kwargs):
+        self.extract_kwargs = kwargs
+        if self._extract_raises is not None:
+            raise self._extract_raises
+        return list(self._extracted_faces)
 
 
 class VisionCoreCameraTests(unittest.TestCase):
@@ -241,24 +255,155 @@ class VisionCoreCameraTests(unittest.TestCase):
             )
             vision._face_detection_enabled = True
             vision.deepface = _FakeDeepFace(
-                _FakeDataFrame(
+                result=_FakeDataFrame(
                     {
                         "identity": str(db_image),
                         "distance": 0.18,
-                        "source_x": 11,
-                        "source_y": 22,
-                        "source_w": 33,
-                        "source_h": 44,
                     }
-                )
+                ),
+                extracted_faces=[
+                    {
+                        "facial_area": {"x": 11, "y": 22, "w": 33, "h": 44},
+                        "confidence": 0.99,
+                    }
+                ],
             )
 
-            faces = vision.recognize_faces(np.zeros((8, 8, 3), dtype=np.uint8))
+            faces = vision.recognize_faces(np.zeros((96, 96, 3), dtype=np.uint8))
 
         self.assertEqual(len(faces), 1)
         self.assertEqual(faces[0]["name"], "Alice")
         self.assertEqual(faces[0]["bbox"], [11, 22, 33, 44])
-        self.assertGreater(faces[0]["confidence"], 0.8)
+        self.assertTrue(vision.deepface.find_kwargs["refresh_database"])
+
+    def test_recognize_faces_does_not_guess_when_no_face_is_detected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_image = Path(temp_dir) / "Alice" / "alice.jpg"
+            db_image.parent.mkdir(parents=True, exist_ok=True)
+            db_image.write_bytes(b"fake")
+
+            vision = vision_core.VisionCore(
+                face_db_path=temp_dir,
+                initialize_yolo=False,
+            )
+            vision._face_detection_enabled = True
+            vision.deepface = _FakeDeepFace(
+                result=_FakeDataFrame(
+                    {
+                        "identity": str(db_image),
+                        "distance": 0.12,
+                    }
+                ),
+                extracted_faces=[],
+            )
+
+            faces = vision.recognize_faces(np.zeros((8, 8, 3), dtype=np.uint8))
+
+        self.assertEqual(faces, [])
+        self.assertEqual(vision.deepface.find_calls, 0)
+
+    def test_recognize_faces_rejects_weak_matches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_image = Path(temp_dir) / "Alice" / "alice.jpg"
+            db_image.parent.mkdir(parents=True, exist_ok=True)
+            db_image.write_bytes(b"fake")
+
+            vision = vision_core.VisionCore(
+                face_db_path=temp_dir,
+                initialize_yolo=False,
+            )
+            vision._face_detection_enabled = True
+            vision.deepface = _FakeDeepFace(
+                result=_FakeDataFrame(
+                    {
+                        "identity": str(db_image),
+                        "distance": 0.95,
+                    }
+                ),
+                extracted_faces=[
+                    {
+                        "facial_area": {"x": 5, "y": 6, "w": 7, "h": 8},
+                        "confidence": 0.98,
+                    }
+                ],
+            )
+
+            faces = vision.recognize_faces(np.zeros((16, 16, 3), dtype=np.uint8))
+
+        self.assertEqual(
+            faces,
+            [
+                {
+                    "name": "Unknown",
+                    "confidence": 0.0,
+                    "bbox": [5, 6, 7, 8],
+                }
+            ],
+        )
+
+    def test_add_face_to_database_crops_single_detected_face_and_invalidates_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = Path(temp_dir) / "representations_facenet.pkl"
+            cache_file.write_bytes(b"cache")
+
+            vision = vision_core.VisionCore(
+                face_db_path=temp_dir,
+                initialize_yolo=False,
+            )
+            vision._face_detection_enabled = True
+            vision.deepface = _FakeDeepFace(
+                extracted_faces=[
+                    {
+                        "facial_area": {"x": 2, "y": 1, "w": 4, "h": 5},
+                        "confidence": 0.99,
+                    }
+                ],
+            )
+
+            image = np.zeros((10, 10, 3), dtype=np.uint8)
+            image[1:6, 2:6] = 255
+
+            with patch.dict(os.environ, {"VISION_FACE_CROP_MARGIN": "0"}, clear=False):
+                added = vision.add_face_to_database("Alice", image, "alice.jpg")
+
+            saved_image_path = Path(temp_dir) / "Alice" / "alice.jpg"
+            saved_image = cv2.imread(str(saved_image_path))
+
+        self.assertTrue(added)
+        self.assertFalse(cache_file.exists())
+        self.assertIsNotNone(saved_image)
+        self.assertEqual(saved_image.shape[:2], (5, 4))
+
+    def test_add_face_to_database_rejects_multiple_faces(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vision = vision_core.VisionCore(
+                face_db_path=temp_dir,
+                initialize_yolo=False,
+            )
+            vision._face_detection_enabled = True
+            vision.deepface = _FakeDeepFace(
+                extracted_faces=[
+                    {
+                        "facial_area": {"x": 1, "y": 1, "w": 3, "h": 3},
+                        "confidence": 0.95,
+                    },
+                    {
+                        "facial_area": {"x": 5, "y": 5, "w": 3, "h": 3},
+                        "confidence": 0.94,
+                    },
+                ],
+            )
+
+            added = vision.add_face_to_database(
+                "Alice",
+                np.zeros((12, 12, 3), dtype=np.uint8),
+                "alice.jpg",
+            )
+            saved_images = list((Path(temp_dir) / "Alice").glob("*.jpg"))
+
+        self.assertFalse(added)
+        self.assertEqual(saved_images, [])
+        self.assertIn("Multiple faces were detected", vision.last_face_db_error)
 
 
 if __name__ == "__main__":
