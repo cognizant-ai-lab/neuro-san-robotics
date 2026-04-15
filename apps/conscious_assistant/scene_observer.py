@@ -74,6 +74,31 @@ def _resolve_repo_relative_path(path_text: str) -> str:
     return str(path)
 
 
+def _default_observer_vision_settings() -> Dict[str, Any]:
+    """
+    Mirror the standalone VisionCore defaults unless explicitly overridden.
+
+    The standalone `vision_core.py` script already works on CAIL-E, so the Flask
+    observer should start from the same runtime configuration instead of inventing
+    its own thresholds and input size.
+    """
+    use_tensorrt = _env_flag("VISION_USE_JETSON_CONFIG", default=False)
+    if use_tensorrt:
+        return {
+            "use_tensorrt": True,
+            "half_precision": True,
+            "input_size": _env_int("VISION_OBSERVER_INPUT_SIZE", 640),
+            "confidence_threshold": _env_float("VISION_OBSERVER_CONFIDENCE", 0.65),
+        }
+
+    return {
+        "use_tensorrt": False,
+        "half_precision": False,
+        "input_size": _env_int("VISION_OBSERVER_INPUT_SIZE", 256),
+        "confidence_threshold": _env_float("VISION_OBSERVER_CONFIDENCE", 0.60),
+    }
+
+
 def summarize_observed_objects(objects: List[Dict[str, Any]]) -> List[str]:
     """
     Convert raw detection dictionaries into de-duplicated object names.
@@ -153,12 +178,7 @@ class SceneObserver:
                 self._warned_unavailable = True
             return None
 
-        use_tensorrt = _env_flag("VISION_USE_JETSON_CONFIG", default=False)
-        input_size = _env_int("VISION_OBSERVER_INPUT_SIZE", 640)
-        confidence_threshold = _env_float(
-            "VISION_OBSERVER_CONFIDENCE",
-            0.65 if use_tensorrt else 0.55,
-        )
+        settings = _default_observer_vision_settings()
         yolo_model = _resolve_repo_relative_path(
             os.environ.get("VISION_YOLO_MODEL", "yolov8n.pt")
         )
@@ -168,11 +188,11 @@ class SceneObserver:
                 yolo_model=yolo_model,
                 face_model="Facenet",
                 face_db_path=str(REPO_ROOT / "face_database"),
-                use_tensorrt=use_tensorrt,
-                confidence_threshold=confidence_threshold,
+                use_tensorrt=settings["use_tensorrt"],
+                confidence_threshold=settings["confidence_threshold"],
                 iou_threshold=0.45,
-                input_size=input_size,
-                half_precision=use_tensorrt,
+                input_size=settings["input_size"],
+                half_precision=settings["half_precision"],
             )
             if getattr(self._vision, "yolo", None) is None:
                 logging.error(
@@ -249,34 +269,44 @@ class SceneObserver:
         """
         Run object detection on one or more resized copies of the frame.
 
-        The standalone demo downsizes frames before inference and benefits from a
-        few warm-up frames. For one-shot Flask captures we try a fast, demo-like
-        width first and then a larger fallback width before giving up.
+        The standalone headless demo resizes to 320x240 before inference. We use
+        that same snapshot path first, then retry with a larger 640x480 frame,
+        and finally with the native frame if the smaller passes find nothing.
         """
         orig_h, orig_w = frame.shape[:2]
-        primary_width = max(64, _env_int("VISION_OBSERVER_MAX_WIDTH", 320))
-        fallback_width = max(primary_width, _env_int("VISION_OBSERVER_FALLBACK_WIDTH", 640))
-        candidate_widths = []
-        for width in (primary_width, fallback_width):
-            effective_width = min(orig_w, width)
-            if effective_width not in candidate_widths:
-                candidate_widths.append(effective_width)
+        primary_size = (
+            max(64, _env_int("VISION_OBSERVER_PROCESS_WIDTH", 320)),
+            max(48, _env_int("VISION_OBSERVER_PROCESS_HEIGHT", 240)),
+        )
+        fallback_size = (
+            max(primary_size[0], _env_int("VISION_OBSERVER_FALLBACK_WIDTH", 640)),
+            max(primary_size[1], _env_int("VISION_OBSERVER_FALLBACK_HEIGHT", 480)),
+        )
+        candidate_sizes = []
+        for candidate_size in (primary_size, fallback_size, (orig_w, orig_h)):
+            if candidate_size not in candidate_sizes:
+                candidate_sizes.append(candidate_size)
 
         final_results = {"objects": [], "faces": [], "summary": "No detections"}
 
-        for candidate_width in candidate_widths:
-            if orig_w > candidate_width:
-                scale = candidate_width / float(orig_w)
-                proc_w = max(1, int(orig_w * scale))
-                proc_h = max(1, int(orig_h * scale))
-                process_frame = cv2.resize(frame, (proc_w, proc_h))
-            else:
+        for proc_w, proc_h in candidate_sizes:
+            proc_w = max(1, min(proc_w, orig_w))
+            proc_h = max(1, min(proc_h, orig_h))
+            if proc_w == orig_w and proc_h == orig_h:
                 process_frame = frame
-                proc_h, proc_w = frame.shape[:2]
+            else:
+                process_frame = cv2.resize(frame, (proc_w, proc_h))
 
             scale_x = orig_w / proc_w
             scale_y = orig_h / proc_h
             results = vision.detect_all(process_frame, detect_faces=False, verbose=False)
+            logging.info(
+                "Scene observer detection attempt at %sx%s found %d objects and %d faces",
+                proc_w,
+                proc_h,
+                len(results.get("objects", [])),
+                len(results.get("faces", [])),
+            )
 
             for detected_object in results.get("objects", []):
                 detected_object["bbox"] = [

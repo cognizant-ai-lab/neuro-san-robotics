@@ -5,6 +5,7 @@ import numpy as np
 
 from apps.conscious_assistant.scene_observer import SceneObserver
 from apps.conscious_assistant.scene_observer import REPO_ROOT
+from apps.conscious_assistant.scene_observer import _default_observer_vision_settings
 from apps.conscious_assistant.scene_observer import _resolve_repo_relative_path
 from apps.conscious_assistant.scene_observer import build_scene_input
 from apps.conscious_assistant.scene_observer import summarize_observed_objects
@@ -42,10 +43,10 @@ class _FakeScaledVision:
 
 class _FallbackVision:
     def __init__(self):
-        self.widths = []
+        self.sizes = []
 
     def detect_all(self, frame, detect_faces=False, verbose=False):
-        self.widths.append(frame.shape[1])
+        self.sizes.append((frame.shape[1], frame.shape[0]))
         if frame.shape[1] <= 320:
             return {
                 "objects": [],
@@ -71,6 +72,20 @@ class _VisionCtorResult:
 
 
 class SceneObserverTests(unittest.TestCase):
+    def test_default_observer_vision_settings_match_standalone_cpu_defaults(self):
+        with patch("apps.conscious_assistant.scene_observer._env_flag", return_value=False):
+            settings = _default_observer_vision_settings()
+
+        self.assertEqual(
+            settings,
+            {
+                "use_tensorrt": False,
+                "half_precision": False,
+                "input_size": 256,
+                "confidence_threshold": 0.60,
+            },
+        )
+
     def test_resolve_repo_relative_path_uses_repo_copy_when_present(self):
         resolved = _resolve_repo_relative_path("yolov8n.pt")
 
@@ -117,10 +132,13 @@ class SceneObserverTests(unittest.TestCase):
         observer = SceneObserver()
         frame = np.ones((100, 200, 3), dtype=np.uint8)
 
-        with patch("apps.conscious_assistant.scene_observer._env_int", side_effect=lambda name, default: 100 if name == "VISION_OBSERVER_MAX_WIDTH" else default):
+        with patch(
+            "apps.conscious_assistant.scene_observer._env_int",
+            side_effect=lambda name, default: 100 if name == "VISION_OBSERVER_PROCESS_WIDTH" else default,
+        ):
             results = observer._detect_scene(_FakeScaledVision(), frame)
 
-        self.assertEqual(results["objects"][0]["bbox"], [20, 10, 60, 50])
+        self.assertEqual(results["objects"][0]["bbox"], [20, 5, 60, 25])
 
     def test_detect_scene_retries_with_fallback_width(self):
         observer = SceneObserver()
@@ -128,17 +146,21 @@ class SceneObserverTests(unittest.TestCase):
         vision = _FallbackVision()
 
         def fake_env_int(name, default):
-            if name == "VISION_OBSERVER_MAX_WIDTH":
+            if name == "VISION_OBSERVER_PROCESS_WIDTH":
                 return 320
+            if name == "VISION_OBSERVER_PROCESS_HEIGHT":
+                return 240
             if name == "VISION_OBSERVER_FALLBACK_WIDTH":
                 return 640
+            if name == "VISION_OBSERVER_FALLBACK_HEIGHT":
+                return 480
             return default
 
         with patch("apps.conscious_assistant.scene_observer._env_int", side_effect=fake_env_int):
             results = observer._detect_scene(vision, frame)
 
-        self.assertEqual(vision.widths, [320, 640])
-        self.assertEqual(results["objects"][0]["bbox"], [32, 16, 64, 48])
+        self.assertEqual(vision.sizes, [(320, 240), (640, 240)])
+        self.assertEqual(results["objects"][0]["bbox"], [32, 8, 64, 24])
 
     def test_read_frame_returns_last_good_warmup_frame(self):
         observer = SceneObserver()
