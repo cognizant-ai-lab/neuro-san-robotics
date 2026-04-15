@@ -592,6 +592,13 @@ if __name__ == "__main__":
     CERT = "/home/unitree/certs/cert.pem"
     KEY = "/home/unitree/certs/key.pem"
 
+    if scene_observer.available():
+        logging.info("Pre-initializing scene observer on the main thread")
+        if scene_observer.initialize():
+            logging.info("Scene observer vision backend is ready")
+        else:
+            logging.warning("Scene observer vision backend did not initialize during startup")
+
     ssl_ctx = None
     if os.path.exists(CERT) and os.path.exists(KEY):
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

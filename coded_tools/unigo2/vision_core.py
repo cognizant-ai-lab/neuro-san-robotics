@@ -922,9 +922,9 @@ class VisionCore:
             self.class_names = self.yolo.names
             print(f"[VisionCore] ✓ YOLO ready: {len(self.class_names)} classes available")
 
-        except ImportError:
-            print("[VisionCore] ✗ ERROR: ultralytics not installed")
-            print("[VisionCore]   Fix: pip install ultralytics")
+        except ImportError as exc:
+            print(f"[VisionCore] ✗ ERROR importing ultralytics: {exc}")
+            print("[VisionCore]   Fix: verify the active Python environment can import 'ultralytics'")
             self.yolo = None
         except Exception as e:
             print(f"[VisionCore] ✗ ERROR loading YOLO: {e}")

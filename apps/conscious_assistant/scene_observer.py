@@ -185,6 +185,22 @@ class SceneObserver:
         )
         return True
 
+    def initialize(self, *, connect_camera: bool = False) -> bool:
+        """
+        Eagerly initialize the observer so heavy imports can happen on the main thread.
+
+        The Flask app later uses a background task for periodic observations. On
+        some deployments, importing the YOLO stack from that worker thread is less
+        reliable than doing it once during startup.
+        """
+        with self._lock:
+            vision = self._ensure_vision()
+            if vision is None:
+                return False
+            if connect_camera and not self._ensure_camera():
+                return False
+            return True
+
     def _write_latest_image(self, annotated_frame) -> int:
         self.image_dir.mkdir(parents=True, exist_ok=True)
         tmp_path = self.image_path.with_suffix(".tmp.jpg")

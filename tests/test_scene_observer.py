@@ -130,6 +130,17 @@ class SceneObserverTests(unittest.TestCase):
         self.assertTrue(fake_capture.released)
         self.assertIsNone(observer._capture)
 
+    def test_initialize_eagerly_loads_vision_backend(self):
+        observer = SceneObserver()
+
+        with patch.object(observer, "_ensure_vision", return_value=object()) as ensure_vision:
+            with patch.object(observer, "_ensure_camera") as ensure_camera:
+                initialized = observer.initialize()
+
+        self.assertTrue(initialized)
+        ensure_vision.assert_called_once()
+        ensure_camera.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
