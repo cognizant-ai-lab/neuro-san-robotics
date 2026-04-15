@@ -40,6 +40,17 @@
                     <span id="toggle-text">Show Thoughts</span>
                 </button>
             </div>
+            <div id="observation-panel" class="observation-panel">
+                <div class="observation-meta">
+                    <span class="observation-title">Recent Views</span>
+                    <span class="observation-timestamp">Client-side history</span>
+                </div>
+                <div id="observation-history" class="observation-history">
+                    <div id="observation-placeholder" class="observation-placeholder">
+                        Timestamped camera captures will appear here.
+                    </div>
+                </div>
+            </div>
             <div id="assistant-thoughts" class="chat-box">
                 <div class="empty-state">Internal processing stream will appear here...</div>
             </div>
@@ -64,6 +75,7 @@
             path: "/socket.io",
             transports: ["websocket", "polling"],
         });
+        const MAX_OBSERVATION_HISTORY = 20;
         var thoughtsInitialized = false;
         var chatHistoryInitialized = false;
         var isRecording = false;
@@ -409,6 +421,62 @@
             }
             element.innerHTML += '<div class="thought-msg">' + data.data.replace(/\n/g, '<br>') + '</div>';
             element.scrollTop = element.scrollHeight;
+        });
+
+        socket.on('update_observation', function(data) {
+            var history = document.getElementById('observation-history');
+            var placeholder = document.getElementById('observation-placeholder');
+            if (!history || !data.image_url) {
+                return;
+            }
+
+            if (placeholder) {
+                placeholder.classList.add('hidden');
+            }
+
+            var entry = document.createElement('article');
+            entry.className = 'observation-entry';
+
+            var meta = document.createElement('div');
+            meta.className = 'observation-entry-meta';
+
+            var title = document.createElement('span');
+            title.className = 'observation-entry-title';
+            title.textContent = 'Scene capture';
+
+            var timestamp = document.createElement('span');
+            timestamp.className = 'observation-entry-time';
+            timestamp.textContent = data.timestamp || 'Latest observation';
+
+            meta.appendChild(title);
+            meta.appendChild(timestamp);
+
+            var image = document.createElement('img');
+            image.className = 'observation-entry-image';
+            image.alt = 'Camera observation from CAIL-E';
+            image.src = data.image_url;
+
+            var caption = document.createElement('div');
+            caption.className = 'observation-entry-caption';
+
+            if (data.objects && data.objects.length > 0) {
+                caption.textContent = 'saw: ' + data.objects.join(', ');
+            } else {
+                caption.textContent = data.summary || 'No detections';
+            }
+
+            entry.appendChild(meta);
+            entry.appendChild(image);
+            entry.appendChild(caption);
+            history.appendChild(entry);
+
+            var entries = history.querySelectorAll('.observation-entry');
+            while (entries.length > MAX_OBSERVATION_HISTORY) {
+                history.removeChild(entries[0]);
+                entries = history.querySelectorAll('.observation-entry');
+            }
+
+            history.scrollTop = history.scrollHeight;
         });
 
         socket.on('update_speech', function(data) {

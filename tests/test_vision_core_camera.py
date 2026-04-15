@@ -40,7 +40,43 @@ class _FakeCapture:
         return True
 
 
+class _FakeVision:
+    def __init__(self):
+        self.frames = []
+
+    def detect_all(self, frame, detect_faces=False, verbose=False):
+        self.frames.append(frame.shape[:2])
+        return {
+            "objects": [
+                {"class_name": "person", "confidence": 0.91, "bbox": [10, 5, 30, 25]},
+            ],
+            "faces": [],
+            "summary": "Objects: 1 person(s)",
+        }
+
+    def visualize_detections(self, frame, results):
+        return frame.copy()
+
+
 class VisionCoreCameraTests(unittest.TestCase):
+    def test_default_vision_core_settings_match_standalone_cpu_defaults(self):
+        with patch.object(vision_core, "_env_flag", return_value=False):
+            settings = vision_core.get_default_vision_core_settings()
+
+        self.assertEqual(
+            settings,
+            {
+                "yolo_model": "yolov8n.pt",
+                "face_model": "Facenet",
+                "face_db_path": "./face_database",
+                "use_tensorrt": False,
+                "confidence_threshold": 0.60,
+                "iou_threshold": 0.45,
+                "input_size": 256,
+                "half_precision": False,
+            },
+        )
+
     def test_normalize_numeric_camera_source(self):
         candidate = vision_core._normalize_camera_source("3")
 
@@ -128,6 +164,30 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertIs(capture, fake_capture)
         self.assertEqual(info["description"], "Unitree Go2 front camera via eth0")
         self.assertEqual(info["backend"], "Unitree SDK2")
+
+    def test_detect_camera_snapshot_reuses_headless_detection_flow(self):
+        cap = _FakeCapture(
+            opened=True,
+            frames=[
+                (True, np.zeros((240, 320, 3), dtype=np.uint8)),
+                (True, np.ones((240, 320, 3), dtype=np.uint8)),
+            ],
+            width=320,
+            height=240,
+        )
+        vision = _FakeVision()
+
+        snapshot = vision_core.detect_camera_snapshot(
+            cap,
+            vision,
+            warmup_frames=2,
+            process_size=(160, 120),
+        )
+
+        self.assertEqual(vision.frames, [(120, 160)])
+        self.assertEqual(snapshot["results"]["summary"], "Objects: 1 person(s)")
+        self.assertEqual(snapshot["results"]["objects"][0]["bbox"], [20, 10, 60, 50])
+        self.assertEqual(snapshot["annotated"].shape, (240, 320, 3))
 
 
 if __name__ == "__main__":
