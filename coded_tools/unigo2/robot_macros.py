@@ -49,6 +49,12 @@ def execute_deferred_actions() -> List[str]:
 
     results = []
     go2 = Go2Macros()
+    if not getattr(go2, "available", False):
+        logging.warning("Robot control unavailable; skipping %d deferred actions", len(actions_to_execute))
+        return [
+            f"Skipped action '{action}' because robot control is unavailable"
+            for action, _args in actions_to_execute
+        ]
 
     for action, args in actions_to_execute:
         logging.info("Executing deferred action: %s", action)

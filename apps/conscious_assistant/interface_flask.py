@@ -56,6 +56,17 @@ def _candidate_libgomp_paths() -> list[Path]:
     return unique_candidates
 
 
+def _env_float(name: str, default: float) -> float:
+    """Parse float environment variables with a safe fallback."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
 def _prime_vision_runtime_imports() -> None:
     """
     Prime YOLO dependencies before Flask imports on Linux.
@@ -98,7 +109,6 @@ def _prime_vision_runtime_imports() -> None:
 _prime_vision_runtime_imports()
 
 # pylint: disable=import-error
-import schedule
 from flask import Flask
 from flask import jsonify
 from flask import render_template
@@ -145,7 +155,7 @@ except ImportError:
     DEFERRED_ACTIONS_AVAILABLE = False
     execute_deferred_actions = None
 
-THINKING_INTERVAL = 15.0
+THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
 
 # Robot motion configuration
 ROBOT_MOTION_PROBABILITY = 0.5  # 50% chance of performing robot motion
@@ -204,6 +214,7 @@ ACKNOWLEDGMENT_PHRASES = [
 
 os.environ.setdefault("AGENT_MANIFEST_FILE", str(REPO_ROOT / "registries" / "manifest.hocon"))
 os.environ.setdefault("AGENT_TOOL_PATH", str(REPO_ROOT / "coded_tools"))
+os.environ.setdefault("VISION_FACE_DB_PATH", str(REPO_ROOT / "face_database"))
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
@@ -214,6 +225,8 @@ user_input_queue = queue.Queue()
 # Speech queue for TTS - allows non-blocking speech processing
 speech_queue = queue.Queue()
 scene_observer = SceneObserver()
+os.environ.setdefault("VISION_LATEST_IMAGE_PATH", str(scene_observer.latest_image_path()))
+os.environ.setdefault("VISION_LATEST_IMAGE_MAX_AGE_SECONDS", "0")
 
 
 def emit_observation_update(observation=None, sid=None):
@@ -254,6 +267,48 @@ def sanitize_speech_text(text: str) -> str:
         clean_lines.append(line)
 
     return '\n'.join(clean_lines).strip()
+
+
+def normalize_agent_output(output) -> str:
+    """Normalize agent responses so the Flask loop can parse them safely."""
+    if output is None:
+        return ""
+
+    if isinstance(output, str):
+        return output
+
+    if isinstance(output, dict):
+        candidate = output.get("last_chat_response") or output.get("data") or ""
+        normalized = candidate if isinstance(candidate, str) else str(candidate)
+        logging.warning(
+            "Conscious thinker returned dict output; normalized to string (%d chars)",
+            len(normalized),
+        )
+        return normalized
+
+    if isinstance(output, (list, tuple)):
+        parts = []
+        for item in output:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                parts.append(text)
+        normalized = "\n".join(parts)
+        logging.warning(
+            "Conscious thinker returned %s output; normalized to string (%d chars)",
+            type(output).__name__,
+            len(normalized),
+        )
+        return normalized
+
+    normalized = str(output)
+    logging.warning(
+        "Conscious thinker returned unexpected %s output; normalized to string (%d chars)",
+        type(output).__name__,
+        len(normalized),
+    )
+    return normalized
 
 
 def speak_text_streaming(
@@ -321,6 +376,9 @@ def perform_random_robot_motion() -> None:
 
     try:
         go2 = Go2Macros()
+        if not getattr(go2, "available", False):
+            logging.info("Robot motion unavailable, skipping")
+            return
 
         # Randomly select 1 action
         action = random.choice(ALLOWED_ROBOT_ACTIONS)
@@ -383,13 +441,16 @@ def conscious_thinking_process():
         global conscious_thread  # pylint: disable=global-statement
         thoughts = None  # Start with no initial thought - wait for user input
         while True:
-            timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
+            processing_started = False
             try:
+                timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
                 # Wait up to the configured interval for user input
                 user_input = user_input_queue.get(timeout=THINKING_INTERVAL)
                 if user_input == "exit":
                     break
                 thoughts = f"\n{timestamp} user: " + user_input
+                socketio.emit("processing_started", namespace="/chat")
+                processing_started = True
 
                 # Speak acknowledgment immediately to fill the gap
                 acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
@@ -426,71 +487,80 @@ def conscious_thinking_process():
                 thoughts = scene_input or (f"\n{timestamp} user: " + "[Silence]")
                 # Emit processing_started for silence-triggered processing
                 socketio.emit("processing_started", namespace="/chat")
+                processing_started = True
 
-            thoughts, conscious_thread = conscious_thinker(conscious_session, conscious_thread, thoughts)
-            print(thoughts)
+            try:
+                raw_output, conscious_thread = conscious_thinker(
+                    conscious_session,
+                    conscious_thread,
+                    thoughts,
+                )
+                thoughts = normalize_agent_output(raw_output)
+                print(thoughts)
 
-            # Separating thoughts and speeches
-            thoughts_to_emit = []
-            speeches_to_emit = []
-
-            # --- 1.  Slice the input into blocks ----------------------------------------
-            #     Each block begins with  "thought:"  or  "say:"  and continues until
-            #     the next block or the end of the string.
-            pattern = re.compile(
-                r"(?m)^(thought|say):[ \t]*(.*?)(?=^\s*(?:thought|say):|\Z)", re.S  # look-ahead  # dot = newline
-            )
-
-            for kind, raw in pattern.findall(thoughts):
-                content = raw.lstrip()  # drop the leading spaces/newline after the prefix
-                if not content:
+                if not thoughts:
+                    logging.info("Conscious thinker returned no output")
                     continue
 
-                if kind == "thought":
-                    timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
-                    thoughts_to_emit.append(f"{timestamp} thought: {content}")
-                else:  # kind == "say"
-                    speeches_to_emit.append(content)
+                # Separating thoughts and speeches
+                thoughts_to_emit = []
+                speeches_to_emit = []
 
-            # --- 2.  Emit the blocks -----------------------------------------------------
-            if thoughts_to_emit:
-                socketio.emit(
-                    "update_thoughts",
-                    {"data": "\n".join(thoughts_to_emit)},
-                    namespace="/chat",
+                # --- 1.  Slice the input into blocks ------------------------------------
+                pattern = re.compile(
+                    r"(?m)^(thought|say):[ \t]*(.*?)(?=^\s*(?:thought|say):|\Z)",
+                    re.S,
                 )
 
-            if speeches_to_emit:
-                # TTS with UI update after speech completes
-                logging.info("Starting TTS for %d speech blocks", len(speeches_to_emit))
+                for kind, raw in pattern.findall(thoughts):
+                    content = raw.lstrip()
+                    if not content:
+                        continue
 
-                def emit_speech_to_ui(speech_text):
-                    """Callback after speech completes to update UI."""
-                    logging.debug("Emitting speech to UI: %s...", speech_text[:30])
+                    if kind == "thought":
+                        timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
+                        thoughts_to_emit.append(f"{timestamp} thought: {content}")
+                    else:
+                        speeches_to_emit.append(content)
+
+                # --- 2.  Emit the blocks ------------------------------------------------
+                if thoughts_to_emit:
                     socketio.emit(
-                        "update_speech",
-                        {"data": speech_text},
+                        "update_thoughts",
+                        {"data": "\n".join(thoughts_to_emit)},
                         namespace="/chat",
                     )
 
-                for speech_text in speeches_to_emit:
-                    # Speak first, then update UI after speech completes
-                    speak_text_streaming(speech_text, on_speech_complete=emit_speech_to_ui)
+                if speeches_to_emit:
+                    logging.info("Starting TTS for %d speech blocks", len(speeches_to_emit))
 
-                logging.info("TTS complete")
+                    def emit_speech_to_ui(speech_text):
+                        """Callback after speech completes to update UI."""
+                        logging.debug("Emitting speech to UI: %s...", speech_text[:30])
+                        socketio.emit(
+                            "update_speech",
+                            {"data": speech_text},
+                            namespace="/chat",
+                        )
 
-            # Execute any deferred robot actions AFTER speech and UI update
-            # This ensures the robot speaks and shows response first, then performs actions
-            if DEFERRED_ACTIONS_AVAILABLE and execute_deferred_actions is not None:
-                try:
-                    results = execute_deferred_actions()
-                    if results:
-                        logging.info("Executed %d deferred robot actions", len(results))
-                except Exception:
-                    logging.exception("Failed to execute deferred robot actions")
+                    for speech_text in speeches_to_emit:
+                        speak_text_streaming(speech_text, on_speech_complete=emit_speech_to_ui)
 
-            # Signal that processing is complete and user can send new input
-            socketio.emit("processing_complete", namespace="/chat")
+                    logging.info("TTS complete")
+
+                # Execute any deferred robot actions AFTER speech and UI update
+                if DEFERRED_ACTIONS_AVAILABLE and execute_deferred_actions is not None:
+                    try:
+                        results = execute_deferred_actions()
+                        if results:
+                            logging.info("Executed %d deferred robot actions", len(results))
+                    except Exception:
+                        logging.exception("Failed to execute deferred robot actions")
+            except Exception:
+                logging.exception("Conscious thinking loop iteration failed")
+            finally:
+                if processing_started:
+                    socketio.emit("processing_complete", namespace="/chat")
 
 
 @socketio.on("connect", namespace="/chat")
@@ -654,13 +724,6 @@ def add_header(response):
     """Add the header."""
     response.headers["Cache-Control"] = "no-store"
     return response
-
-
-def run_scheduled_tasks():
-    """Run the scheduled tasks."""
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
 
 
 # Register the cleanup function

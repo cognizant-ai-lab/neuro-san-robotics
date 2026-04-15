@@ -53,6 +53,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    """Parse float environment variables with a safe fallback."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
 def _is_jetson_platform() -> bool:
     """Detect whether we're running on NVIDIA Jetson hardware."""
     if _env_flag("VISION_FORCE_JETSON", default=False):
@@ -312,7 +323,7 @@ def detect_camera_snapshot(
 
     results = vision.detect_all(
         process_frame,
-        detect_faces=enable_face_recognition,
+        detect_faces=False,
         verbose=False,
     )
 
@@ -329,9 +340,13 @@ def detect_camera_snapshot(
             face['bbox'] = [
                 int(face['bbox'][0] * scale_x),
                 int(face['bbox'][1] * scale_y),
-                int(face['bbox'][2] * scale_x),
-                int(face['bbox'][3] * scale_y)
-            ]
+            int(face['bbox'][2] * scale_x),
+            int(face['bbox'][3] * scale_y)
+        ]
+
+    if enable_face_recognition:
+        results['faces'] = vision.recognize_faces(last_frame)
+        results['summary'] = vision._generate_summary(results)
 
     return {
         "frame": last_frame,
@@ -694,7 +709,8 @@ class VisionCore:
         confidence_threshold: float = 0.6,  # Increased from 0.5 for better accuracy
         iou_threshold: float = 0.45,        # IoU for Non-Maximum Suppression
         input_size: int = 640,              # Input resolution (lower = faster, higher = more accurate)
-        half_precision: bool = False        # FP16 mode (faster on Jetson, slight accuracy loss)
+        half_precision: bool = False,       # FP16 mode (faster on Jetson, slight accuracy loss)
+        initialize_yolo: bool = True
     ):
         """
         Initialize VisionCore system with optimized parameters.
@@ -774,6 +790,7 @@ class VisionCore:
         self.input_size = input_size
         self.half_precision = half_precision
         self.use_tensorrt = use_tensorrt
+        self.initialize_yolo = initialize_yolo
 
         # ============================================================
         # FACE RECOGNITION CONFIGURATION
@@ -789,7 +806,12 @@ class VisionCore:
         # This loads the model and optionally converts to TensorRT
         # ============================================================
         self.backend = "Unknown"  # Will be set by _init_yolo
-        self._init_yolo(yolo_model)
+        self.yolo = None
+        self.class_names = {}
+        if self.initialize_yolo:
+            self._init_yolo(yolo_model)
+        else:
+            self.backend = "Disabled"
 
         # ============================================================
         # INITIALIZE FACE RECOGNITION (LAZY LOADING)
@@ -797,6 +819,7 @@ class VisionCore:
         # ============================================================
         self.deepface = None
         self._face_detection_enabled = False
+        self.last_face_db_error: Optional[str] = None
 
         print(f"[VisionCore] ✓ Initialized successfully")
         print(f"  Backend: {self.backend}")
@@ -968,6 +991,117 @@ class VisionCore:
             except Exception as e:
                 print(f"[VisionCore] ✗ ERROR initializing DeepFace: {e}")
                 self._face_detection_enabled = False
+
+    def _face_detector_backend(self) -> str:
+        """Return the detector backend used for DeepFace face localization."""
+        backend = os.environ.get("VISION_FACE_DETECTOR_BACKEND", "opencv").strip()
+        return backend or "opencv"
+
+    def _face_match_threshold(self) -> float:
+        """Return the maximum embedding distance accepted as a known-person match."""
+        override = os.environ.get("VISION_FACE_MATCH_THRESHOLD")
+        if override is not None:
+            try:
+                return float(override)
+            except ValueError:
+                pass
+
+        return {
+            "Facenet": 0.40,
+            "Facenet512": 0.30,
+            "VGG-Face": 0.60,
+            "ArcFace": 0.68,
+        }.get(self.face_model, 0.40)
+
+    def _extract_detected_faces(
+        self,
+        image: np.ndarray,
+        *,
+        require_face: bool,
+    ) -> List[Dict[str, Any]]:
+        """
+        Detect real faces in an image and normalize DeepFace facial_area output.
+
+        This keeps recognition from guessing a name when the detector cannot
+        confirm that a face is actually present in the frame.
+        """
+        if not self._face_detection_enabled:
+            self._init_deepface()
+
+        if not self._face_detection_enabled:
+            return []
+
+        try:
+            detected = self.deepface.extract_faces(
+                img_path=image,
+                detector_backend=self._face_detector_backend(),
+                enforce_detection=require_face,
+                align=True,
+            )
+        except Exception as exc:
+            if require_face:
+                return []
+            print(f"[VisionCore] ✗ ERROR extracting faces: {exc}")
+            return []
+
+        faces: List[Dict[str, Any]] = []
+        for face_data in detected or []:
+            facial_area = face_data.get("facial_area") or {}
+            try:
+                x = int(float(facial_area["x"]))
+                y = int(float(facial_area["y"]))
+                w = int(float(facial_area["w"]))
+                h = int(float(facial_area["h"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            if w <= 0 or h <= 0:
+                continue
+
+            confidence = face_data.get("confidence", 0.0)
+            try:
+                confidence = float(confidence)
+            except (TypeError, ValueError):
+                confidence = 0.0
+
+            faces.append(
+                {
+                    "bbox": [x, y, w, h],
+                    "confidence": confidence,
+                }
+            )
+
+        return faces
+
+    def _crop_face_image(self, image: np.ndarray, bbox: List[int]) -> Optional[np.ndarray]:
+        """Crop a detected face with a small margin to preserve context."""
+        if image is None or getattr(image, "size", 0) == 0:
+            return None
+
+        x, y, w, h = bbox
+        margin_ratio = max(0.0, _env_float("VISION_FACE_CROP_MARGIN", 0.20))
+        margin_x = int(w * margin_ratio)
+        margin_y = int(h * margin_ratio)
+
+        height, width = image.shape[:2]
+        x1 = max(0, x - margin_x)
+        y1 = max(0, y - margin_y)
+        x2 = min(width, x + w + margin_x)
+        y2 = min(height, y + h + margin_y)
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        return image[y1:y2, x1:x2].copy()
+
+    def _invalidate_face_database_cache(self) -> None:
+        """Remove cached DeepFace representations so new examples are picked up immediately."""
+        for pattern in ("representations_*.pkl", "representations_*.pickle"):
+            for cache_path in self.face_db_path.glob(pattern):
+                try:
+                    cache_path.unlink()
+                except OSError:
+                    print(f"[VisionCore] ⚠️  Could not remove face cache: {cache_path}")
 
     def detect_objects(
         self,
@@ -1159,78 +1293,87 @@ class VisionCore:
             # Database structure: face_database/person_name/image.jpg
             # ============================================================
             has_known_faces = any(self.face_db_path.glob("*/*"))
+            detected_faces = self._extract_detected_faces(image, require_face=True)
+
+            if not detected_faces:
+                return []
 
             if has_known_faces:
                 # ============================================================
                 # FACE RECOGNITION MODE (with known faces)
                 # DeepFace.find() searches for faces in database
                 # ============================================================
-                results = self.deepface.find(
-                    img_path=image,
-                    db_path=str(self.face_db_path),
-                    model_name=self.face_model,
-                    enforce_detection=False,  # Don't error if no face found
-                    silent=True               # Suppress DeepFace logs
-                )
+                match_threshold = max(0.0, self._face_match_threshold())
+                for detected_face in detected_faces:
+                    face_crop = self._crop_face_image(image, detected_face["bbox"])
+                    if face_crop is None or getattr(face_crop, "size", 0) == 0:
+                        continue
 
-                # ============================================================
-                # PROCESS RECOGNITION RESULTS
-                # DeepFace returns DataFrame with matches for each detected face
-                # ============================================================
-                if isinstance(results, list) and len(results) > 0:
-                    for df in results:
-                        if len(df) > 0:
-                            # Get best match (lowest distance)
-                            best_match = df.iloc[0]
-                            identity = best_match['identity']
-                            distance = best_match['distance']
+                    find_kwargs = {
+                        "img_path": face_crop,
+                        "db_path": str(self.face_db_path),
+                        "model_name": self.face_model,
+                        "enforce_detection": False,
+                        "detector_backend": self._face_detector_backend(),
+                        "silent": True,
+                        "refresh_database": True,
+                    }
+                    try:
+                        results = self.deepface.find(**find_kwargs)
+                    except TypeError:
+                        find_kwargs.pop("refresh_database", None)
+                        results = self.deepface.find(**find_kwargs)
 
-                            # Extract person name from file path
-                            # Path format: face_database/John/john_001.jpg → "John"
+                    best_match = None
+                    result_frames = results if isinstance(results, list) else [results]
+                    for df in result_frames:
+                        if df is None or len(df) == 0:
+                            continue
+                        candidate = df.iloc[0]
+                        if best_match is None or float(candidate["distance"]) < float(best_match["distance"]):
+                            best_match = candidate
+
+                    if best_match is not None:
+                        distance = float(best_match["distance"])
+                        if distance <= match_threshold:
+                            identity = str(best_match["identity"])
                             person_name = Path(identity).parent.name
+                            confidence = max(
+                                0.0,
+                                min(1.0, 1.0 - (distance / max(match_threshold, 1e-6))),
+                            )
+                            faces.append(
+                                {
+                                    "name": person_name,
+                                    "confidence": confidence,
+                                    "bbox": detected_face["bbox"],
+                                    "distance": distance,
+                                }
+                            )
+                            continue
 
-                            # Convert distance to confidence score
-                            # Lower distance = higher confidence
-                            # This is a heuristic conversion (not exact probability)
-                            confidence = max(0.0, 1.0 - distance)
-
-                            faces.append({
-                                'name': person_name,
-                                'confidence': confidence,
-                                'bbox': None,  # DeepFace.find() doesn't return bbox
-                                'distance': distance
-                            })
-                        elif return_unknown:
-                            # Face detected but no match found
-                            faces.append({
-                                'name': 'Unknown',
-                                'confidence': 0.0,
-                                'bbox': None
-                            })
+                    if return_unknown:
+                        faces.append(
+                            {
+                                "name": "Unknown",
+                                "confidence": 0.0,
+                                "bbox": detected_face["bbox"],
+                            }
+                        )
             else:
                 # ============================================================
                 # FACE DETECTION MODE (no known faces)
                 # Just detect faces without recognition
                 # ============================================================
                 if return_unknown:
-                    detected = self.deepface.extract_faces(
-                        img_path=image,
-                        enforce_detection=False,
-                        detector_backend='opencv'  # Fast detector
-                    )
-
-                    for face_data in detected:
-                        facial_area = face_data['facial_area']
-                        faces.append({
-                            'name': 'Unknown',
-                            'confidence': face_data['confidence'],
-                            'bbox': [
-                                facial_area['x'],
-                                facial_area['y'],
-                                facial_area['w'],
-                                facial_area['h']
-                            ]
-                        })
+                    for detected_face in detected_faces:
+                        faces.append(
+                            {
+                                "name": "Unknown",
+                                "confidence": detected_face["confidence"],
+                                "bbox": detected_face["bbox"],
+                            }
+                        )
 
         except Exception as e:
             print(f"[VisionCore] ✗ ERROR in face recognition: {e}")
@@ -1414,7 +1557,35 @@ class VisionCore:
         Returns:
             True if successful, False otherwise
         """
+        self.last_face_db_error = None
+
         try:
+            if image is None or getattr(image, "size", 0) == 0:
+                self.last_face_db_error = "Could not read a usable image for face learning."
+                print(f"[VisionCore] ✗ ERROR adding face to database: {self.last_face_db_error}")
+                return False
+
+            detected_faces = self._extract_detected_faces(image, require_face=True)
+            if not detected_faces:
+                self.last_face_db_error = (
+                    "No face was detected in the latest image. Ask one person to stand clearly in front of the robot."
+                )
+                print(f"[VisionCore] ✗ ERROR adding face to database: {self.last_face_db_error}")
+                return False
+
+            if len(detected_faces) > 1:
+                self.last_face_db_error = (
+                    "Multiple faces were detected in the latest image. Ask only one person to stand in view when learning a name."
+                )
+                print(f"[VisionCore] ✗ ERROR adding face to database: {self.last_face_db_error}")
+                return False
+
+            face_image = self._crop_face_image(image, detected_faces[0]["bbox"])
+            if face_image is None or getattr(face_image, "size", 0) == 0:
+                self.last_face_db_error = "Could not isolate the detected face for saving."
+                print(f"[VisionCore] ✗ ERROR adding face to database: {self.last_face_db_error}")
+                return False
+
             # ============================================================
             # CREATE PERSON DIRECTORY
             # Each person gets their own subdirectory
@@ -1435,12 +1606,14 @@ class VisionCore:
             # OpenCV's imwrite handles BGR format automatically
             # ============================================================
             image_path = person_dir / image_filename
-            cv2.imwrite(str(image_path), image)
+            cv2.imwrite(str(image_path), face_image)
+            self._invalidate_face_database_cache()
 
             print(f"[VisionCore] ✓ Added face for '{person_name}': {image_path}")
             return True
 
         except Exception as e:
+            self.last_face_db_error = str(e)
             print(f"[VisionCore] ✗ ERROR adding face to database: {e}")
             return False
 

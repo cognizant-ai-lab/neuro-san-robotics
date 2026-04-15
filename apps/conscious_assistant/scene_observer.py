@@ -75,6 +75,26 @@ def summarize_observed_objects(objects: List[Dict[str, Any]]) -> List[str]:
     ]
 
 
+def summarize_observed_entities(results: Dict[str, Any]) -> List[str]:
+    """
+    Combine recognized face names with object labels for agent/UI consumption.
+
+    When a known face is recognized, prefer the person's name over the generic
+    `person` object label so downstream consumers can refer to the person.
+    """
+    object_names = summarize_observed_objects(results.get("objects", []))
+    known_face_names = []
+    for face in results.get("faces", []):
+        face_name = str(face.get("name", "")).strip()
+        if face_name and face_name != "Unknown" and face_name not in known_face_names:
+            known_face_names.append(face_name)
+
+    if known_face_names:
+        object_names = [name for name in object_names if name != "person"]
+
+    return known_face_names + object_names
+
+
 def build_scene_input(timestamp: str, object_names: List[str]) -> Optional[str]:
     """Build the agent input payload for a silent observation interval."""
     if not object_names:
@@ -234,7 +254,7 @@ class SceneObserver:
             snapshot = detect_camera_snapshot(
                 self._capture,
                 vision,
-                enable_face_recognition=False,
+                enable_face_recognition=True,
             )
             if snapshot is None:
                 logging.warning("Scene observer snapshot capture returned no frame")
@@ -242,7 +262,7 @@ class SceneObserver:
                 return None
 
             results = snapshot["results"]
-            object_names = summarize_observed_objects(results.get("objects", []))
+            object_names = summarize_observed_entities(results)
             logging.info(
                 "Scene observer snapshot summary: %s",
                 results.get("summary", "No detections"),
@@ -254,6 +274,7 @@ class SceneObserver:
                 "image_url": f"{self.public_image_url}?t={updated_at_ms}",
                 "summary": results.get("summary", "No detections"),
                 "objects": object_names,
+                "faces": results.get("faces", []),
                 "timestamp": timestamp,
             }
             return dict(self._last_observation)

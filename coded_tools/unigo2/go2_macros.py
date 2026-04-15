@@ -21,6 +21,14 @@ except Exception:
     ChannelFactoryInitialize = None
 
 
+_ROBOT_INIT_STATE = {
+    "attempted": False,
+    "available": True,
+    "error": None,
+    "reported_disabled": False,
+}
+
+
 def _coerce_status(ret):
     """
     Unitree SDK sometimes returns just 'code' and sometimes '(code, data)'.
@@ -36,9 +44,19 @@ class Go2Macros:
         self.use_robot = use_robot
         self.ifname = ifname
         self.cli = None
+        self.available = False
 
-        if not self.use_robot or sport_client is None:
+        if not self.use_robot or sport_client is None or ChannelFactoryInitialize is None:
             self._log("⚙️ Running in simulation/offline mode (no robot)")
+            return
+
+        if _ROBOT_INIT_STATE["attempted"] and not _ROBOT_INIT_STATE["available"]:
+            if not _ROBOT_INIT_STATE["reported_disabled"]:
+                self._log(
+                    "⚙️ Robot control disabled after prior initialization failure: "
+                    f"{_ROBOT_INIT_STATE['error']}"
+                )
+                _ROBOT_INIT_STATE["reported_disabled"] = True
             return
 
         try:
@@ -51,9 +69,26 @@ class Go2Macros:
             self.cli = sport_client.SportClient()
             self.cli.SetTimeout(10.0)
             self.cli.Init()
+            self.available = True
+            _ROBOT_INIT_STATE.update(
+                {
+                    "attempted": True,
+                    "available": True,
+                    "error": None,
+                    "reported_disabled": False,
+                }
+            )
             self._log("✅ SportClient initialized and ready")
 
         except Exception as e:
+            _ROBOT_INIT_STATE.update(
+                {
+                    "attempted": True,
+                    "available": False,
+                    "error": str(e),
+                    "reported_disabled": False,
+                }
+            )
             self._log(f"❌ Failed to initialize: {e}")
             traceback.print_exc()
 
