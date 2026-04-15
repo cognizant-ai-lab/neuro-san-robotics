@@ -1,11 +1,11 @@
 # neuro-san-robotics
 Neuro SAN Robotics
 
-## Start Cailey
+## Start CAIL-E
 
 1. Physically start CAIL-E with a short press followed by a long press
 on its power button.
-2. Find Cailey's IP address and ssh into it:
+2. Find CAIL-E's IP address and ssh into it:
     ```shell
     ssh unitree@10.194.17.130
     ```
@@ -25,7 +25,7 @@ on its power button.
    python apps/conscious_assistant/interface_flask.py
    ```
 You can now navigate to https://10.194.17.130:5001 (check the IP address)
-to interact with Cailey.
+to interact with CAIL-E.
 
 ## Setup
 
