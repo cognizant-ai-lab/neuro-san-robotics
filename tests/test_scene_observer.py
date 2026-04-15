@@ -209,6 +209,54 @@ class SceneObserverTests(unittest.TestCase):
             str(REPO_ROOT / "face_database"),
         )
 
+    def test_score_results_prefers_more_objects_then_confidence(self):
+        low = {"objects": [{"confidence": 0.9}], "faces": [], "summary": ""}
+        high = {
+            "objects": [{"confidence": 0.4}, {"confidence": 0.3}],
+            "faces": [],
+            "summary": "",
+        }
+
+        self.assertGreater(
+            SceneObserver._score_results(high),
+            SceneObserver._score_results(low),
+        )
+
+    def test_observe_uses_best_result_from_frame_burst(self):
+        observer = SceneObserver(public_image_url="/api/observation/latest.jpg")
+        frames = [
+            np.zeros((8, 8, 3), dtype=np.uint8),
+            np.ones((8, 8, 3), dtype=np.uint8),
+            np.full((8, 8, 3), 2, dtype=np.uint8),
+        ]
+        results_by_marker = {
+            0: {"objects": [], "faces": [], "summary": "No detections"},
+            1: {
+                "objects": [{"class_name": "person", "confidence": 0.82, "bbox": [0, 0, 2, 2]}],
+                "faces": [],
+                "summary": "Objects: 1 person(s)",
+            },
+            2: {"objects": [], "faces": [], "summary": "No detections"},
+        }
+
+        def fake_detect_scene(_vision, frame):
+            marker = int(frame[0, 0, 0])
+            return results_by_marker[marker]
+
+        with patch.object(observer, "_ensure_vision", return_value=_FakeVision()):
+            with patch.object(observer, "_read_detection_frames", return_value=frames):
+                with patch.object(observer, "_detect_scene", side_effect=fake_detect_scene):
+                    with patch.object(observer, "_annotate_frame", side_effect=lambda _vision, frame, _results: frame):
+                        with patch.object(observer, "_write_latest_image", return_value=123456789):
+                            observation = observer.observe()
+
+        self.assertEqual(observation["objects"], ["person"])
+        self.assertEqual(observation["summary"], "Objects: 1 person(s)")
+        self.assertEqual(
+            observation["image_url"],
+            "/api/observation/latest.jpg?t=123456789",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -252,6 +253,31 @@ class SceneObserver:
         self._release_capture()
         return None
 
+    def _read_detection_frames(self) -> List[Any]:
+        """
+        Capture a short burst of frames and return the latest good candidates.
+
+        The standalone interactive demo benefits from repeated frames over a live
+        stream. Capturing a burst here gives the observer a similar chance to
+        avoid a blurred or poorly exposed single snapshot.
+        """
+        initial_frame = self._read_frame()
+        if initial_frame is None:
+            return []
+
+        burst_size = max(1, _env_int("VISION_OBSERVER_BURST_FRAMES", 6))
+        frames = deque([initial_frame], maxlen=burst_size)
+        if self._capture is None:
+            return list(frames)
+
+        for _ in range(burst_size - 1):
+            ret, frame = self._capture.read()
+            if ret and frame is not None and getattr(frame, "size", 0) > 0:
+                frames.append(frame)
+            time.sleep(0.03)
+
+        return list(frames)
+
     def _annotate_frame(self, vision, frame, results: Dict[str, Any]):
         annotated = vision.visualize_detections(frame, results)
         cv2.putText(
@@ -331,6 +357,15 @@ class SceneObserver:
 
         return final_results
 
+    @staticmethod
+    def _score_results(results: Dict[str, Any]) -> float:
+        """Rank detection results so the best frame in a burst can be selected."""
+        objects = results.get("objects", [])
+        faces = results.get("faces", [])
+        object_confidence = sum(float(obj.get("confidence", 0.0)) for obj in objects)
+        face_confidence = sum(float(face.get("confidence", 0.0)) for face in faces)
+        return (len(objects) * 100.0) + (len(faces) * 50.0) + object_confidence + face_confidence
+
     def _write_latest_image(self, annotated_frame) -> int:
         self.image_dir.mkdir(parents=True, exist_ok=True)
         tmp_path = self.image_path.with_suffix(".tmp.jpg")
@@ -358,19 +393,30 @@ class SceneObserver:
             if vision is None:
                 return None
 
-            frame = self._read_frame()
-            if frame is None:
+            candidate_frames = self._read_detection_frames()
+            if not candidate_frames:
                 return None
 
-            results = self._detect_scene(vision, frame)
-            object_names = summarize_observed_objects(results.get("objects", []))
-            annotated = self._annotate_frame(vision, frame, results)
+            selected_frame = candidate_frames[-1]
+            selected_results = {"objects": [], "faces": [], "summary": "No detections"}
+            best_score = -1.0
+
+            for frame in candidate_frames:
+                results = self._detect_scene(vision, frame)
+                score = self._score_results(results)
+                if score > best_score:
+                    best_score = score
+                    selected_frame = frame
+                    selected_results = results
+
+            object_names = summarize_observed_objects(selected_results.get("objects", []))
+            annotated = self._annotate_frame(vision, selected_frame, selected_results)
             updated_at_ms = self._write_latest_image(annotated)
             timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
 
             self._last_observation = {
                 "image_url": f"{self.public_image_url}?t={updated_at_ms}",
-                "summary": results.get("summary", "No detections"),
+                "summary": selected_results.get("summary", "No detections"),
                 "objects": object_names,
                 "timestamp": timestamp,
             }
