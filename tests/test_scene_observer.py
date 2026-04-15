@@ -7,6 +7,7 @@ from apps.conscious_assistant.scene_observer import SceneObserver
 from apps.conscious_assistant.scene_observer import REPO_ROOT
 from apps.conscious_assistant.scene_observer import _resolve_repo_relative_path
 from apps.conscious_assistant.scene_observer import build_scene_input
+from apps.conscious_assistant.scene_observer import summarize_observed_entities
 from apps.conscious_assistant.scene_observer import summarize_observed_objects
 
 
@@ -40,6 +41,22 @@ class SceneObserverTests(unittest.TestCase):
         self.assertEqual(
             payload,
             "\n[04:20:00pm] user: [Silence]\n[04:20:00pm] saw: person\n[04:20:00pm] saw: chair",
+        )
+
+    def test_summarize_observed_entities_prefers_known_face_names_over_person(self):
+        results = {
+            "objects": [
+                {"class_name": "person", "confidence": 0.95},
+                {"class_name": "chair", "confidence": 0.60},
+            ],
+            "faces": [
+                {"name": "Alice", "confidence": 0.88, "bbox": [1, 2, 3, 4]},
+            ],
+        }
+
+        self.assertEqual(
+            summarize_observed_entities(results),
+            ["Alice", "chair"],
         )
 
     def test_ensure_vision_uses_shared_defaults_helper(self):
@@ -77,19 +94,22 @@ class SceneObserverTests(unittest.TestCase):
     def test_observe_returns_latest_image_payload_from_shared_snapshot_helper(self):
         observer = SceneObserver(public_image_url="/api/observation/latest.jpg")
         frame = np.ones((16, 16, 3), dtype=np.uint8)
+        vision = object()
         results = {
             "objects": [
                 {"class_name": "chair", "confidence": 0.40, "bbox": [1, 1, 5, 5]},
                 {"class_name": "person", "confidence": 0.91, "bbox": [0, 0, 10, 10]},
                 {"class_name": "chair", "confidence": 0.70, "bbox": [2, 2, 6, 6]},
             ],
-            "faces": [],
-            "summary": "Objects: 1 person(s), 1 chair(s)",
+            "faces": [
+                {"name": "Alice", "confidence": 0.82, "bbox": [0, 0, 4, 4]},
+            ],
+            "summary": "Objects: 1 person(s), 1 chair(s) | Recognized: Alice",
         }
 
         observer._capture = object()
 
-        with patch.object(observer, "_ensure_vision", return_value=object()):
+        with patch.object(observer, "_ensure_vision", return_value=vision):
             with patch.object(observer, "_ensure_camera", return_value=True):
                 with patch(
                     "apps.conscious_assistant.scene_observer.detect_camera_snapshot",
@@ -98,9 +118,14 @@ class SceneObserverTests(unittest.TestCase):
                     with patch.object(observer, "_write_latest_image", return_value=123456789):
                         observation = observer.observe()
 
-        snapshot_helper.assert_called_once()
-        self.assertEqual(observation["objects"], ["person", "chair"])
-        self.assertEqual(observation["summary"], "Objects: 1 person(s), 1 chair(s)")
+        snapshot_helper.assert_called_once_with(
+            observer._capture,
+            vision,
+            enable_face_recognition=True,
+        )
+        self.assertEqual(observation["objects"], ["Alice", "chair"])
+        self.assertEqual(observation["summary"], "Objects: 1 person(s), 1 chair(s) | Recognized: Alice")
+        self.assertEqual(observation["faces"], results["faces"])
         self.assertEqual(
             observation["image_url"],
             "/api/observation/latest.jpg?t=123456789",

@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -57,6 +58,32 @@ class _FakeVision:
 
     def visualize_detections(self, frame, results):
         return frame.copy()
+
+
+class _FakeILoc:
+    def __init__(self, row):
+        self._row = row
+
+    def __getitem__(self, idx):
+        del idx
+        return self._row
+
+
+class _FakeDataFrame:
+    def __init__(self, row):
+        self.iloc = _FakeILoc(row)
+
+    def __len__(self):
+        return 1
+
+
+class _FakeDeepFace:
+    def __init__(self, result):
+        self._result = result
+
+    def find(self, **kwargs):
+        del kwargs
+        return self._result
 
 
 class VisionCoreCameraTests(unittest.TestCase):
@@ -201,6 +228,37 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertEqual(snapshot["results"]["summary"], "Objects: 1 person(s)")
         self.assertEqual(snapshot["results"]["objects"][0]["bbox"], [20, 10, 60, 50])
         self.assertEqual(snapshot["annotated"].shape, (240, 320, 3))
+
+    def test_recognize_faces_handles_single_deepface_dataframe_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_image = Path(temp_dir) / "Alice" / "alice.jpg"
+            db_image.parent.mkdir(parents=True, exist_ok=True)
+            db_image.write_bytes(b"fake")
+
+            vision = vision_core.VisionCore(
+                face_db_path=temp_dir,
+                initialize_yolo=False,
+            )
+            vision._face_detection_enabled = True
+            vision.deepface = _FakeDeepFace(
+                _FakeDataFrame(
+                    {
+                        "identity": str(db_image),
+                        "distance": 0.18,
+                        "source_x": 11,
+                        "source_y": 22,
+                        "source_w": 33,
+                        "source_h": 44,
+                    }
+                )
+            )
+
+            faces = vision.recognize_faces(np.zeros((8, 8, 3), dtype=np.uint8))
+
+        self.assertEqual(len(faces), 1)
+        self.assertEqual(faces[0]["name"], "Alice")
+        self.assertEqual(faces[0]["bbox"], [11, 22, 33, 44])
+        self.assertGreater(faces[0]["confidence"], 0.8)
 
 
 if __name__ == "__main__":

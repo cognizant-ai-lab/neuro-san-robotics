@@ -1161,6 +1161,23 @@ class VisionCore:
         faces = []
 
         try:
+            def _series_bbox(series: Any) -> Optional[List[int]]:
+                """Extract a source-face bounding box from a DeepFace match row if present."""
+                candidate_sets = [
+                    ("source_x", "source_y", "source_w", "source_h"),
+                    ("x", "y", "w", "h"),
+                    ("target_x", "target_y", "target_w", "target_h"),
+                ]
+                for keys in candidate_sets:
+                    values = [series.get(key) for key in keys]
+                    if any(value is None for value in values):
+                        continue
+                    try:
+                        return [int(float(value)) for value in values]
+                    except (TypeError, ValueError):
+                        continue
+                return None
+
             # ============================================================
             # CHECK IF DATABASE HAS KNOWN FACES
             # Database structure: face_database/person_name/image.jpg
@@ -1184,36 +1201,38 @@ class VisionCore:
                 # PROCESS RECOGNITION RESULTS
                 # DeepFace returns DataFrame with matches for each detected face
                 # ============================================================
-                if isinstance(results, list) and len(results) > 0:
-                    for df in results:
-                        if len(df) > 0:
-                            # Get best match (lowest distance)
-                            best_match = df.iloc[0]
-                            identity = best_match['identity']
-                            distance = best_match['distance']
+                result_frames = results if isinstance(results, list) else [results]
+                for df in result_frames:
+                    if df is None:
+                        continue
+                    if len(df) > 0:
+                        # Get best match (lowest distance)
+                        best_match = df.iloc[0]
+                        identity = best_match['identity']
+                        distance = best_match['distance']
 
-                            # Extract person name from file path
-                            # Path format: face_database/John/john_001.jpg → "John"
-                            person_name = Path(identity).parent.name
+                        # Extract person name from file path
+                        # Path format: face_database/John/john_001.jpg → "John"
+                        person_name = Path(identity).parent.name
 
-                            # Convert distance to confidence score
-                            # Lower distance = higher confidence
-                            # This is a heuristic conversion (not exact probability)
-                            confidence = max(0.0, 1.0 - distance)
+                        # Convert distance to confidence score
+                        # Lower distance = higher confidence
+                        # This is a heuristic conversion (not exact probability)
+                        confidence = max(0.0, 1.0 - distance)
 
-                            faces.append({
-                                'name': person_name,
-                                'confidence': confidence,
-                                'bbox': None,  # DeepFace.find() doesn't return bbox
-                                'distance': distance
-                            })
-                        elif return_unknown:
-                            # Face detected but no match found
-                            faces.append({
-                                'name': 'Unknown',
-                                'confidence': 0.0,
-                                'bbox': None
-                            })
+                        faces.append({
+                            'name': person_name,
+                            'confidence': confidence,
+                            'bbox': _series_bbox(best_match),
+                            'distance': distance
+                        })
+                    elif return_unknown:
+                        # Face detected but no match found
+                        faces.append({
+                            'name': 'Unknown',
+                            'confidence': 0.0,
+                            'bbox': None
+                        })
             else:
                 # ============================================================
                 # FACE DETECTION MODE (no known faces)
