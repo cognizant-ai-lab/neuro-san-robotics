@@ -5,6 +5,7 @@ import os
 import queue
 import random
 import re
+import site
 import sys
 import tempfile
 import threading
@@ -16,6 +17,85 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+
+def _should_enable_vision_runtime_prime() -> bool:
+    raw_value = os.environ.get("VISION_SKIP_EARLY_IMPORT")
+    if raw_value is None:
+        return sys.platform.startswith("linux")
+    return raw_value.strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _candidate_libgomp_paths() -> list[Path]:
+    candidates = []
+
+    override_path = os.environ.get("VISION_LIBGOMP_PATH")
+    if override_path:
+        candidates.append(Path(override_path))
+
+    for site_dir in site.getsitepackages():
+        candidates.append(Path(site_dir) / "torch" / "lib" / "libgomp.so.1")
+
+    common_system_paths = [
+        "/usr/lib/aarch64-linux-gnu/libgomp.so.1",
+        "/usr/lib/x86_64-linux-gnu/libgomp.so.1",
+        "/lib/aarch64-linux-gnu/libgomp.so.1",
+        "/lib/x86_64-linux-gnu/libgomp.so.1",
+    ]
+    candidates.extend(Path(path) for path in common_system_paths)
+
+    unique_candidates = []
+    seen = set()
+    for candidate in candidates:
+        candidate_text = str(candidate)
+        if candidate_text in seen:
+            continue
+        seen.add(candidate_text)
+        unique_candidates.append(candidate)
+
+    return unique_candidates
+
+
+def _prime_vision_runtime_imports() -> None:
+    """
+    Prime YOLO dependencies before Flask imports on Linux.
+
+    On some Jetson/ARM environments, importing torch/ultralytics later in the
+    Flask startup path can fail with `libgomp.so.1: cannot allocate memory in
+    static TLS block`, even though the same environment works in a simpler
+    standalone process. Preloading libgomp and importing ultralytics early keeps
+    the app closer to that standalone import order.
+    """
+    if not _should_enable_vision_runtime_prime():
+        return
+
+    try:
+        import ctypes
+
+        rtld_global = getattr(ctypes, "RTLD_GLOBAL", None)
+        for candidate in _candidate_libgomp_paths():
+            if not candidate.exists():
+                continue
+            try:
+                if rtld_global is None:
+                    ctypes.CDLL(str(candidate))
+                else:
+                    ctypes.CDLL(str(candidate), mode=rtld_global)
+                print(f"[VisionCore] Preloaded libgomp: {candidate}")
+                break
+            except OSError:
+                continue
+    except Exception as exc:
+        print(f"[VisionCore] libgomp preload skipped: {exc}")
+
+    try:
+        from ultralytics import YOLO as _EarlyYOLO  # noqa: F401
+        print("[VisionCore] Early ultralytics import succeeded for Flask startup")
+    except Exception as exc:
+        print(f"[VisionCore] Early ultralytics import failed during Flask startup: {exc}")
+
+
+_prime_vision_runtime_imports()
 
 # pylint: disable=import-error
 import schedule
