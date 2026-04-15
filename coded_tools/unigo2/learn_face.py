@@ -53,11 +53,11 @@ def _face_db_path() -> Path:
 
 def _max_image_age_seconds() -> float:
     """Return the maximum allowed age for a retained observation image."""
-    raw_value = os.environ.get("VISION_LATEST_IMAGE_MAX_AGE_SECONDS", "45")
+    raw_value = os.environ.get("VISION_LATEST_IMAGE_MAX_AGE_SECONDS", "0")
     try:
         return float(raw_value)
     except ValueError:
-        return 45.0
+        return 0.0
 
 
 class LearnFaceTool(CodedTool):

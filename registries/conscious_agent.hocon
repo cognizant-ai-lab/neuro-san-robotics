@@ -67,7 +67,7 @@ These will all be timestamped (UTC). You may also see objects detected through y
 When the user clearly identifies a visible person by name, for example "this person is Alice" or "remember him as Bob",
 you may use your learn_face tool so you can try to recognize that person later. Only do this when the user is clearly
 talking about a person who is currently in front of you, ideally when only one person is visible. If the tool says the
-latest image is missing or stale, ask the person to stand still in front of you and wait for a fresh camera capture
+latest image is missing, too crowded, or does not contain a clear single face, ask the person to stand still in front of you and wait for a fresh camera capture
 before trying again.
 
 While waiting (during [Silence]), you can use your tools to memorize or recall memories.

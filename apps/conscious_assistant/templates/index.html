@@ -76,6 +76,8 @@
             transports: ["websocket", "polling"],
         });
         const MAX_OBSERVATION_HISTORY = 20;
+        const MAX_CHAT_HISTORY = 120;
+        const MAX_THOUGHT_HISTORY = 120;
         var thoughtsInitialized = false;
         var chatHistoryInitialized = false;
         var isRecording = false;
@@ -402,6 +404,52 @@
             }
         }
 
+        function escapeHtml(text) {
+            var element = document.createElement('div');
+            element.textContent = text == null ? '' : String(text);
+            return element.innerHTML;
+        }
+
+        function clearEmptyState(element) {
+            var emptyState = element.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+        }
+
+        function pruneEntries(element, selector, maxEntries) {
+            var entries = element.querySelectorAll(selector);
+            while (entries.length > maxEntries) {
+                element.removeChild(entries[0]);
+                entries = element.querySelectorAll(selector);
+            }
+        }
+
+        function appendTextEntry(elementId, className, text, selector, maxEntries) {
+            var element = document.getElementById(elementId);
+            if (!element) {
+                return;
+            }
+
+            if (elementId === 'assistant-thoughts' && !thoughtsInitialized) {
+                element.innerHTML = '';
+                thoughtsInitialized = true;
+            } else if (elementId === 'chat-history' && !chatHistoryInitialized) {
+                element.innerHTML = '';
+                chatHistoryInitialized = true;
+            }
+
+            clearEmptyState(element);
+
+            var entry = document.createElement('div');
+            entry.className = className;
+            entry.innerHTML = escapeHtml(text).replace(/\n/g, '<br>');
+            element.appendChild(entry);
+
+            pruneEntries(element, selector, maxEntries);
+            element.scrollTop = element.scrollHeight;
+        }
+
         // Listen for processing state changes from server
         socket.on('processing_started', function() {
             console.log('Robot is processing...');
@@ -414,13 +462,13 @@
         });
 
         socket.on('update_thoughts', function(data) {
-            var element = document.getElementById('assistant-thoughts');
-            if (!thoughtsInitialized) {
-                element.innerHTML = '';
-                thoughtsInitialized = true;
-            }
-            element.innerHTML += '<div class="thought-msg">' + data.data.replace(/\n/g, '<br>') + '</div>';
-            element.scrollTop = element.scrollHeight;
+            appendTextEntry(
+                'assistant-thoughts',
+                'thought-msg',
+                data.data,
+                '.thought-msg',
+                MAX_THOUGHT_HISTORY,
+            );
         });
 
         socket.on('update_observation', function(data) {
@@ -480,13 +528,13 @@
         });
 
         socket.on('update_speech', function(data) {
-            var element = document.getElementById('chat-history');
-            if (!chatHistoryInitialized) {
-                element.innerHTML = '';
-                chatHistoryInitialized = true;
-            }
-            element.innerHTML += '<div class="speech-msg">' + data.data.replace(/\n/g, '<br>') + '</div>';
-            element.scrollTop = element.scrollHeight;
+            appendTextEntry(
+                'chat-history',
+                'speech-msg',
+                data.data,
+                '.speech-msg, .user-msg',
+                MAX_CHAT_HISTORY,
+            );
         });
 
         // Track current streaming speech message for progressive text display
@@ -503,10 +551,12 @@
 
             // First chunk: create a new speech message element
             if (data.chunk_idx === 0) {
+                clearEmptyState(element);
                 currentStreamingMsg = document.createElement('div');
                 currentStreamingMsg.className = 'speech-msg streaming';
                 currentStreamingText = '';
                 element.appendChild(currentStreamingMsg);
+                pruneEntries(element, '.speech-msg, .user-msg', MAX_CHAT_HISTORY);
             }
 
             // Append chunk text to the current message
@@ -529,13 +579,13 @@
         });
 
         socket.on('update_user_input', function(data) {
-            var element = document.getElementById('chat-history');
-            if (!chatHistoryInitialized) {
-                element.innerHTML = '';
-                chatHistoryInitialized = true;
-            }
-            element.innerHTML += '<div class="user-msg">' + data.data.replace(/\n/g, '<br>') + '</div>';
-            element.scrollTop = element.scrollHeight;
+            appendTextEntry(
+                'chat-history',
+                'user-msg',
+                data.data,
+                '.speech-msg, .user-msg',
+                MAX_CHAT_HISTORY,
+            );
         });
 
         function sendUserInput() {
