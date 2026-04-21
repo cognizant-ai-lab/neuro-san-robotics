@@ -48,9 +48,13 @@ class _FakeVision:
     def __init__(self):
         self.frames = []
         self.face_frames = []
+        self.snapshot_settings = []
+        self.input_size = 256
+        self.confidence_threshold = 0.60
 
     def detect_all(self, frame, detect_faces=False, verbose=False):
         self.frames.append(frame.shape[:2])
+        self.snapshot_settings.append((self.input_size, self.confidence_threshold))
         return {
             "objects": [
                 {"class_name": "person", "confidence": 0.91, "bbox": [10, 5, 30, 25]},
@@ -252,6 +256,9 @@ class VisionCoreCameraTests(unittest.TestCase):
         )
 
         self.assertEqual(vision.frames, [(120, 160)])
+        self.assertEqual(vision.snapshot_settings, [(256, 0.45)])
+        self.assertEqual(vision.input_size, 256)
+        self.assertEqual(vision.confidence_threshold, 0.60)
         self.assertEqual(snapshot["results"]["summary"], "Objects: 1 person(s)")
         self.assertEqual(snapshot["results"]["objects"][0]["bbox"], [20, 10, 60, 50])
         self.assertEqual(snapshot["annotated"].shape, (240, 320, 3))
@@ -276,6 +283,7 @@ class VisionCoreCameraTests(unittest.TestCase):
         )
 
         self.assertEqual(vision.frames, [(480, 640)])
+        self.assertEqual(vision.snapshot_settings, [(640, 0.45)])
         self.assertEqual(vision.face_frames, [(1080, 1920)])
         self.assertEqual(
             snapshot["results"]["summary"],

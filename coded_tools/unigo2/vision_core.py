@@ -317,12 +317,38 @@ def detect_camera_snapshot(
     proc_h, proc_w = process_frame.shape[:2]
     scale_x = orig_w / proc_w
     scale_y = orig_h / proc_h
-
-    results = vision.detect_all(
-        process_frame,
-        detect_faces=False,
-        verbose=False,
+    snapshot_input_size = _env_int(
+        "VISION_SNAPSHOT_INPUT_SIZE",
+        max(
+            int(getattr(vision, "input_size", 0) or 0),
+            process_width,
+            process_height,
+        ),
     )
+    snapshot_confidence = _env_float(
+        "VISION_SNAPSHOT_CONFIDENCE_THRESHOLD",
+        min(float(getattr(vision, "confidence_threshold", 0.60)), 0.45),
+    )
+
+    original_input_size = getattr(vision, "input_size", None)
+    original_confidence_threshold = getattr(vision, "confidence_threshold", None)
+
+    if original_input_size is not None:
+        vision.input_size = max(32, int(snapshot_input_size))
+    if original_confidence_threshold is not None:
+        vision.confidence_threshold = max(0.0, min(1.0, float(snapshot_confidence)))
+
+    try:
+        results = vision.detect_all(
+            process_frame,
+            detect_faces=False,
+            verbose=False,
+        )
+    finally:
+        if original_input_size is not None:
+            vision.input_size = original_input_size
+        if original_confidence_threshold is not None:
+            vision.confidence_threshold = original_confidence_threshold
 
     for obj in results['objects']:
         obj['bbox'] = [

@@ -6,6 +6,7 @@ from unittest.mock import patch
 from coded_tools.unigo2.unitree_channel import initialize_unitree_channel
 from coded_tools.unigo2.unitree_channel import reset_unitree_channel_state
 from coded_tools.unigo2.unitree_channel import resolve_unitree_interface
+from coded_tools.unigo2.unitree_channel import _CYCLONEDDS_CONFIG
 
 
 class UnitreeChannelTests(unittest.TestCase):
@@ -19,8 +20,11 @@ class UnitreeChannelTests(unittest.TestCase):
     def test_initialize_unitree_channel_uses_interface_once_and_reuses_state(self):
         factory = Mock()
 
-        state = initialize_unitree_channel(factory, "eth0")
-        reused_state = initialize_unitree_channel(factory, "eth0")
+        with patch.dict(os.environ, {}, clear=True):
+            state = initialize_unitree_channel(factory, "eth0")
+            reused_state = initialize_unitree_channel(factory, "eth0")
+            self.assertEqual(os.environ["CYCLONEDDS_NETWORK_INTERFACE"], "eth0")
+            self.assertEqual(os.environ["CYCLONEDDS_URI"], _CYCLONEDDS_CONFIG.resolve().as_uri())
 
         factory.assert_called_once_with(0, "eth0")
         self.assertEqual(state["ifname"], "eth0")

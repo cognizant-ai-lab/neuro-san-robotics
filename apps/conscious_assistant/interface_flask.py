@@ -158,7 +158,7 @@ except ImportError:
     DEFERRED_ACTIONS_AVAILABLE = False
     execute_deferred_actions = None
 
-THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
+THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 5.0)
 
 # Robot motion configuration
 ROBOT_MOTION_PROBABILITY = 0.5  # 50% chance of performing robot motion

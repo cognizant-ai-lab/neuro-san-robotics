@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 
@@ -6,6 +7,9 @@ _UNITREE_CHANNEL_STATE: Dict[str, Any] = {
     "initialized": False,
     "ifname": None,
 }
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CYCLONEDDS_CONFIG = _REPO_ROOT / "cyclonedds.xml"
 
 
 def resolve_unitree_interface(default_ifname: Optional[str] = None) -> Optional[str]:
@@ -19,6 +23,15 @@ def resolve_unitree_interface(default_ifname: Optional[str] = None) -> Optional[
     )
 
 
+def _ensure_unitree_environment(ifname: Optional[str]) -> None:
+    """Populate Unitree/CycloneDDS env vars with repo-local defaults."""
+    if ifname:
+        os.environ.setdefault("CYCLONEDDS_NETWORK_INTERFACE", ifname)
+
+    if _CYCLONEDDS_CONFIG.exists():
+        os.environ.setdefault("CYCLONEDDS_URI", _CYCLONEDDS_CONFIG.resolve().as_uri())
+
+
 def initialize_unitree_channel(channel_factory_initialize, ifname: Optional[str] = None) -> Dict[str, Any]:
     """
     Initialize the Unitree DDS channel once per process and reuse it afterward.
@@ -28,6 +41,7 @@ def initialize_unitree_channel(channel_factory_initialize, ifname: Optional[str]
     so we keep a shared process-wide state here.
     """
     channel_ifname = resolve_unitree_interface(ifname)
+    _ensure_unitree_environment(channel_ifname)
 
     if _UNITREE_CHANNEL_STATE["initialized"]:
         existing_ifname = _UNITREE_CHANNEL_STATE["ifname"]
