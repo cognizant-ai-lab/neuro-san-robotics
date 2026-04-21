@@ -4,8 +4,7 @@ from typing import Any, Dict, Optional
 
 
 _UNITREE_CHANNEL_STATE: Dict[str, Any] = {
-    "initialized": False,
-    "ifname": None,
+    "modules": {},
 }
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -42,27 +41,38 @@ def initialize_unitree_channel(channel_factory_initialize, ifname: Optional[str]
     """
     channel_ifname = resolve_unitree_interface(ifname)
     _ensure_unitree_environment(channel_ifname)
+    module_key = (
+        f"{getattr(channel_factory_initialize, '__module__', 'unknown')}::"
+        f"{getattr(channel_factory_initialize, '__qualname__', getattr(channel_factory_initialize, '__name__', 'callable'))}"
+    )
+    initialized_modules = _UNITREE_CHANNEL_STATE.setdefault("modules", {})
 
-    if _UNITREE_CHANNEL_STATE["initialized"]:
-        existing_ifname = _UNITREE_CHANNEL_STATE["ifname"]
+    if module_key in initialized_modules:
+        existing_ifname = initialized_modules[module_key]
         if existing_ifname and channel_ifname and existing_ifname != channel_ifname:
             raise RuntimeError(
                 "Unitree DDS channel already initialized on "
                 f"{existing_ifname}; cannot switch to {channel_ifname}"
             )
-        return dict(_UNITREE_CHANNEL_STATE)
+        return {
+            "initialized": True,
+            "ifname": existing_ifname,
+            "module_key": module_key,
+        }
 
     if channel_ifname:
         channel_factory_initialize(0, channel_ifname)
     else:
         channel_factory_initialize(0)
 
-    _UNITREE_CHANNEL_STATE["initialized"] = True
-    _UNITREE_CHANNEL_STATE["ifname"] = channel_ifname
-    return dict(_UNITREE_CHANNEL_STATE)
+    initialized_modules[module_key] = channel_ifname
+    return {
+        "initialized": True,
+        "ifname": channel_ifname,
+        "module_key": module_key,
+    }
 
 
 def reset_unitree_channel_state() -> None:
     """Reset shared channel state for tests."""
-    _UNITREE_CHANNEL_STATE["initialized"] = False
-    _UNITREE_CHANNEL_STATE["ifname"] = None
+    _UNITREE_CHANNEL_STATE["modules"] = {}

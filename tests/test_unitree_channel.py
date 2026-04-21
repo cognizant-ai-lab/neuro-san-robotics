@@ -37,6 +37,27 @@ class UnitreeChannelTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             initialize_unitree_channel(factory, "wlan0")
 
+    def test_initialize_unitree_channel_tracks_state_per_sdk_module(self):
+        def factory_a(*args):
+            return args
+
+        def factory_b(*args):
+            return args
+
+        factory_a.__module__ = "unitree_sdk2py.core.channel"
+        factory_b.__module__ = "unitree_sdk2_python.unitree_sdk2py.core.channel"
+
+        factory_a_mock = Mock(wraps=factory_a)
+        factory_b_mock = Mock(wraps=factory_b)
+        factory_a_mock.__module__ = factory_a.__module__
+        factory_b_mock.__module__ = factory_b.__module__
+
+        initialize_unitree_channel(factory_a_mock, "eth0")
+        initialize_unitree_channel(factory_b_mock, "eth0")
+
+        factory_a_mock.assert_called_once_with(0, "eth0")
+        factory_b_mock.assert_called_once_with(0, "eth0")
+
 
 if __name__ == "__main__":
     unittest.main()

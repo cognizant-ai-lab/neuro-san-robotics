@@ -14,11 +14,34 @@ os.environ.setdefault("CYCLONEDDS_NETWORK_INTERFACE", IFNAME)
 # If you installed CycloneDDS to a custom prefix, export CYCLONEDDS_HOME in your shell.
 # os.environ.setdefault("CYCLONEDDS_HOME", "/home/unitree/exp/neuro-san-robotics/cyclonedds/install")
 
+def _load_unitree_sport_sdk():
+    """Load the Unitree sport-control SDK from whichever package layout is installed."""
+    import_errors = []
+
+    try:
+        from unitree_sdk2py.go2.sport import sport_client as unitree_sport_client
+        from unitree_sdk2py.core.channel import ChannelFactoryInitialize as unitree_channel_factory_initialize
+        return unitree_sport_client, unitree_channel_factory_initialize
+    except Exception as exc:
+        import_errors.append(exc)
+
+    try:
+        from unitree_sdk2_python.unitree_sdk2py.go2.sport import sport_client as unitree_sport_client
+        from unitree_sdk2_python.unitree_sdk2py.core.channel import ChannelFactoryInitialize as unitree_channel_factory_initialize
+        return unitree_sport_client, unitree_channel_factory_initialize
+    except Exception as exc:
+        import_errors.append(exc)
+
+    error_messages = ", ".join(str(exc) for exc in import_errors if str(exc))
+    raise ImportError(
+        "Unitree sport SDK not available"
+        + (f": {error_messages}" if error_messages else "")
+    )
+
+
 try:
     if USE_REAL_ROBOT:
-        # Unitree SDK imports
-        from unitree_sdk2_python.unitree_sdk2py.go2.sport import sport_client
-        from unitree_sdk2_python.unitree_sdk2py.core.channel import ChannelFactoryInitialize
+        sport_client, ChannelFactoryInitialize = _load_unitree_sport_sdk()
 except Exception:
     sport_client = None
     ChannelFactoryInitialize = None
