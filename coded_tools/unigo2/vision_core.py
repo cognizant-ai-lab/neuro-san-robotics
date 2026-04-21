@@ -291,7 +291,7 @@ def detect_camera_snapshot(
     *,
     enable_face_recognition: bool = False,
     warmup_frames: Optional[int] = None,
-    process_size: Tuple[int, int] = (320, 240),
+    process_size: Optional[Tuple[int, int]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Capture one detection snapshot from an open camera using the headless demo path.
@@ -313,10 +313,22 @@ def detect_camera_snapshot(
     if last_frame is None:
         return None
 
-    process_width = max(1, int(process_size[0]))
-    process_height = max(1, int(process_size[1]))
-    process_frame = cv2.resize(last_frame, (process_width, process_height))
     orig_h, orig_w = last_frame.shape[:2]
+
+    if process_size is None:
+        default_width = _env_int(
+            "VISION_SNAPSHOT_PROCESS_WIDTH",
+            640 if enable_face_recognition else 320,
+        )
+        default_height = _env_int(
+            "VISION_SNAPSHOT_PROCESS_HEIGHT",
+            480 if enable_face_recognition else 240,
+        )
+        process_size = (default_width, default_height)
+
+    process_width = min(orig_w, max(1, int(process_size[0])))
+    process_height = min(orig_h, max(1, int(process_size[1])))
+    process_frame = cv2.resize(last_frame, (process_width, process_height))
     proc_h, proc_w = process_frame.shape[:2]
     scale_x = orig_w / proc_w
     scale_y = orig_h / proc_h

@@ -51,9 +51,11 @@ I can take user commands and control a robot.
             "instructions": """
 You are an interface for a robot.
 Always call the robot_macros tool with the action string to have robot perform the actions.
-Based on user query, call the robot_macros with an action:
-Here's the list of possible actions: ["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit",
-"step_forward", "step_backward", "shake", "stretch", "dance", "heart_pose", "hand_stand", "shake",
+Based on user query, call the robot_macros with an action.
+For locomotion, prefer cautious movement and small speeds. Collision avoidance is enabled automatically for locomotion commands.
+Here's the list of possible actions: ["stand_up", "lie_down", "stop_move", "recovery_stand", "sit", "rise_sit",
+"move", "speed_level", "step_forward", "step_backward", "static_walk", "trot_run", "free_walk", "free_avoid",
+"classic_walk", "walk_upright", "cross_step", "shake", "stretch", "dance", "heart_pose", "hand_stand",
 "look_left", "look_right", "content"]
 
 Use the most appropriate action based on user input.
@@ -66,13 +68,57 @@ Use the most appropriate action based on user input.
         {
             "name": "robot_macros",
             "function": {
-                "description": "Issues commands to the robot.",
+                "description": "Issues commands to the robot. Locomotion actions automatically enable collision avoidance.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
                             "description": "The single-word name of the action to perform"
+                        },
+                        "vx": {
+                            "type": "number",
+                            "description": "Forward velocity for move and step actions."
+                        },
+                        "vy": {
+                            "type": "number",
+                            "description": "Lateral velocity for move actions."
+                        },
+                        "vyaw": {
+                            "type": "number",
+                            "description": "Yaw velocity for move actions."
+                        },
+                        "t": {
+                            "type": "number",
+                            "description": "Duration in seconds for step_forward and step_backward."
+                        },
+                        "level": {
+                            "type": "integer",
+                            "description": "Speed level for speed_level actions."
+                        },
+                        "flag": {
+                            "type": "boolean",
+                            "description": "Boolean flag used by gait and avoidance actions."
+                        },
+                        "roll": {
+                            "type": "number",
+                            "description": "Roll angle for euler actions."
+                        },
+                        "pitch": {
+                            "type": "number",
+                            "description": "Pitch angle for euler actions."
+                        },
+                        "yaw": {
+                            "type": "number",
+                            "description": "Yaw angle for euler actions."
+                        },
+                        "on": {
+                            "type": "boolean",
+                            "description": "Boolean switch for joystick-style actions."
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "Boolean switch for recovery-related actions."
                         }
                     },
                     "required": ["action"]

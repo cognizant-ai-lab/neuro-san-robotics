@@ -47,6 +47,7 @@ class _FakeCapture:
 class _FakeVision:
     def __init__(self):
         self.frames = []
+        self.face_frames = []
 
     def detect_all(self, frame, detect_faces=False, verbose=False):
         self.frames.append(frame.shape[:2])
@@ -57,6 +58,18 @@ class _FakeVision:
             "faces": [],
             "summary": "Objects: 1 person(s)",
         }
+
+    def recognize_faces(self, frame):
+        self.face_frames.append(frame.shape[:2])
+        return [
+            {"name": "Alice", "confidence": 0.91, "bbox": [1, 2, 3, 4]},
+        ]
+
+    def _generate_summary(self, results):
+        return (
+            f"Objects: {len(results['objects'])} person(s) | "
+            f"Recognized: {', '.join(face['name'] for face in results['faces'])}"
+        )
 
     def visualize_detections(self, frame, results):
         return frame.copy()
@@ -242,6 +255,32 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertEqual(snapshot["results"]["summary"], "Objects: 1 person(s)")
         self.assertEqual(snapshot["results"]["objects"][0]["bbox"], [20, 10, 60, 50])
         self.assertEqual(snapshot["annotated"].shape, (240, 320, 3))
+
+    def test_detect_camera_snapshot_uses_larger_default_process_size_with_face_recognition(self):
+        cap = _FakeCapture(
+            opened=True,
+            frames=[
+                (True, np.zeros((1080, 1920, 3), dtype=np.uint8)),
+                (True, np.ones((1080, 1920, 3), dtype=np.uint8)),
+            ],
+            width=1920,
+            height=1080,
+        )
+        vision = _FakeVision()
+
+        snapshot = vision_core.detect_camera_snapshot(
+            cap,
+            vision,
+            enable_face_recognition=True,
+            warmup_frames=2,
+        )
+
+        self.assertEqual(vision.frames, [(480, 640)])
+        self.assertEqual(vision.face_frames, [(1080, 1920)])
+        self.assertEqual(
+            snapshot["results"]["summary"],
+            "Objects: 1 person(s) | Recognized: Alice",
+        )
 
     def test_recognize_faces_handles_single_deepface_dataframe_result(self):
         with tempfile.TemporaryDirectory() as temp_dir:

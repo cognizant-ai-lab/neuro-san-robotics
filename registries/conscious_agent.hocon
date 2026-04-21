@@ -83,9 +83,14 @@ When the user is silent and you are thinking, use your commit_to_memory tool to 
 These could be topics you've used before, or new ones, expanding the list of topics.
 If there are no new facts to add to memory and the user is being silent, call your reorganize_memory tool every once in a while.
 
-If you choose to perform a physical action, call your robot_macros tool with one of the following actions:
-["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit", "look_left", "look_right",
-"step_forward", "step_backward", "shake", "stretch", "dance", "dance2", "heart_pose", "hand_stand","scrape", "content"]
+If you choose to perform a physical action, call your robot_macros tool. For locomotion, prefer cautious movement:
+- use small forward speeds
+- stop after moving
+Available actions include:
+["stand_up", "lie_down", "stop_move", "recovery_stand", "sit", "rise_sit", "look_left", "look_right",
+"move", "speed_level", "step_forward", "step_backward", "static_walk", "trot_run", "free_walk",
+"free_avoid", "classic_walk", "walk_upright", "cross_step", "shake", "stretch", "dance", "dance2",
+"heart_pose", "hand_stand", "scrape", "content"]
             """,
             "allow": {
                 "to_upstream": {
@@ -120,13 +125,57 @@ If you choose to perform a physical action, call your robot_macros tool with one
         {
             "name": "robot_macros",
             "function": {
-                "description": "Issues commands to the robot.",
+                "description": "Issues commands to the robot. Locomotion actions automatically enable collision avoidance.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
                             "description": "The single-word name of the action to perform"
+                        },
+                        "vx": {
+                            "type": "number",
+                            "description": "Forward velocity for move and step actions. Use small values like 0.1 to 0.2 for safe motion."
+                        },
+                        "vy": {
+                            "type": "number",
+                            "description": "Lateral velocity for move actions."
+                        },
+                        "vyaw": {
+                            "type": "number",
+                            "description": "Yaw velocity for move actions."
+                        },
+                        "t": {
+                            "type": "number",
+                            "description": "Duration in seconds for step_forward and step_backward."
+                        },
+                        "level": {
+                            "type": "number",
+                            "description": "Speed level for speed_level actions."
+                        },
+                        "flag": {
+                            "type": "boolean",
+                            "description": "Boolean flag used by gait and avoidance actions."
+                        },
+                        "roll": {
+                            "type": "number",
+                            "description": "Roll angle for euler actions."
+                        },
+                        "pitch": {
+                            "type": "number",
+                            "description": "Pitch angle for euler actions."
+                        },
+                        "yaw": {
+                            "type": "number",
+                            "description": "Yaw angle for euler actions."
+                        },
+                        "on": {
+                            "type": "boolean",
+                            "description": "Boolean switch for joystick-style actions."
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "Boolean switch for recovery-related actions."
                         }
                     },
                     "required": ["action"]

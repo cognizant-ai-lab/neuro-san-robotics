@@ -29,6 +29,14 @@ _ROBOT_INIT_STATE = {
 }
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse common boolean environment variable values."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _coerce_status(ret):
     """
     Unitree SDK sometimes returns just 'code' and sometimes '(code, data)'.
@@ -94,6 +102,22 @@ class Go2Macros:
 
     def _log(self, msg: str):
         print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    def _maybe_enable_collision_avoidance(self):
+        """
+        Turn on the Unitree obstacle-avoidance mode before locomotion commands.
+
+        This uses the SDK's FreeAvoid API when available. It is enabled by
+        default and can be disabled with GO2_ENABLE_COLLISION_AVOIDANCE=0.
+        """
+        if not self.cli or not _env_flag("GO2_ENABLE_COLLISION_AVOIDANCE", default=True):
+            return
+
+        try:
+            self.cli.FreeAvoid(True)
+            self._log("Collision avoidance enabled")
+        except Exception as exc:
+            self._log(f"Could not enable collision avoidance: {exc}")
 
     # ----------------------------
     # BASIC MOTIONS
@@ -173,11 +197,13 @@ class Go2Macros:
     def move(self, vx=0.0, vy=0.0, vyaw=0.0):
         """Continuous movement command. Call stop_move() to stop."""
         if self.cli:
+            self._maybe_enable_collision_avoidance()
             self.cli.Move(vx=vx, vy=vy, vyaw=vyaw)
         self._log(f"Move (vx={vx}, vy={vy}, vyaw={vyaw})")
 
     def step_forward(self, vx=0.1, t=1.0):
         if self.cli:
+            self._maybe_enable_collision_avoidance()
             self.cli.Move(vx=vx, vy=0.0, vyaw=0.0)
             time.sleep(t)
             self.cli.StopMove()
@@ -185,6 +211,7 @@ class Go2Macros:
 
     def step_backward(self, vx=-0.1, t=1.0):
         if self.cli:
+            self._maybe_enable_collision_avoidance()
             self.cli.Move(vx=vx, vy=0.0, vyaw=0.0)
             time.sleep(t)
             self.cli.StopMove()
@@ -282,16 +309,19 @@ class Go2Macros:
     # ----------------------------
     def static_walk(self):
         if self.cli:
+            self._maybe_enable_collision_avoidance()
             self.cli.StaticWalk()
         self._log("Static walk gait")
 
     def trot_run(self):
         if self.cli:
+            self._maybe_enable_collision_avoidance()
             self.cli.TrotRun()
         self._log("Trot run gait")
 
     def free_walk(self):
         if self.cli:
+            self._maybe_enable_collision_avoidance()
             self.cli.FreeWalk()
         self._log("Free walk")
 
@@ -312,16 +342,19 @@ class Go2Macros:
 
     def classic_walk(self, flag):
         if self.cli:
+            self._maybe_enable_collision_avoidance()
             self.cli.ClassicWalk(flag)
         self._log(f"Classic walk (flag={flag})")
 
     def walk_upright(self, flag):
         if self.cli:
+            self._maybe_enable_collision_avoidance()
             self.cli.WalkUpright(flag)
         self._log(f"Walk upright (flag={flag})")
 
     def cross_step(self, flag):
         if self.cli:
+            self._maybe_enable_collision_avoidance()
             self.cli.CrossStep(flag)
         self._log(f"Cross step (flag={flag})")
 

@@ -84,7 +84,7 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
     elif action == "lie_down":
         go2.lie_down()
         logging.info("===== GO2 lying down...")
-    elif action == "recovery_stand":
+    elif action in ("recovery_stand", "recover_stand"):
         go2.recovery_stand()
         logging.info("===== GO2 recovery stand...")
     elif action == "sit":
@@ -264,7 +264,7 @@ class RobotMacros(CodedTool):
         # Validate the action is known before queueing
         known_actions = {
             "damp", "balance_stand", "stop_move", "stand_up", "lie_down",
-            "recovery_stand", "sit", "rise_sit", "euler", "look_left",
+            "recovery_stand", "recover_stand", "sit", "rise_sit", "euler", "look_left",
             "look_right", "move", "step_forward", "step_backward", "speed_level",
             "shake", "hello", "stretch", "content", "dance", "dance1", "dance2",
             "pose", "scrape", "heart_pose", "heart", "front_flip", "front_jump",
