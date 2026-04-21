@@ -6,7 +6,9 @@ import numpy as np
 from apps.conscious_assistant.scene_observer import SceneObserver
 from apps.conscious_assistant.scene_observer import REPO_ROOT
 from apps.conscious_assistant.scene_observer import _resolve_repo_relative_path
+from apps.conscious_assistant.scene_observer import build_observation_lines
 from apps.conscious_assistant.scene_observer import build_scene_input
+from apps.conscious_assistant.scene_observer import build_user_scene_input
 from apps.conscious_assistant.scene_observer import summarize_observed_entities
 from apps.conscious_assistant.scene_observer import summarize_observed_objects
 
@@ -41,6 +43,20 @@ class SceneObserverTests(unittest.TestCase):
         self.assertEqual(
             payload,
             "\n[04:20:00pm] user: [Silence]\n[04:20:00pm] saw: person\n[04:20:00pm] saw: chair",
+        )
+
+    def test_build_observation_lines_returns_saw_lines_only(self):
+        self.assertEqual(
+            build_observation_lines("[04:20:00pm]", ["Bobak", "chair"]),
+            ["[04:20:00pm] saw: Bobak", "[04:20:00pm] saw: chair"],
+        )
+
+    def test_build_user_scene_input_appends_observation_lines_to_user_turn(self):
+        payload = build_user_scene_input("[04:20:00pm]", "who is here?", ["Bobak", "chair"])
+
+        self.assertEqual(
+            payload,
+            "\n[04:20:00pm] user: who is here?\n[04:20:00pm] saw: Bobak\n[04:20:00pm] saw: chair",
         )
 
     def test_summarize_observed_entities_prefers_known_face_names_over_person(self):

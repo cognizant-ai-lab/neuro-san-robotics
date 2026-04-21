@@ -118,6 +118,7 @@ from flask_socketio import SocketIO
 
 from apps.conscious_assistant.conscious_assistant import conscious_thinker
 from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
+from apps.conscious_assistant.scene_observer import build_user_scene_input
 from apps.conscious_assistant.scene_observer import SceneObserver
 from apps.conscious_assistant.scene_observer import build_scene_input
 from apps.conscious_assistant.socketio_settings import socketio_client_transports
@@ -479,6 +480,20 @@ def conscious_thinking_process():
                 # Wait for acknowledgment to finish speaking
                 speech_queue.join()
                 logging.info("Acknowledgment speech complete, proceeding with agent")
+
+                observation = scene_observer.observe()
+                if observation is not None:
+                    emit_observation_update(observation)
+                    if observation.get("objects"):
+                        thoughts = build_user_scene_input(
+                            timestamp,
+                            user_input,
+                            observation["objects"],
+                        )
+                        logging.info(
+                            "Attached scene context to user turn: %s",
+                            ", ".join(observation["objects"]),
+                        )
 
             except queue.Empty:
                 observation = scene_observer.observe()

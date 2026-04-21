@@ -26,12 +26,11 @@ import cv2
 import numpy as np
 import json
 
+from coded_tools.unigo2.unitree_channel import initialize_unitree_channel
+from coded_tools.unigo2.unitree_channel import resolve_unitree_interface
+
 
 CameraSource = Union[int, str]
-_UNITREE_CHANNEL_STATE: Dict[str, Any] = {
-    "initialized": False,
-    "ifname": None,
-}
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -145,13 +144,7 @@ def _load_unitree_video_sdk():
 
 def _unitree_camera_interface(default_ifname: Optional[str] = None) -> Optional[str]:
     """Resolve the preferred network interface for Unitree SDK camera access."""
-    return (
-        default_ifname
-        or os.environ.get("VISION_CAMERA_INTERFACE")
-        or os.environ.get("GO2_CAMERA_INTERFACE")
-        or os.environ.get("CYCLONEDDS_NETWORK_INTERFACE")
-        or os.environ.get("IFNAME")
-    )
+    return resolve_unitree_interface(default_ifname)
 
 
 def _unitree_camera_available() -> bool:
@@ -175,15 +168,7 @@ class UnitreeVideoCapture:
 
     def _initialize(self) -> None:
         channel_factory_initialize, video_client_cls = _load_unitree_video_sdk()
-
-        channel_ifname = self.ifname
-        if not _UNITREE_CHANNEL_STATE["initialized"]:
-            if channel_ifname:
-                channel_factory_initialize(0, channel_ifname)
-            else:
-                channel_factory_initialize(0)
-            _UNITREE_CHANNEL_STATE["initialized"] = True
-            _UNITREE_CHANNEL_STATE["ifname"] = channel_ifname
+        initialize_unitree_channel(channel_factory_initialize, self.ifname)
 
         self._client = video_client_cls()
         self._client.SetTimeout(self.timeout)

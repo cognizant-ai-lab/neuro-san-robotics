@@ -95,13 +95,29 @@ def summarize_observed_entities(results: Dict[str, Any]) -> List[str]:
     return known_face_names + object_names
 
 
+def build_observation_lines(timestamp: str, object_names: List[str]) -> List[str]:
+    """Build timestamped `saw:` lines for detected objects or recognized faces."""
+    if not object_names:
+        return []
+
+    return [f"{timestamp} saw: {object_name}" for object_name in object_names]
+
+
 def build_scene_input(timestamp: str, object_names: List[str]) -> Optional[str]:
     """Build the agent input payload for a silent observation interval."""
-    if not object_names:
+    observation_lines = build_observation_lines(timestamp, object_names)
+    if not observation_lines:
         return None
 
     lines = [f"{timestamp} user: [Silence]"]
-    lines.extend(f"{timestamp} saw: {object_name}" for object_name in object_names)
+    lines.extend(observation_lines)
+    return "\n" + "\n".join(lines)
+
+
+def build_user_scene_input(timestamp: str, user_input: str, object_names: List[str]) -> str:
+    """Build a user-turn payload that includes the latest scene observations."""
+    lines = [f"{timestamp} user: {user_input}"]
+    lines.extend(build_observation_lines(timestamp, object_names))
     return "\n" + "\n".join(lines)
 
 

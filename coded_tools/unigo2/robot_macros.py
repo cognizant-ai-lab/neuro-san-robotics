@@ -278,6 +278,13 @@ class RobotMacros(CodedTool):
         if action_lower not in known_actions:
             return f"Unknown action: {action}"
 
+        go2 = Go2Macros()
+        if not getattr(go2, "available", False):
+            return (
+                f"Robot control is unavailable right now, so I cannot perform "
+                f"'{action_lower}'."
+            )
+
         # Queue the action for deferred execution (after speech completes)
         queue_deferred_action(action_lower, dict(args))
 

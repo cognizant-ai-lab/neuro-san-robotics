@@ -3,6 +3,9 @@ import time
 import platform
 import traceback
 
+from coded_tools.unigo2.unitree_channel import initialize_unitree_channel
+from coded_tools.unigo2.unitree_channel import resolve_unitree_interface
+
 USE_REAL_ROBOT = True
 IFNAME = "eth0"                     # "eth0" if you're on wired
 
@@ -50,7 +53,7 @@ def _coerce_status(ret):
 class Go2Macros:
     def __init__(self, use_robot=USE_REAL_ROBOT, ifname=IFNAME):
         self.use_robot = use_robot
-        self.ifname = ifname
+        self.ifname = resolve_unitree_interface(ifname)
         self.cli = None
         self.available = False
 
@@ -70,7 +73,7 @@ class Go2Macros:
         try:
             # --- Initialize DDS channel (matches go2_sport_client.py) ---
             self._log("🔍 Initializing ChannelFactory")
-            ChannelFactoryInitialize(0)
+            initialize_unitree_channel(ChannelFactoryInitialize, self.ifname)
 
             # --- Initialize Sport client (matches go2_sport_client.py) ---
             self._log("🔍 Initializing SportClient")

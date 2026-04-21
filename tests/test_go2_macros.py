@@ -1,7 +1,9 @@
 import os
 import unittest
+from unittest.mock import Mock
 from unittest.mock import patch
 
+import coded_tools.unigo2.go2_macros as go2_macros_module
 from coded_tools.unigo2.go2_macros import Go2Macros
 
 
@@ -23,6 +25,16 @@ class _FakeCli:
 
 
 class Go2MacrosTests(unittest.TestCase):
+    def tearDown(self):
+        go2_macros_module._ROBOT_INIT_STATE.update(
+            {
+                "attempted": False,
+                "available": True,
+                "error": None,
+                "reported_disabled": False,
+            }
+        )
+
     def test_move_enables_collision_avoidance_by_default(self):
         go2 = Go2Macros(use_robot=False)
         go2.cli = _FakeCli()
@@ -83,6 +95,24 @@ class Go2MacrosTests(unittest.TestCase):
                 ("FreeWalk",),
             ],
         )
+
+    def test_init_uses_shared_unitree_channel_initializer(self):
+        fake_client = Mock()
+        fake_client.SetTimeout = Mock()
+        fake_client.Init = Mock()
+        fake_sport_client_module = Mock()
+        fake_sport_client_module.SportClient.return_value = fake_client
+        fake_channel_initializer = object()
+
+        with patch.object(go2_macros_module, "sport_client", fake_sport_client_module):
+            with patch.object(go2_macros_module, "ChannelFactoryInitialize", new=fake_channel_initializer):
+                with patch.object(go2_macros_module, "initialize_unitree_channel") as init_channel:
+                    go2 = Go2Macros(use_robot=True, ifname="eth0")
+
+        init_channel.assert_called_once_with(fake_channel_initializer, "eth0")
+        fake_client.SetTimeout.assert_called_once_with(10.0)
+        fake_client.Init.assert_called_once_with()
+        self.assertTrue(go2.available)
 
 
 if __name__ == "__main__":
