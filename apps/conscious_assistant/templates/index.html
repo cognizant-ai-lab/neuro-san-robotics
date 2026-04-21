@@ -71,15 +71,18 @@
 
     <script>
         // var socket = io.connect('http://' + document.domain + ':' + location.port + '/chat');
+        const socketTransports = {{ socketio_transports|tojson }};
         const socket = io("/chat", {
             path: "/socket.io",
-            transports: ["websocket", "polling"],
+            transports: socketTransports,
+            upgrade: socketTransports.indexOf("websocket") !== -1,
         });
         const MAX_OBSERVATION_HISTORY = 20;
         const MAX_CHAT_HISTORY = 120;
         const MAX_THOUGHT_HISTORY = 120;
         var thoughtsInitialized = false;
         var chatHistoryInitialized = false;
+        var connectionIssueNotified = false;
         var isRecording = false;
         var micPermissionGranted = false;
         var isProcessing = false;  // Track when robot is processing a response
@@ -380,7 +383,29 @@
         });
 
         socket.on('connect', function() {
-            console.log('Websocket connected!');
+            console.log('Socket connected!');
+            connectionIssueNotified = false;
+            setInputDisabled(false);
+        });
+
+        socket.on('connect_error', function(err) {
+            console.error('Socket connection error:', err);
+            setInputDisabled(false);
+            if (!connectionIssueNotified) {
+                appendTextEntry(
+                    'assistant-thoughts',
+                    'thought-msg',
+                    'Connection issue: live updates are retrying over a safer transport.',
+                    '.thought-msg',
+                    MAX_THOUGHT_HISTORY,
+                );
+                connectionIssueNotified = true;
+            }
+        });
+
+        socket.on('disconnect', function(reason) {
+            console.warn('Socket disconnected:', reason);
+            setInputDisabled(false);
         });
 
         // Functions to enable/disable input controls during robot processing

@@ -133,50 +133,6 @@ Available actions include:
                             "type": "string",
                             "description": "The single-word name of the action to perform"
                         },
-                        "vx": {
-                            "type": "number",
-                            "description": "Forward velocity for move and step actions. Use small values like 0.1 to 0.2 for safe motion."
-                        },
-                        "vy": {
-                            "type": "number",
-                            "description": "Lateral velocity for move actions."
-                        },
-                        "vyaw": {
-                            "type": "number",
-                            "description": "Yaw velocity for move actions."
-                        },
-                        "t": {
-                            "type": "number",
-                            "description": "Duration in seconds for step_forward and step_backward."
-                        },
-                        "level": {
-                            "type": "number",
-                            "description": "Speed level for speed_level actions."
-                        },
-                        "flag": {
-                            "type": "boolean",
-                            "description": "Boolean flag used by gait and avoidance actions."
-                        },
-                        "roll": {
-                            "type": "number",
-                            "description": "Roll angle for euler actions."
-                        },
-                        "pitch": {
-                            "type": "number",
-                            "description": "Pitch angle for euler actions."
-                        },
-                        "yaw": {
-                            "type": "number",
-                            "description": "Yaw angle for euler actions."
-                        },
-                        "on": {
-                            "type": "boolean",
-                            "description": "Boolean switch for joystick-style actions."
-                        },
-                        "enabled": {
-                            "type": "boolean",
-                            "description": "Boolean switch for recovery-related actions."
-                        }
                     },
                     "required": ["action"]
                 }

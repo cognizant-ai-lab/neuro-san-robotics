@@ -120,6 +120,8 @@ from apps.conscious_assistant.conscious_assistant import conscious_thinker
 from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
 from apps.conscious_assistant.scene_observer import SceneObserver
 from apps.conscious_assistant.scene_observer import build_scene_input
+from apps.conscious_assistant.socketio_settings import socketio_client_transports
+from apps.conscious_assistant.socketio_settings import socketio_server_options
 from apps.conscious_assistant.conscious_assistant import tear_down_conscious_assistant
 
 
@@ -217,7 +219,8 @@ os.environ.setdefault("AGENT_TOOL_PATH", str(REPO_ROOT / "coded_tools"))
 os.environ.setdefault("VISION_FACE_DB_PATH", str(REPO_ROOT / "face_database"))
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
-socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
+SOCKETIO_OPTIONS = socketio_server_options()
+socketio = SocketIO(app, **SOCKETIO_OPTIONS)
 thread_started = False  # pylint: disable=invalid-name
 
 user_input_queue = queue.Queue()
@@ -239,6 +242,12 @@ def emit_observation_update(observation=None, sid=None):
     if sid is not None:
         emit_kwargs["to"] = sid
     socketio.emit("update_observation", payload, **emit_kwargs)
+
+
+def emit_initial_client_state(sid: str) -> None:
+    """Emit initial observation state after the Socket.IO connection is accepted."""
+    socketio.sleep(0)
+    emit_observation_update(sid=sid)
 
 
 
@@ -567,7 +576,7 @@ def conscious_thinking_process():
 def on_connect():
     """Start background task on connect."""
     global thread_started  # pylint: disable=global-statement
-    emit_observation_update(sid=request.sid)
+    socketio.start_background_task(emit_initial_client_state, request.sid)
     if not thread_started:
         thread_started = True
         # let socketio manage the green-thread
@@ -577,7 +586,11 @@ def on_connect():
 @app.route("/")
 def index():
     """Return the html."""
-    return render_template("index.html")
+    return render_template(
+        "index.html",
+        socketio_transports=socketio_client_transports(),
+        year=datetime.now().year,
+    )
 
 
 @app.route("/api/observation/latest.jpg")
@@ -741,6 +754,12 @@ if __name__ == "__main__":
             logging.info("Scene observer vision backend is ready")
         else:
             logging.warning("Scene observer vision backend did not initialize during startup")
+
+    logging.info(
+        "Socket.IO transport policy: transports=%s allow_upgrades=%s",
+        socketio_client_transports(),
+        SOCKETIO_OPTIONS.get("allow_upgrades"),
+    )
 
     ssl_ctx = None
     if os.path.exists(CERT) and os.path.exists(KEY):
