@@ -3,6 +3,7 @@
 # Note: Install neuro-san from source by disabling ddgs because there's an unsolvable dependency 'primp' that gets stuck on the pip install
 
 nsflow==0.5.20
+langchain-google-genai
 
 # To use a .env file for environment variables
 python-dotenv==1.0.1
