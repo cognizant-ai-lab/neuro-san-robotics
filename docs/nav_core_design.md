@@ -797,14 +797,105 @@ scipy>=1.10                                    # Spatial algorithms (Dijkstra, K
 - LiDAR + depth grid merging
 - Obstacles detected behind and to the sides of the robot
 
-### Phase 5: Advanced Features (Week 7+)
+### Phase 5: 3D Space Scanning & Persistent Spatial Memory (Week 7-9)
+
+**Goal**: The robot can scan a space, store a persistent spatial representation, and update it as the environment changes.
+
+**Why this matters**: Phases 1-4 give the robot reactive obstacle avoidance and pre-defined topological navigation. But for true autonomy, the robot must **build its own understanding of a space** and remember it across power cycles. Without spatial memory, every boot starts from zero.
+
+**Approach: Hybrid Spatial Memory** (not full metric SLAM)
+
+Full SLAM (e.g., RTABMap, ORB-SLAM3) continuously builds and maintains a dense 3D map. This is compute-intensive and requires 2-4GB RAM on top of existing vision workloads — tight on Orin Nano's 8GB. Instead, we use a lighter hybrid approach:
+
+#### 5a. Exploration & Scanning
+
+When commanded to explore (or during idle patrol), the robot:
+1. Walks along edges of the topological graph (or performs a systematic sweep in unknown areas)
+2. At regular intervals (~every 1-2 meters or when turning), captures a **spatial snapshot**:
+   - Downsampled depth frame → compressed 2D occupancy grid (the same ObstacleGrid format used by local planner)
+   - Robot pose from odometry (x, y, yaw)
+   - YOLO detections visible at this position (landmark candidates)
+3. At "interesting" locations (room entrances, intersections, dead ends), creates a new **MapNode** in the topological graph
+
+#### 5b. Persistent Storage Format
+
+```
+maps/
+├── cail_lab.json                  # Topological graph (nodes + edges)
+├── spatial_data/
+│   ├── charging_station.npz       # Compressed occupancy grid at this node
+│   ├── main_desk_area.npz         # Compressed occupancy grid at this node
+│   ├── kitchen.npz                # Compressed occupancy grid at this node
+│   └── landmarks.json             # Visual landmarks tied to nodes
+```
+
+Each spatial snapshot (`.npz` file) stores:
+```python
+{
+    "grid": np.ndarray,        # 80x80 float32 occupancy grid
+    "resolution": 0.05,        # meters per cell
+    "pose": [x, y, yaw],       # robot pose when captured
+    "timestamp": 1714200000.0, # when captured
+    "landmarks": [             # YOLO objects visible at this position
+        {"class": "couch", "bearing": 0.3, "distance": 2.1},
+        {"class": "potted plant", "bearing": -0.5, "distance": 1.8}
+    ]
+}
+```
+
+Total storage per node: ~30KB (compressed). A 50-node map uses ~1.5MB. Trivial on disk.
+
+#### 5c. Map Updates (Incremental, Not Full Rebuild)
+
+When the robot revisits a known location:
+
+1. **Localization check**: Compare current depth scan to stored spatial signature using normalized cross-correlation or IoU on the occupancy grids
+2. **Change detection**: If similarity is below threshold (e.g., < 0.7):
+   - Update the stored grid with the new scan
+   - Check if new objects block previously-clear edges → mark edges as non-traversable
+   - Check if previously-blocked edges are now clear → restore traversability
+   - Log the change for agent awareness ("I noticed the hallway to the kitchen is now blocked by a cart")
+3. **Landmark update**: Add/remove visual landmarks based on current YOLO detections
+
+This runs in ~15ms per comparison (numpy correlation on 80x80 grids). No GPU needed.
+
+#### 5d. Auto-Discovery of New Nodes
+
+During exploration, if the robot reaches a position that is far (>2m) from any existing MapNode:
+1. Create a new MapNode at the current position
+2. Connect it to the nearest existing node with an edge
+3. Capture spatial snapshot
+4. Optionally name it based on visible landmarks ("near_the_couch") or leave as auto-generated ("node_17")
+5. Save updated map to disk
+
+This means the topological map **grows organically** as the robot explores, rather than requiring manual creation.
+
+#### 5e. Compute Budget for Scanning
+
+| Operation | Time | When |
+|-----------|------|------|
+| Capture spatial snapshot | ~12ms | Every 1-2m during exploration |
+| Save snapshot to disk | ~5ms | Async, non-blocking |
+| Compare to stored snapshot | ~15ms | On revisiting a node |
+| Update topological graph | ~1ms | On change detection |
+| **Total per node visit** | **~33ms** | **Negligible** |
+
+**Deliverables**:
+- `SpatialMemory` class in nav_core: capture, store, compare, update
+- `maps/spatial_data/` directory structure
+- Exploration command in nav_planner: `{"command": "explore", "area": "unknown"}` or `{"command": "scan_area"}`
+- Auto-discovery of new nodes during exploration
+- Change detection and edge traversability updates
+- Agent notification of spatial changes
+
+### Phase 6: Additional Advanced Features (Week 10+)
 
 **Potential additions** (prioritize based on need):
-- **Map learning**: Robot explores environment and builds topological map by recording positions
-- **Visual landmarks**: Associate YOLO detections with map nodes ("the node near the potted plant")
 - **Step/stair detection**: Depth camera ground plane discontinuity analysis
 - **Follow person**: Use YOLO person detection + depth to follow at a fixed distance
 - **Return to charger**: Navigate to charging station on low battery (if battery state available via SDK LowState topic)
+- **Multi-floor maps**: Separate topological graphs per floor, connected by stair/elevator nodes
+- **Visual place recognition**: Use vision_core embeddings to recognize revisited locations (loop closure without full SLAM)
 
 ---
 
