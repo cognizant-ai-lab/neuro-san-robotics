@@ -1,0 +1,74 @@
+{
+  "name": "CAIL Lab - San Francisco",
+  "version": "1.0",
+  "nodes": [
+    {
+      "name": "charging_station",
+      "x": 0.0,
+      "y": 0.0,
+      "description": "Home base and charging dock",
+      "tags": ["home", "charging"]
+    },
+    {
+      "name": "main_desk_area",
+      "x": 3.0,
+      "y": 0.0,
+      "description": "Open desk area with workstations",
+      "tags": ["room", "work"]
+    },
+    {
+      "name": "kitchen",
+      "x": 3.0,
+      "y": 4.0,
+      "description": "Kitchen and break area",
+      "tags": ["room", "kitchen"]
+    },
+    {
+      "name": "entrance",
+      "x": -2.0,
+      "y": 0.0,
+      "description": "Lab main entrance",
+      "tags": ["door", "entrance"]
+    },
+    {
+      "name": "demo_area",
+      "x": 5.0,
+      "y": 2.0,
+      "description": "Demo and presentation area",
+      "tags": ["room", "demo"]
+    }
+  ],
+  "edges": [
+    {
+      "from": "charging_station",
+      "to": "main_desk_area",
+      "distance": 3.0,
+      "description": "straight path through open floor"
+    },
+    {
+      "from": "main_desk_area",
+      "to": "kitchen",
+      "distance": 4.0,
+      "description": "through hallway past conference room"
+    },
+    {
+      "from": "charging_station",
+      "to": "entrance",
+      "distance": 2.0,
+      "description": "turn left toward entrance"
+    },
+    {
+      "from": "main_desk_area",
+      "to": "demo_area",
+      "distance": 2.8,
+      "description": "past the whiteboard"
+    },
+    {
+      "from": "demo_area",
+      "to": "kitchen",
+      "distance": 2.8,
+      "description": "through side corridor"
+    }
+  ],
+  "exclusion_zones": []
+}

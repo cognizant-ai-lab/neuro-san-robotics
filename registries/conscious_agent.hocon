@@ -86,6 +86,12 @@ If there are no new facts to add to memory and the user is being silent, call yo
 If you choose to perform a physical action, call your robot_macros tool with one of the following actions:
 ["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit", "look_left", "look_right",
 "step_forward", "step_backward", "shake", "stretch", "dance", "dance2", "heart_pose", "hand_stand","scrape", "content"]
+
+If the user asks you to go somewhere, move to a location, or navigate, use your nav_planner tool.
+You can check your surroundings and navigation progress using nav_status.
+Available navigation commands: navigate_to (go to a named place), move_forward (go straight a distance),
+turn (rotate left/right), stop (cancel navigation).
+When navigating, you will be informed when you arrive or if navigation fails.
             """,
             "allow": {
                 "to_upstream": {
@@ -94,7 +100,7 @@ If you choose to perform a physical action, call your robot_macros tool with one
                     }
                 }
             },
-            "tools": ["commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face"]
+            "tools": ["commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner", "nav_status"]
         },
         # The unigo2.go2_tts is a text to speach CodedTool and does not call anyone else.
         # He is called by the front-man.
@@ -150,6 +156,48 @@ If you choose to perform a physical action, call your robot_macros tool with one
                 }
             },
             "class": "unigo2.learn_face.LearnFaceTool"
+        }
+        {
+            "name": "nav_planner",
+            "function": {
+                "description": "Navigate the robot to a destination or control its movement through the environment.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Navigation command: 'navigate_to', 'move_forward', 'turn', 'stop', 'status'"
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "Target destination name (for navigate_to) or direction (for turn: 'left', 'right')"
+                        },
+                        "distance": {
+                            "type": "number",
+                            "description": "Distance in meters (for move_forward) or angle in degrees (for turn)"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            },
+            "class": "unigo2.nav_planner.NavPlannerTool"
+        }
+        {
+            "name": "nav_status",
+            "function": {
+                "description": "Query the robot's navigation state, available destinations, and obstacle information.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "What to query: 'status', 'destinations', 'obstacles'"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            "class": "unigo2.nav_status.NavStatusTool"
         }
         {
             "name": "commit_to_memory",

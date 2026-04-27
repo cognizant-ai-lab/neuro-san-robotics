@@ -1,0 +1,543 @@
+
+# Copyright (C) 2023-2025 Cognizant Digital Business, Evolutionary AI.
+# All Rights Reserved.
+# Issued under the Academic Public License.
+#
+# You can be released from the terms, and requirements of the Academic Public
+# License by purchasing a commercial license.
+# Purchase of a commercial license is mandatory for any use of the
+# neuro-san SDK Software in commercial settings.
+#
+# END COPYRIGHT
+
+"""
+DepthProcessor - Depth Camera and LiDAR Processing for Navigation
+
+Converts depth camera frames and optional LiDAR data into 2D obstacle grids
+that the local planner uses for reactive obstacle avoidance.
+
+Supports:
+1. Intel RealSense depth cameras (via pyrealsense2)
+2. Generic USB depth cameras (via OpenCV)
+3. Simulation mode with synthetic obstacles (for desktop testing)
+
+Processing pipeline (~10ms on Orin Nano CPU):
+  Depth frame -> Downsample -> Height threshold -> 2D projection -> Inflate -> ObstacleGrid
+"""
+
+import os
+import math
+import time
+import logging
+import platform
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Environment helpers (same pattern as vision_core.py)
+# ---------------------------------------------------------------------------
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
+# ---------------------------------------------------------------------------
+# Optional imports with graceful fallback
+# ---------------------------------------------------------------------------
+
+try:
+    import pyrealsense2 as rs
+    _HAS_REALSENSE = True
+except ImportError:
+    rs = None
+    _HAS_REALSENSE = False
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ObstacleGrid:
+    """2D local obstacle map centered on the robot."""
+    grid: np.ndarray           # shape (rows, cols), dtype float32, 0.0=free, 1.0=occupied
+    resolution: float          # meters per cell (e.g., 0.05 = 5cm)
+    origin_row: int            # robot's row in the grid
+    origin_col: int            # robot's col in the grid
+    timestamp: float = 0.0
+    nearest_obstacle_m: float = float("inf")
+    nearest_obstacle_bearing: float = 0.0  # radians, 0=ahead, positive=left
+
+
+@dataclass
+class DepthProcessorConfig:
+    """Configuration for depth processing pipeline."""
+    # Grid parameters
+    grid_rows: int = 80
+    grid_cols: int = 80
+    grid_resolution: float = 0.05   # meters per cell -> 4m x 4m FOV
+
+    # Height thresholds (meters, relative to camera mount height)
+    ground_height: float = 0.05     # below this = ground, ignore
+    obstacle_max_height: float = 0.60  # above this = overhead, ignore
+    camera_mount_height: float = 0.30  # Go2 front camera height from ground
+
+    # Obstacle inflation
+    robot_half_width: float = 0.15  # meters, for obstacle dilation
+
+    # Depth camera parameters
+    depth_width: int = 640
+    depth_height: int = 480
+    depth_fps: int = 30
+    process_width: int = 320        # downsample target
+    process_height: int = 240
+
+    # Range limits
+    min_depth_m: float = 0.1
+    max_depth_m: float = 4.0
+
+    # Simulation
+    simulation_mode: bool = False
+
+
+# ---------------------------------------------------------------------------
+# DepthProcessor
+# ---------------------------------------------------------------------------
+
+class DepthProcessor:
+    """
+    Processes depth camera input into obstacle grids for the local planner.
+
+    Thread-safe: get_obstacle_grid() can be called from any thread.
+    The depth capture runs in a background thread at the configured FPS.
+    """
+
+    def __init__(self, config: Optional[DepthProcessorConfig] = None):
+        self._config = config or self._config_from_env()
+        self._lock = threading.Lock()
+        self._latest_grid: Optional[ObstacleGrid] = None
+        self._pipeline = None          # RealSense pipeline
+        self._cv_capture = None        # OpenCV VideoCapture fallback
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._backend = "none"
+        self._inflation_kernel = self._build_inflation_kernel()
+
+        if self._config.simulation_mode:
+            self._backend = "simulation"
+            logger.info("DepthProcessor: simulation mode (synthetic obstacles)")
+            return
+
+        self._init_camera()
+
+    @staticmethod
+    def _config_from_env() -> DepthProcessorConfig:
+        return DepthProcessorConfig(
+            grid_rows=_env_int("NAV_GRID_ROWS", 80),
+            grid_cols=_env_int("NAV_GRID_COLS", 80),
+            grid_resolution=_env_float("NAV_GRID_RESOLUTION", 0.05),
+            ground_height=_env_float("NAV_GROUND_HEIGHT", 0.05),
+            obstacle_max_height=_env_float("NAV_OBSTACLE_MAX_HEIGHT", 0.60),
+            camera_mount_height=_env_float("NAV_CAMERA_MOUNT_HEIGHT", 0.30),
+            robot_half_width=_env_float("NAV_ROBOT_HALF_WIDTH", 0.15),
+            min_depth_m=_env_float("NAV_MIN_DEPTH", 0.1),
+            max_depth_m=_env_float("NAV_MAX_DEPTH", 4.0),
+            simulation_mode=_env_flag("NAV_SIMULATION_MODE", False),
+        )
+
+    # ------------------------------------------------------------------
+    # Camera initialization
+    # ------------------------------------------------------------------
+
+    def _init_camera(self):
+        source = os.environ.get("NAV_DEPTH_CAMERA_SOURCE", "auto")
+
+        if source != "auto" and not source.startswith("realsense"):
+            self._init_opencv_depth(source)
+            return
+
+        if _HAS_REALSENSE:
+            if self._init_realsense():
+                return
+
+        if source == "auto":
+            self._try_opencv_depth_auto()
+
+        if self._backend == "none":
+            logger.warning(
+                "DepthProcessor: no depth camera found. "
+                "Navigation will use vision-only fallback or be disabled."
+            )
+
+    def _init_realsense(self) -> bool:
+        try:
+            ctx = rs.context()
+            devices = ctx.query_devices()
+            if len(devices) == 0:
+                logger.info("DepthProcessor: no RealSense devices found")
+                return False
+
+            self._pipeline = rs.pipeline()
+            cfg = rs.config()
+            cfg.enable_stream(
+                rs.stream.depth,
+                self._config.depth_width,
+                self._config.depth_height,
+                rs.format.z16,
+                self._config.depth_fps,
+            )
+            self._pipeline.start(cfg)
+            self._backend = "realsense"
+            logger.info(
+                "DepthProcessor: RealSense initialized (%dx%d @ %d fps)",
+                self._config.depth_width,
+                self._config.depth_height,
+                self._config.depth_fps,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("DepthProcessor: RealSense init failed: %s", exc)
+            self._pipeline = None
+            return False
+
+    def _init_opencv_depth(self, source: str):
+        try:
+            idx = int(source)
+            cap = cv2.VideoCapture(idx)
+        except ValueError:
+            cap = cv2.VideoCapture(source)
+
+        if cap.isOpened():
+            self._cv_capture = cap
+            self._backend = "opencv"
+            logger.info("DepthProcessor: OpenCV depth camera opened: %s", source)
+        else:
+            cap.release()
+            logger.warning("DepthProcessor: failed to open depth camera: %s", source)
+
+    def _try_opencv_depth_auto(self):
+        for idx in range(4):
+            cap = cv2.VideoCapture(idx)
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None and len(frame.shape) == 2:
+                    self._cv_capture = cap
+                    self._backend = "opencv"
+                    logger.info("DepthProcessor: found depth camera at index %d", idx)
+                    return
+                cap.release()
+
+    # ------------------------------------------------------------------
+    # Inflation kernel
+    # ------------------------------------------------------------------
+
+    def _build_inflation_kernel(self) -> np.ndarray:
+        radius_cells = max(1, int(self._config.robot_half_width / self._config.grid_resolution))
+        size = 2 * radius_cells + 1
+        kernel = np.zeros((size, size), dtype=np.uint8)
+        cv2.circle(kernel, (radius_cells, radius_cells), radius_cells, 1, -1)
+        return kernel
+
+    # ------------------------------------------------------------------
+    # Background capture thread
+    # ------------------------------------------------------------------
+
+    def start(self):
+        if self._running:
+            return
+        if self._backend == "none":
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True, name="depth-capture")
+        self._thread.start()
+        logger.info("DepthProcessor: capture thread started (%s backend)", self._backend)
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        self._release_camera()
+
+    def _release_camera(self):
+        if self._pipeline:
+            try:
+                self._pipeline.stop()
+            except Exception:
+                pass
+            self._pipeline = None
+        if self._cv_capture:
+            self._cv_capture.release()
+            self._cv_capture = None
+
+    def _capture_loop(self):
+        while self._running:
+            cycle_start = time.monotonic()
+            try:
+                depth_frame = self._read_depth_frame()
+                if depth_frame is not None:
+                    grid = self._process_depth_to_grid(depth_frame)
+                    with self._lock:
+                        self._latest_grid = grid
+            except Exception as exc:
+                logger.error("DepthProcessor: capture error: %s", exc)
+
+            elapsed = time.monotonic() - cycle_start
+            sleep_time = (1.0 / self._config.depth_fps) - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+    # ------------------------------------------------------------------
+    # Depth frame reading
+    # ------------------------------------------------------------------
+
+    def _read_depth_frame(self) -> Optional[np.ndarray]:
+        if self._backend == "realsense":
+            return self._read_realsense()
+        elif self._backend == "opencv":
+            return self._read_opencv()
+        elif self._backend == "simulation":
+            return self._generate_synthetic_depth()
+        return None
+
+    def _read_realsense(self) -> Optional[np.ndarray]:
+        frames = self._pipeline.wait_for_frames(timeout_ms=500)
+        depth_frame = frames.get_depth_frame()
+        if not depth_frame:
+            return None
+        depth_image = np.asanyarray(depth_frame.get_data())
+        return depth_image.astype(np.float32) * depth_frame.get_units()
+
+    def _read_opencv(self) -> Optional[np.ndarray]:
+        ret, frame = self._cv_capture.read()
+        if not ret or frame is None:
+            return None
+        if len(frame.shape) == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return frame.astype(np.float32) / 1000.0
+
+    def _generate_synthetic_depth(self) -> np.ndarray:
+        h, w = self._config.process_height, self._config.process_width
+        depth = np.full((h, w), 3.0, dtype=np.float32)
+
+        # Simulated wall 2 meters ahead, spanning the middle third
+        wall_col_start = w // 3
+        wall_col_end = 2 * w // 3
+        depth[h // 4 : 3 * h // 4, wall_col_start:wall_col_end] = 2.0
+
+        return depth
+
+    # ------------------------------------------------------------------
+    # Depth -> ObstacleGrid processing
+    # ------------------------------------------------------------------
+
+    def _process_depth_to_grid(self, depth_m: np.ndarray) -> ObstacleGrid:
+        cfg = self._config
+        now = time.time()
+
+        # Step 1: Downsample
+        if depth_m.shape[0] != cfg.process_height or depth_m.shape[1] != cfg.process_width:
+            depth_m = cv2.resize(
+                depth_m,
+                (cfg.process_width, cfg.process_height),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        # Step 2: Mask invalid depths
+        valid = (depth_m > cfg.min_depth_m) & (depth_m < cfg.max_depth_m)
+
+        # Step 3: For each pixel, compute 3D position in robot frame
+        # Camera intrinsics approximation (can be replaced with calibration)
+        fx = cfg.process_width * 0.6   # focal length in pixels (approximate for D435i)
+        fy = cfg.process_height * 0.6
+        cx = cfg.process_width / 2.0
+        cy = cfg.process_height / 2.0
+
+        v_coords, u_coords = np.mgrid[0:cfg.process_height, 0:cfg.process_width]
+        z = depth_m  # depth = distance along optical axis
+
+        # Camera frame: x=right, y=down, z=forward
+        x_cam = (u_coords.astype(np.float32) - cx) * z / fx
+        y_cam = (v_coords.astype(np.float32) - cy) * z / fy
+
+        # Robot frame: x=forward, y=left, height=up
+        # Camera is mounted facing forward, so camera-z = robot-x, camera-x = robot-(-y)
+        x_robot = z                    # forward distance
+        y_robot = -x_cam               # left/right (camera-x is right, robot-y is left)
+        height = -(y_cam - cfg.camera_mount_height)  # height above ground
+
+        # Step 4: Height threshold to find obstacles
+        is_obstacle = valid & (height > cfg.ground_height) & (height < cfg.obstacle_max_height)
+
+        # Step 5: Project obstacle points to 2D grid
+        grid = np.zeros((cfg.grid_rows, cfg.grid_cols), dtype=np.float32)
+        origin_row = cfg.grid_rows - 1  # robot at bottom center
+        origin_col = cfg.grid_cols // 2
+
+        obs_x = x_robot[is_obstacle]
+        obs_y = y_robot[is_obstacle]
+
+        grid_row = origin_row - (obs_x / cfg.grid_resolution).astype(np.int32)
+        grid_col = origin_col - (obs_y / cfg.grid_resolution).astype(np.int32)
+
+        in_bounds = (
+            (grid_row >= 0) & (grid_row < cfg.grid_rows) &
+            (grid_col >= 0) & (grid_col < cfg.grid_cols)
+        )
+        grid_row = grid_row[in_bounds]
+        grid_col = grid_col[in_bounds]
+
+        if len(grid_row) > 0:
+            np.add.at(grid, (grid_row, grid_col), 1.0)
+            grid = np.clip(grid, 0.0, 1.0)
+
+        # Step 6: Inflate obstacles by robot radius
+        if np.any(grid > 0):
+            grid_u8 = (grid * 255).astype(np.uint8)
+            grid_u8 = cv2.dilate(grid_u8, self._inflation_kernel, iterations=1)
+            grid = (grid_u8 > 0).astype(np.float32)
+
+        # Step 7: Compute nearest obstacle distance and bearing
+        nearest_dist = float("inf")
+        nearest_bearing = 0.0
+        if len(obs_x) > 0:
+            distances = np.sqrt(obs_x ** 2 + obs_y ** 2)
+            min_idx = np.argmin(distances)
+            nearest_dist = float(distances[min_idx])
+            nearest_bearing = float(math.atan2(obs_y[min_idx], obs_x[min_idx]))
+
+        # Step 8: Ground plane validity check
+        # If very few depth pixels are valid in the lower half of the frame,
+        # the ground plane may be missing (cliff/step ahead)
+        lower_half_valid = valid[cfg.process_height // 2 :, :]
+        ground_valid_ratio = np.sum(lower_half_valid) / max(lower_half_valid.size, 1)
+        if ground_valid_ratio < 0.1:
+            logger.warning("DepthProcessor: ground plane may be missing (%.1f%% valid)", ground_valid_ratio * 100)
+
+        return ObstacleGrid(
+            grid=grid,
+            resolution=cfg.grid_resolution,
+            origin_row=origin_row,
+            origin_col=origin_col,
+            timestamp=now,
+            nearest_obstacle_m=nearest_dist,
+            nearest_obstacle_bearing=nearest_bearing,
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def get_obstacle_grid(self) -> Optional[ObstacleGrid]:
+        """Return the latest obstacle grid (thread-safe)."""
+        if self._backend == "simulation":
+            depth = self._generate_synthetic_depth()
+            return self._process_depth_to_grid(depth)
+
+        with self._lock:
+            return self._latest_grid
+
+    def get_single_frame_grid(self) -> Optional[ObstacleGrid]:
+        """Capture and process a single depth frame (blocking). Useful for scanning."""
+        depth = self._read_depth_frame()
+        if depth is None:
+            return None
+        return self._process_depth_to_grid(depth)
+
+    @property
+    def backend(self) -> str:
+        return self._backend
+
+    @property
+    def is_available(self) -> bool:
+        return self._backend != "none"
+
+    def get_obstacle_summary(self) -> str:
+        """Human-readable obstacle summary for agent consumption."""
+        grid = self.get_obstacle_grid()
+        if grid is None:
+            return "No depth data available."
+
+        occupied_cells = int(np.sum(grid.grid > 0))
+        total_cells = grid.grid.size
+        occupied_pct = (occupied_cells / total_cells) * 100
+
+        parts = [f"Obstacle grid: {occupied_pct:.0f}% occupied"]
+
+        if grid.nearest_obstacle_m < float("inf"):
+            bearing_deg = math.degrees(grid.nearest_obstacle_bearing)
+            if abs(bearing_deg) < 10:
+                direction = "directly ahead"
+            elif bearing_deg > 0:
+                direction = f"{abs(bearing_deg):.0f} degrees to the left"
+            else:
+                direction = f"{abs(bearing_deg):.0f} degrees to the right"
+            parts.append(f"Nearest obstacle: {grid.nearest_obstacle_m:.2f}m {direction}")
+        else:
+            parts.append("No obstacles within range")
+
+        return ". ".join(parts) + "."
+
+    def __del__(self):
+        self.stop()
+
+
+# ---------------------------------------------------------------------------
+# Vision-based fallback distance estimation
+# ---------------------------------------------------------------------------
+
+def estimate_obstacle_distance_from_bbox(
+    bbox: List[int],
+    image_height: int,
+    camera_fov_v: float = 0.78,
+    camera_height: float = 0.30,
+) -> float:
+    """
+    Rough distance estimate from a YOLO bounding box bottom edge.
+    Objects whose bottom edge is lower in the image are closer.
+
+    Uses simplified pinhole camera geometry. Accuracy is approximately +/- 50%.
+    Useful only as a last-resort fallback when no depth camera is available.
+    """
+    bottom_y = max(bbox[1], bbox[3])
+    image_center_y = image_height / 2.0
+
+    pixel_below_center = bottom_y - image_center_y
+    if pixel_below_center <= 0:
+        return 10.0
+
+    angle_below_horizon = (pixel_below_center / image_height) * camera_fov_v
+    if angle_below_horizon <= 0.01:
+        return 10.0
+
+    distance = camera_height / math.tan(angle_below_horizon)
+    return max(0.1, min(distance, 10.0))

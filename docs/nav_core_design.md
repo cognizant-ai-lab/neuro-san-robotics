@@ -1,5 +1,11 @@
 # Nav Core: Navigation Module Design for CAIL-E (Unitree Go2 EDU)
 
+## 0. Design Principle: Real-Time Autonomy
+
+Nav_core runs as an **independent real-time loop at 10 Hz**. Once a goal is set (e.g., "go to kitchen"), the navigation loop makes all obstacle avoidance and path-following decisions autonomously — it never waits for an LLM agent response. The Neuro SAN agent layer (nav_planner CodedTool) is a thin command interface that sets goals and queries status, but does not participate in real-time move decisions. Nav_core is fully usable as a standalone Python module without the agent framework.
+
+---
+
 ## 1. Research Summary & Approach Selection
 
 This section evaluates existing navigation approaches for quadruped robots and selects the architecture best suited to our hardware constraints (Nvidia Jetson Orin Nano, 40 TOPS) and software stack (standalone Neuro SAN + CycloneDDS, no ROS2).
@@ -311,7 +317,65 @@ The safety monitor is called on **every iteration** of the 10 Hz navigation loop
 
 ---
 
-## 8. 4D LiDAR Integration
+## 8. Glass Wall and Transparent Obstacle Detection
+
+Glass walls are a known challenge for robotic navigation — they are invisible to most sensors.
+
+### Sensor Capabilities Against Glass
+
+| Sensor | Detects Glass? | Notes |
+|--------|---------------|-------|
+| RGB camera (YOLO) | No | Glass is visually transparent |
+| Depth camera (RealSense IR) | Partially | Active IR reflects off glass at some angles; shows as noisy/flickering depth or invalid regions |
+| 4D LiDAR | No | Laser passes through glass |
+| Ultrasonic | **Yes** | Sound waves reflect off glass reliably — this is the primary solution |
+| Foot force sensors | **Yes** (reactive) | Detects unexpected contact after the fact |
+
+### Detection Strategy (Multi-Layered)
+
+1. **Depth camera anomaly detection** (primary, proactive): When the depth camera returns "no valid depth" in a region where floor should be visible (based on camera geometry), treat it as a potential transparent obstacle. Glass causes characteristic patterns: valid depth on either side but a void in the middle. This heuristic catches most indoor glass walls.
+
+2. **Ultrasonic cross-check** (if accessible via Go2 SDK): The Go2 EDU has built-in ultrasonic sensors. Ultrasound reliably reflects off glass. If the depth camera shows "clear" but ultrasonic shows "blocked," flag it as a transparent obstacle.
+
+3. **Map annotations** (static): Known glass walls can be marked in the topological map with a `"transparent_wall"` tag, so the global planner routes around them.
+
+4. **Contact-based learning** (reactive): If foot force sensors detect unexpected contact with no obstacle in the grid, the robot stops, backs up, and marks the location as a transparent obstacle in its spatial memory for future avoidance.
+
+### No-Bot Zones
+
+A complementary approach: define **exclusion zones** where the robot should never navigate, regardless of sensor readings. Useful for:
+- Known glass walls and transparent barriers
+- Restricted areas (server rooms, executive offices)
+- Unsafe zones (stairs, loading docks, wet floors)
+
+Implementation: Add `"exclusion_zones"` to the topological map JSON:
+```json
+{
+    "exclusion_zones": [
+        {
+            "name": "glass_wall_conference_room",
+            "type": "line",
+            "points": [[2.0, 3.0], [2.0, 6.0]],
+            "buffer_m": 0.5
+        },
+        {
+            "name": "server_room",
+            "type": "rectangle",
+            "min": [5.0, 1.0], "max": [8.0, 3.0]
+        }
+    ]
+}
+```
+
+The safety monitor checks if the robot's projected path enters any exclusion zone on every nav cycle. The global planner avoids routing through them. These zones can be defined manually or learned from contact events (see detection strategy #4 above).
+
+### Implementation
+
+The depth camera anomaly detection is implementable in Phase 1 as part of the DepthProcessor pipeline: after the ground plane removal step, check for "void regions" (contiguous areas of invalid depth surrounded by valid depth at similar distances). These are likely glass surfaces. Contact-learned obstacles and no-bot-zones are added in Phase 5 as part of spatial memory.
+
+---
+
+## 9. 4D LiDAR Integration
 
 The Go2 EDU has a built-in **Unitree L1 4D LiDAR** that is not yet accessed in the codebase.
 
@@ -342,7 +406,7 @@ The Go2 EDU has a built-in **Unitree L1 4D LiDAR** that is not yet accessed in t
 
 ---
 
-## 9. Compute Budget (Orin Nano 40 TOPS)
+## 10. Compute Budget (Orin Nano 40 TOPS)
 
 ### Hardware Specs
 
@@ -370,7 +434,7 @@ Nav_core is **CPU-only**. It leaves the GPU entirely available for vision_core's
 
 ---
 
-## 10. Architecture Overview
+## 11. Architecture Overview
 
 ```
                         +-----------------------+
@@ -416,7 +480,7 @@ Nav_core is **CPU-only**. It leaves the GPU entirely available for vision_core's
 
 ---
 
-## 11. Module Decomposition
+## 12. Module Decomposition
 
 ### New Files
 
@@ -440,7 +504,7 @@ Nav_core is **CPU-only**. It leaves the GPU entirely available for vision_core's
 
 ---
 
-## 12. Key Data Structures
+## 13. Key Data Structures
 
 ```python
 from dataclasses import dataclass
@@ -517,7 +581,7 @@ class MapEdge:
 
 ---
 
-## 13. Navigation State Machine
+## 14. Navigation State Machine
 
 ```
                     +------------+
@@ -561,7 +625,7 @@ class MapEdge:
 
 ---
 
-## 14. Navigation Loop (10 Hz)
+## 15. Navigation Loop (10 Hz)
 
 ```python
 def _nav_loop(self):
@@ -619,7 +683,7 @@ def _nav_loop(self):
 
 ---
 
-## 15. CodedTool Integration (HOCON)
+## 16. CodedTool Integration (HOCON)
 
 ### NavPlanner Tool Registration
 
@@ -696,7 +760,7 @@ When navigating, you will be informed when you arrive or if navigation fails.
 
 ---
 
-## 16. Graceful Degradation
+## 17. Graceful Degradation
 
 Following the project's existing pattern where every module handles failures gracefully (vision_core works without TensorRT, go2_macros works in simulation mode):
 
@@ -712,7 +776,7 @@ Following the project's existing pattern where every module handles failures gra
 
 ---
 
-## 17. Environment Variables
+## 18. Environment Variables
 
 Following existing patterns from `vision_core.py` (`_env_flag()`, `_env_float()`):
 
@@ -733,7 +797,7 @@ Following existing patterns from `vision_core.py` (`_env_flag()`, `_env_float()`
 
 ---
 
-## 18. Dependencies
+## 19. Dependencies
 
 ### New Python Packages
 
@@ -754,7 +818,7 @@ scipy>=1.10                                    # Spatial algorithms (Dijkstra, K
 
 ---
 
-## 19. Phased Development Plan
+## 20. Phased Development Plan
 
 ### Phase 1: Foundation - Safe Local Navigation (Week 1-2)
 
@@ -900,7 +964,7 @@ This means the topological map **grows organically** as the robot explores, rath
 
 ---
 
-## 20. Testing Strategy
+## 21. Testing Strategy
 
 ### Unit Tests (No Hardware Required)
 
@@ -985,7 +1049,7 @@ class TestNavCoreOnRobot(unittest.TestCase):
 
 ---
 
-## 21. Open Source Repos Reference
+## 22. Open Source Repos Reference
 
 These repositories serve as **implementation references**, not direct integrations:
 
