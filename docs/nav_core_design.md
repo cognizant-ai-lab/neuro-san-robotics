@@ -412,6 +412,7 @@ Nav_core is **CPU-only**. It leaves the GPU entirely available for vision_core's
 4. **LocalPlanner** (VFH+) combines ObstacleGrid + waypoint direction into velocity commands
 5. **SafetyMonitor** filters every velocity command before it reaches the robot
 6. **Go2Macros.move(vx, vy, vyaw)** sends the command to the Unitree SDK
+7. **SpatialMemory** (Phase 5) captures and stores spatial snapshots at key positions, enabling the robot to remember and update its understanding of the environment across sessions
 
 ---
 
