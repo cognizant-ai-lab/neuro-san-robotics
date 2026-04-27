@@ -36,6 +36,15 @@ class NavStatusTool(CodedTool):
     """
 
     async def async_invoke(self, args: Dict[str, Any], sly_data: Dict[str, Any]) -> Any:
+        """Return navigation status information.
+
+        Args:
+            args: Optional 'query' key: 'status' (default), 'destinations', or 'obstacles'.
+            sly_data: Neuro SAN inter-agent context (unused by this tool).
+
+        Returns:
+            Human-readable string with the requested navigation information.
+        """
         from coded_tools.unigo2.nav_core import NavCore
 
         query = args.get("query", "status").lower().strip()

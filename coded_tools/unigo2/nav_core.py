@@ -61,6 +61,7 @@ _go2_macros_cls = None
 
 
 def _get_go2_macros():
+    """Lazily import and instantiate Go2Macros to avoid triggering DDS init at import time."""
     global _go2_macros_cls
     if _go2_macros_cls is None:
         from coded_tools.unigo2.go2_macros import Go2Macros
@@ -73,6 +74,7 @@ def _get_go2_macros():
 # ---------------------------------------------------------------------------
 
 class NavState(Enum):
+    """Navigation state machine states."""
     IDLE = "idle"
     NAVIGATING = "navigating"
     AVOIDING = "avoiding"
@@ -82,6 +84,7 @@ class NavState(Enum):
 
 @dataclass
 class RobotPose:
+    """Robot position and heading in the world frame (meters, radians)."""
     x: float = 0.0
     y: float = 0.0
     yaw: float = 0.0
@@ -90,6 +93,7 @@ class RobotPose:
 
 @dataclass
 class VelocityCommand:
+    """Velocity command for Go2Macros.move(). Units: m/s and rad/s."""
     vx: float = 0.0
     vy: float = 0.0
     vyaw: float = 0.0
@@ -97,6 +101,10 @@ class VelocityCommand:
 
 @dataclass
 class NavGoal:
+    """Navigation goal with type, target position, and optional label.
+
+    goal_type: 'relative' (distance/angle), 'pose' (x/y), or 'semantic' (map node name).
+    """
     goal_type: str = "relative"    # "relative", "pose", "semantic"
     x: float = 0.0
     y: float = 0.0
@@ -107,6 +115,7 @@ class NavGoal:
 
 @dataclass
 class MapNode:
+    """A named location in the topological map with position and metadata."""
     name: str
     x: float
     y: float
@@ -116,6 +125,7 @@ class MapNode:
 
 @dataclass
 class MapEdge:
+    """A bidirectional connection between two MapNodes with traversal cost."""
     from_node: str
     to_node: str
     distance: float
@@ -131,12 +141,14 @@ class TopologicalMap:
     """Graph-based semantic map loaded from JSON."""
 
     def __init__(self):
+        """Initialize an empty topological map."""
         self.name: str = ""
         self.nodes: Dict[str, MapNode] = {}
         self.edges: List[MapEdge] = []
         self._adjacency: Dict[str, List[Tuple[str, float]]] = {}
 
     def load_from_file(self, path: str) -> bool:
+        """Load map from a JSON file. Returns True if at least one node was loaded."""
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -146,9 +158,11 @@ class TopologicalMap:
             return False
 
     def load_from_dict(self, data: Dict[str, Any]) -> bool:
+        """Load map from a dictionary (same schema as the JSON file)."""
         return self._parse(data)
 
     def _parse(self, data: Dict[str, Any]) -> bool:
+        """Parse map data, building nodes, edges, and adjacency list."""
         self.name = data.get("name", "")
         self.nodes.clear()
         self.edges.clear()
@@ -189,6 +203,7 @@ class TopologicalMap:
         return len(self.nodes) > 0
 
     def save_to_file(self, path: str):
+        """Serialize the map to a JSON file, creating parent directories if needed."""
         data = {
             "name": self.name,
             "version": "1.0",
@@ -214,9 +229,11 @@ class TopologicalMap:
             json.dump(data, f, indent=2)
 
     def get_node(self, name: str) -> Optional[MapNode]:
+        """Look up a node by name. Returns None if not found."""
         return self.nodes.get(name)
 
     def find_nearest_node(self, x: float, y: float) -> Optional[MapNode]:
+        """Find the map node closest to the given (x, y) position."""
         best = None
         best_dist = float("inf")
         for node in self.nodes.values():
@@ -227,10 +244,12 @@ class TopologicalMap:
         return best
 
     def list_destinations(self) -> List[str]:
+        """Return sorted list of all node names."""
         return sorted(self.nodes.keys())
 
     @property
     def is_loaded(self) -> bool:
+        """True if the map has at least one node."""
         return len(self.nodes) > 0
 
 
@@ -242,11 +261,17 @@ class GlobalPlanner:
     """Dijkstra path planning on the topological map."""
 
     def __init__(self, topo_map: TopologicalMap):
+        """Initialize the global planner with a topological map reference."""
         self._map = topo_map
         self._current_path: List[MapNode] = []
         self._waypoint_index: int = 0
 
     def plan_path(self, current_pose: RobotPose, goal_label: str) -> Optional[List[MapNode]]:
+        """Plan a path from the nearest node to current_pose to the goal node.
+
+        Returns:
+            List of MapNodes from start to goal, or None if unreachable/unknown.
+        """
         goal_node = self._map.get_node(goal_label)
         if goal_node is None:
             logger.warning("GlobalPlanner: unknown destination '%s'", goal_label)
@@ -273,6 +298,10 @@ class GlobalPlanner:
         return path
 
     def get_next_waypoint(self, current_pose: RobotPose, tolerance_m: float = 0.3) -> Optional[MapNode]:
+        """Return the next waypoint to steer toward, advancing when within tolerance.
+
+        Returns None when the final waypoint (goal) has been reached.
+        """
         if not self._current_path or self._waypoint_index >= len(self._current_path):
             return None
 
@@ -291,10 +320,12 @@ class GlobalPlanner:
         return wp
 
     def clear(self):
+        """Reset the current path and waypoint index."""
         self._current_path = []
         self._waypoint_index = 0
 
     def _dijkstra(self, start: str, goal: str) -> Optional[List[str]]:
+        """Run Dijkstra's shortest path on the topological map adjacency graph."""
         dist: Dict[str, float] = {start: 0.0}
         prev: Dict[str, Optional[str]] = {start: None}
         heap = [(0.0, start)]
@@ -347,6 +378,14 @@ class LocalPlanner:
         safety_distance: float = 0.4,
         avoidance_distance: float = 0.8,
     ):
+        """Configure the local planner speed and distance thresholds.
+
+        Args:
+            max_linear_speed: Maximum forward speed in m/s.
+            max_yaw_rate: Maximum rotation rate in rad/s.
+            safety_distance: E-stop distance in meters (speed = 0 below this).
+            avoidance_distance: Start slowing down at this distance in meters.
+        """
         self.max_linear_speed = max_linear_speed
         self.max_yaw_rate = max_yaw_rate
         self.safety_distance = safety_distance
@@ -359,6 +398,16 @@ class LocalPlanner:
         goal_direction: float,
         goal_distance: float,
     ) -> VelocityCommand:
+        """Compute velocity toward the goal while avoiding obstacles.
+
+        Args:
+            obstacle_grid: Current obstacle map from depth processor.
+            goal_direction: Bearing to goal in radians (0=ahead, positive=left).
+            goal_distance: Distance to goal in meters.
+
+        Returns:
+            VelocityCommand with speed modulated by obstacle proximity and goal distance.
+        """
         histogram = self._build_histogram(obstacle_grid)
         free_sectors = self._find_free_sectors(histogram)
 
@@ -405,6 +454,7 @@ class LocalPlanner:
         return VelocityCommand(vx=vx, vy=0.0, vyaw=vyaw)
 
     def _build_histogram(self, grid: ObstacleGrid) -> np.ndarray:
+        """Build a polar obstacle density histogram (72 sectors, 5 degrees each)."""
         histogram = np.zeros(self.HISTOGRAM_SECTORS, dtype=np.float32)
         occupied = np.argwhere(grid.grid > 0)
 
@@ -421,9 +471,11 @@ class LocalPlanner:
         return histogram
 
     def _find_free_sectors(self, histogram: np.ndarray) -> List[int]:
+        """Return sector indices with obstacle density below the threshold."""
         return [i for i in range(self.HISTOGRAM_SECTORS) if histogram[i] < self.SECTOR_THRESHOLD]
 
     def _select_best_sector(self, free_sectors: List[int], goal_sector: int) -> int:
+        """Select the free sector closest to the goal direction (circular distance)."""
         best = free_sectors[0]
         best_cost = float("inf")
 
@@ -437,16 +489,19 @@ class LocalPlanner:
         return best
 
     def _angle_to_sector(self, angle: float) -> int:
+        """Convert a bearing angle (radians) to a histogram sector index."""
         angle = angle % (2 * math.pi)
         return int(angle / self.SECTOR_WIDTH_RAD) % self.HISTOGRAM_SECTORS
 
     def _sector_to_angle(self, sector: int) -> float:
+        """Convert a sector index back to a bearing angle in [-pi, pi]."""
         angle = (sector + 0.5) * self.SECTOR_WIDTH_RAD
         if angle > math.pi:
             angle -= 2 * math.pi
         return angle
 
     def _modulate_speed(self, base_speed: float, nearest_obstacle_m: float) -> float:
+        """Linear speed ramp: 0 at safety_distance, base_speed at avoidance_distance."""
         if nearest_obstacle_m <= self.safety_distance:
             return 0.0
         if nearest_obstacle_m >= self.avoidance_distance:
@@ -473,6 +528,13 @@ class SafetyMonitor:
         avoidance_distance: float = 0.8,
         stuck_timeout: float = 10.0,
     ):
+        """Configure safety thresholds.
+
+        Args:
+            safety_distance: E-stop if obstacle closer than this (meters).
+            avoidance_distance: Scale speed down between safety and this (meters).
+            stuck_timeout: Trigger stuck event after this many seconds without progress.
+        """
         self.safety_distance = safety_distance
         self.avoidance_distance = avoidance_distance
         self.stuck_timeout = stuck_timeout
@@ -484,6 +546,12 @@ class SafetyMonitor:
         ground_plane_valid: bool = True,
         seconds_since_progress: float = 0.0,
     ) -> Tuple[VelocityCommand, Optional[str]]:
+        """Filter a velocity command through safety checks (priority-ordered).
+
+        Returns:
+            Tuple of (possibly zeroed command, optional event string).
+            Event string is None when no safety condition triggered.
+        """
         # Priority 1: E-STOP
         if nearest_obstacle_m <= self.safety_distance:
             return VelocityCommand(0.0, 0.0, 0.0), "e_stop:obstacle_too_close"
@@ -522,11 +590,13 @@ class OdometryProvider:
     """
 
     def __init__(self):
+        """Initialize odometry at the origin (0, 0, 0)."""
         self._pose = RobotPose()
         self._lock = threading.Lock()
         self._last_update = time.monotonic()
 
     def update_from_velocity(self, cmd: VelocityCommand, dt: float):
+        """Integrate a velocity command over dt seconds (dead-reckoning)."""
         with self._lock:
             self._pose.x += cmd.vx * math.cos(self._pose.yaw) * dt
             self._pose.y += cmd.vx * math.sin(self._pose.yaw) * dt
@@ -537,6 +607,7 @@ class OdometryProvider:
             self._pose.timestamp = time.time()
 
     def get_pose(self) -> RobotPose:
+        """Return a copy of the current pose (thread-safe)."""
         with self._lock:
             return RobotPose(
                 x=self._pose.x,
@@ -546,6 +617,7 @@ class OdometryProvider:
             )
 
     def reset(self):
+        """Reset pose to the origin."""
         with self._lock:
             self._pose = RobotPose()
             self._last_update = time.monotonic()
@@ -584,12 +656,14 @@ class NavCore:
 
     @classmethod
     def get_instance(cls) -> "NavCore":
+        """Return the shared NavCore singleton, creating it on first call."""
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls()
             return cls._instance
 
     def __init__(self):
+        """Initialize all sub-components: depth processor, planners, safety, odometry."""
         self._state = NavState.IDLE
         self._goal: Optional[NavGoal] = None
         self._state_lock = threading.Lock()
@@ -642,6 +716,7 @@ class NavCore:
         )
 
     def _ensure_go2(self):
+        """Lazily initialize the Go2Macros motor controller."""
         if self._go2 is None:
             self._go2 = _get_go2_macros()
 
@@ -650,6 +725,11 @@ class NavCore:
     # ------------------------------------------------------------------
 
     def navigate_to(self, destination: str) -> bool:
+        """Navigate to a named location on the topological map.
+
+        Plans a global path via Dijkstra, then the nav loop handles local avoidance.
+        Returns False if no map loaded or destination unreachable.
+        """
         if not self._topo_map.is_loaded:
             logger.warning("NavCore: no map loaded, cannot navigate to '%s'", destination)
             return False
@@ -674,6 +754,7 @@ class NavCore:
         return True
 
     def move_relative(self, distance: float, angle: float = 0.0) -> bool:
+        """Move a given distance (meters) at a given angle offset (radians) from current heading."""
         pose = self._odometry.get_pose()
         target_yaw = pose.yaw + angle
         goal_x = pose.x + distance * math.cos(target_yaw)
@@ -694,6 +775,7 @@ class NavCore:
         return True
 
     def turn(self, angle_rad: float) -> bool:
+        """Rotate in place by the given angle (radians, positive=left)."""
         pose = self._odometry.get_pose()
         with self._state_lock:
             self._goal = NavGoal(
@@ -709,6 +791,7 @@ class NavCore:
         return True
 
     def stop(self):
+        """Cancel current navigation and send stop command to the robot."""
         with self._state_lock:
             self._state = NavState.IDLE
             self._goal = None
@@ -719,6 +802,7 @@ class NavCore:
         logger.info("NavCore: navigation stopped")
 
     def resume(self):
+        """Clear E-STOP state and return to IDLE. Does not restart previous goal."""
         with self._state_lock:
             if self._state == NavState.E_STOP:
                 self._state = NavState.IDLE
@@ -730,13 +814,16 @@ class NavCore:
 
     @property
     def state(self) -> NavState:
+        """Current navigation state (thread-safe)."""
         with self._state_lock:
             return self._state
 
     def is_initialized(self) -> bool:
+        """True once NavCore has completed initialization."""
         return True
 
     def get_status_summary(self) -> str:
+        """Human-readable summary of navigation state, pose, goal, and obstacles."""
         with self._state_lock:
             state = self._state
             goal = self._goal
@@ -761,15 +848,18 @@ class NavCore:
         return ". ".join(parts) + "."
 
     def get_nearest_obstacle_distance(self) -> float:
+        """Return distance to nearest obstacle in meters, or inf if none detected."""
         grid = self._depth_processor.get_obstacle_grid()
         if grid:
             return grid.nearest_obstacle_m
         return float("inf")
 
     def get_obstacle_summary(self) -> str:
+        """Human-readable obstacle summary from the depth processor."""
         return self._depth_processor.get_obstacle_summary()
 
     def list_destinations(self) -> str:
+        """Return a string listing available map destinations, or a fallback message."""
         if not self._topo_map.is_loaded:
             return "No map loaded. Only relative navigation (move_forward, turn) is available."
         names = self._topo_map.list_destinations()
@@ -780,6 +870,7 @@ class NavCore:
     # ------------------------------------------------------------------
 
     def _ensure_running(self):
+        """Start the background nav loop thread if not already running."""
         if self._running:
             return
         self._running = True
@@ -788,6 +879,7 @@ class NavCore:
         logger.info("NavCore: navigation loop started")
 
     def _nav_loop(self):
+        """Main navigation loop running at NAV_LOOP_HZ in a daemon thread."""
         self._ensure_go2()
 
         while self._running:
@@ -812,6 +904,7 @@ class NavCore:
                 time.sleep(sleep_time)
 
     def _nav_cycle(self, state: NavState, goal: NavGoal):
+        """Execute one navigation cycle: sense -> plan -> safety filter -> actuate."""
         # 1. Read sensors
         grid = self._depth_processor.get_obstacle_grid()
         pose = self._odometry.get_pose()
@@ -919,10 +1012,12 @@ class NavCore:
         self._update_progress(pose)
 
     def _reset_progress_tracker(self):
+        """Reset the stuck-detection timer to now."""
         self._last_progress_pose = self._odometry.get_pose()
         self._last_progress_time = time.monotonic()
 
     def _update_progress(self, current_pose: RobotPose):
+        """Update progress tracker if robot has moved more than 0.1m since last check."""
         dist_moved = math.hypot(
             current_pose.x - self._last_progress_pose.x,
             current_pose.y - self._last_progress_pose.y,
@@ -936,6 +1031,7 @@ class NavCore:
     # ------------------------------------------------------------------
 
     def shutdown(self):
+        """Stop navigation, join the background thread, and release depth camera."""
         self.stop()
         self._running = False
         if self._thread:

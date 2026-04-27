@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean from environment variable. Accepts '1', 'true', 'yes', 'on'."""
     raw_value = os.environ.get(name)
     if raw_value is None:
         return default
@@ -52,6 +53,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 def _env_int(name: str, default: int) -> int:
+    """Read an integer from environment variable, returning default on missing or invalid."""
     raw_value = os.environ.get(name)
     if raw_value is None:
         return default
@@ -62,6 +64,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_float(name: str, default: float) -> float:
+    """Read a float from environment variable, returning default on missing or invalid."""
     raw_value = os.environ.get(name)
     if raw_value is None:
         return default
@@ -142,6 +145,11 @@ class DepthProcessor:
     """
 
     def __init__(self, config: Optional[DepthProcessorConfig] = None):
+        """Initialize the depth processor with given or environment-based config.
+
+        Args:
+            config: Processing configuration. If None, reads from NAV_* env vars.
+        """
         self._config = config or self._config_from_env()
         self._lock = threading.Lock()
         self._latest_grid: Optional[ObstacleGrid] = None
@@ -161,6 +169,7 @@ class DepthProcessor:
 
     @staticmethod
     def _config_from_env() -> DepthProcessorConfig:
+        """Build a DepthProcessorConfig from NAV_* environment variables."""
         return DepthProcessorConfig(
             grid_rows=_env_int("NAV_GRID_ROWS", 80),
             grid_cols=_env_int("NAV_GRID_COLS", 80),
@@ -179,6 +188,7 @@ class DepthProcessor:
     # ------------------------------------------------------------------
 
     def _init_camera(self):
+        """Detect and initialize the depth camera backend (RealSense -> OpenCV -> none)."""
         source = os.environ.get("NAV_DEPTH_CAMERA_SOURCE", "auto")
 
         if source != "auto" and not source.startswith("realsense"):
@@ -199,6 +209,7 @@ class DepthProcessor:
             )
 
     def _init_realsense(self) -> bool:
+        """Initialize Intel RealSense pipeline. Caches depth_scale and intrinsics."""
         try:
             ctx = rs.context()
             devices = ctx.query_devices()
@@ -206,8 +217,15 @@ class DepthProcessor:
                 logger.info("DepthProcessor: no RealSense devices found")
                 return False
 
+            dev = devices[0]
+            dev_name = dev.get_info(rs.camera_info.name) if dev.supports(rs.camera_info.name) else "unknown"
+            dev_serial = dev.get_info(rs.camera_info.serial_number) if dev.supports(rs.camera_info.serial_number) else ""
+            logger.info("DepthProcessor: found RealSense device: %s (S/N: %s)", dev_name, dev_serial)
+
             self._pipeline = rs.pipeline()
             cfg = rs.config()
+            if dev_serial:
+                cfg.enable_device(dev_serial)
             cfg.enable_stream(
                 rs.stream.depth,
                 self._config.depth_width,
@@ -215,13 +233,24 @@ class DepthProcessor:
                 rs.format.z16,
                 self._config.depth_fps,
             )
-            self._pipeline.start(cfg)
+
+            profile = self._pipeline.start(cfg)
+
+            # Cache depth scale (meters per depth unit) for accurate conversion
+            depth_sensor = profile.get_device().first_depth_sensor()
+            self._depth_scale = depth_sensor.get_depth_scale()
+
+            # Cache intrinsics for 3D projection
+            depth_stream = profile.get_stream(rs.stream.depth).as_video_stream_profile()
+            self._intrinsics = depth_stream.get_intrinsics()
+
             self._backend = "realsense"
             logger.info(
-                "DepthProcessor: RealSense initialized (%dx%d @ %d fps)",
+                "DepthProcessor: RealSense initialized (%dx%d @ %d fps, depth_scale=%.6f)",
                 self._config.depth_width,
                 self._config.depth_height,
                 self._config.depth_fps,
+                self._depth_scale,
             )
             return True
         except Exception as exc:
@@ -230,6 +259,7 @@ class DepthProcessor:
             return False
 
     def _init_opencv_depth(self, source: str):
+        """Open a specific depth camera via OpenCV (device index or path)."""
         try:
             idx = int(source)
             cap = cv2.VideoCapture(idx)
@@ -245,22 +275,36 @@ class DepthProcessor:
             logger.warning("DepthProcessor: failed to open depth camera: %s", source)
 
     def _try_opencv_depth_auto(self):
-        for idx in range(4):
-            cap = cv2.VideoCapture(idx)
-            if cap.isOpened():
-                ret, frame = cap.read()
-                if ret and frame is not None and len(frame.shape) == 2:
+        """Scan /dev/video* for a single-channel depth camera, skipping RGB devices."""
+        from pathlib import Path
+        video_devices = sorted(
+            (p for p in Path("/dev").glob("video*") if p.name.removeprefix("video").isdigit()),
+            key=lambda p: int(p.name.removeprefix("video")),
+        )
+        for dev_path in video_devices:
+            try:
+                cap = cv2.VideoCapture(str(dev_path), cv2.CAP_V4L2)
+            except Exception:
+                cap = cv2.VideoCapture(str(dev_path))
+            if not cap.isOpened():
+                continue
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                # Depth cameras typically produce single-channel (grayscale)
+                # or 16-bit frames.  Skip 3-channel BGR (likely an RGB camera).
+                if len(frame.shape) == 2 or (len(frame.shape) == 3 and frame.shape[2] == 1):
                     self._cv_capture = cap
                     self._backend = "opencv"
-                    logger.info("DepthProcessor: found depth camera at index %d", idx)
+                    logger.info("DepthProcessor: found depth camera at %s", dev_path)
                     return
-                cap.release()
+            cap.release()
 
     # ------------------------------------------------------------------
     # Inflation kernel
     # ------------------------------------------------------------------
 
     def _build_inflation_kernel(self) -> np.ndarray:
+        """Build a circular dilation kernel sized to the robot's half-width."""
         radius_cells = max(1, int(self._config.robot_half_width / self._config.grid_resolution))
         size = 2 * radius_cells + 1
         kernel = np.zeros((size, size), dtype=np.uint8)
@@ -272,6 +316,7 @@ class DepthProcessor:
     # ------------------------------------------------------------------
 
     def start(self):
+        """Start the background depth capture thread."""
         if self._running:
             return
         if self._backend == "none":
@@ -282,6 +327,7 @@ class DepthProcessor:
         logger.info("DepthProcessor: capture thread started (%s backend)", self._backend)
 
     def stop(self):
+        """Stop the background capture thread and release camera resources."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
@@ -289,6 +335,7 @@ class DepthProcessor:
         self._release_camera()
 
     def _release_camera(self):
+        """Release RealSense pipeline or OpenCV capture."""
         if self._pipeline:
             try:
                 self._pipeline.stop()
@@ -300,6 +347,7 @@ class DepthProcessor:
             self._cv_capture = None
 
     def _capture_loop(self):
+        """Background thread loop: read depth frames and update the latest grid."""
         while self._running:
             cycle_start = time.monotonic()
             try:
@@ -321,6 +369,7 @@ class DepthProcessor:
     # ------------------------------------------------------------------
 
     def _read_depth_frame(self) -> Optional[np.ndarray]:
+        """Read one depth frame from the active backend. Returns float32 array in meters."""
         if self._backend == "realsense":
             return self._read_realsense()
         elif self._backend == "opencv":
@@ -330,14 +379,16 @@ class DepthProcessor:
         return None
 
     def _read_realsense(self) -> Optional[np.ndarray]:
+        """Read from RealSense, converting raw uint16 to float32 meters via cached depth_scale."""
         frames = self._pipeline.wait_for_frames(timeout_ms=500)
         depth_frame = frames.get_depth_frame()
         if not depth_frame:
             return None
         depth_image = np.asanyarray(depth_frame.get_data())
-        return depth_image.astype(np.float32) * depth_frame.get_units()
+        return depth_image.astype(np.float32) * self._depth_scale
 
     def _read_opencv(self) -> Optional[np.ndarray]:
+        """Read from OpenCV capture, assuming millimeter units (divided by 1000)."""
         ret, frame = self._cv_capture.read()
         if not ret or frame is None:
             return None
@@ -346,6 +397,7 @@ class DepthProcessor:
         return frame.astype(np.float32) / 1000.0
 
     def _generate_synthetic_depth(self) -> np.ndarray:
+        """Generate a synthetic depth frame with a wall at 2m for simulation mode."""
         h, w = self._config.process_height, self._config.process_width
         depth = np.full((h, w), 3.0, dtype=np.float32)
 
@@ -361,6 +413,17 @@ class DepthProcessor:
     # ------------------------------------------------------------------
 
     def _process_depth_to_grid(self, depth_m: np.ndarray) -> ObstacleGrid:
+        """Convert a depth frame (float32, meters) into a 2D ObstacleGrid.
+
+        Pipeline: downsample -> mask invalid -> 3D projection -> height filter ->
+        grid binning -> inflate -> nearest obstacle computation.
+
+        Args:
+            depth_m: Depth image in meters, shape (H, W), dtype float32.
+
+        Returns:
+            ObstacleGrid with occupied cells, nearest obstacle distance and bearing.
+        """
         cfg = self._config
         now = time.time()
 
@@ -376,11 +439,20 @@ class DepthProcessor:
         valid = (depth_m > cfg.min_depth_m) & (depth_m < cfg.max_depth_m)
 
         # Step 3: For each pixel, compute 3D position in robot frame
-        # Camera intrinsics approximation (can be replaced with calibration)
-        fx = cfg.process_width * 0.6   # focal length in pixels (approximate for D435i)
-        fy = cfg.process_height * 0.6
-        cx = cfg.process_width / 2.0
-        cy = cfg.process_height / 2.0
+        # Use real intrinsics from RealSense if available, else approximate
+        if hasattr(self, "_intrinsics") and self._intrinsics is not None:
+            intr = self._intrinsics
+            scale_x = cfg.process_width / intr.width
+            scale_y = cfg.process_height / intr.height
+            fx = intr.fx * scale_x
+            fy = intr.fy * scale_y
+            cx = intr.ppx * scale_x
+            cy = intr.ppy * scale_y
+        else:
+            fx = cfg.process_width * 0.6
+            fy = cfg.process_height * 0.6
+            cx = cfg.process_width / 2.0
+            cy = cfg.process_height / 2.0
 
         v_coords, u_coords = np.mgrid[0:cfg.process_height, 0:cfg.process_width]
         z = depth_m  # depth = distance along optical axis
@@ -475,10 +547,12 @@ class DepthProcessor:
 
     @property
     def backend(self) -> str:
+        """Active backend: 'realsense', 'opencv', 'simulation', or 'none'."""
         return self._backend
 
     @property
     def is_available(self) -> bool:
+        """True if any depth source is active (including simulation)."""
         return self._backend != "none"
 
     def get_obstacle_summary(self) -> str:

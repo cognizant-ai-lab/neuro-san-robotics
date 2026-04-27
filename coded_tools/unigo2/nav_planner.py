@@ -42,6 +42,16 @@ class NavPlannerTool(CodedTool):
     """
 
     async def async_invoke(self, args: Dict[str, Any], sly_data: Dict[str, Any]) -> Any:
+        """Dispatch a navigation command to NavCore.
+
+        Args:
+            args: Must contain 'command'. Optional: 'target' (destination/direction),
+                  'distance' (meters or degrees depending on command).
+            sly_data: Neuro SAN inter-agent context (unused by this tool).
+
+        Returns:
+            Human-readable status string for the conscious agent.
+        """
         from coded_tools.unigo2.nav_core import NavCore
 
         command = args.get("command", "").lower().strip()
