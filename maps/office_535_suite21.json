@@ -1,0 +1,399 @@
+{
+  "name": "535 Suite 21 - Office Floor",
+  "version": "1.0",
+  "coordinate_system": {
+    "origin": "SW corner of floor plate",
+    "x_axis": "East (right on plot, up in PDF)",
+    "y_axis": "North (up on plot, left in PDF)",
+    "units": "meters",
+    "floor_dimensions_m": {"east_west": 22.0, "north_south": 30.0},
+    "notes": "PDF orientation: Up=East, Left=North. Plot uses standard cartographic N-up."
+  },
+  "floor_boundary": [
+    [22.0, 30.0], [22.0, 0.0], [3.0, 0.0],
+    [0.0, 3.0], [0.0, 27.0], [3.0, 30.0]
+  ],
+  "nodes": [
+    {
+      "name": "entrance",
+      "x": 11.0, "y": 1.0,
+      "description": "Main suite entrance, South wall",
+      "tags": ["entrance", "door"]
+    },
+    {
+      "name": "reception",
+      "x": 11.0, "y": 3.0,
+      "description": "Reception area just inside entrance",
+      "tags": ["reception", "lobby"]
+    },
+    {
+      "name": "corridor_south",
+      "x": 10.0, "y": 7.0,
+      "description": "Main corridor, south section",
+      "tags": ["corridor", "waypoint"]
+    },
+    {
+      "name": "corridor_center",
+      "x": 10.0, "y": 15.0,
+      "description": "Main corridor, central junction",
+      "tags": ["corridor", "waypoint", "junction"]
+    },
+    {
+      "name": "corridor_north",
+      "x": 10.0, "y": 22.0,
+      "description": "Main corridor, north section",
+      "tags": ["corridor", "waypoint"]
+    },
+    {
+      "name": "corridor_east",
+      "x": 15.0, "y": 15.0,
+      "description": "East corridor branch toward amenities",
+      "tags": ["corridor", "waypoint"]
+    },
+    {
+      "name": "charging_station",
+      "x": 10.0, "y": 11.0,
+      "description": "Charging dock on main corridor",
+      "tags": ["home", "charging"]
+    },
+    {
+      "name": "board_room",
+      "x": 20.0, "y": 27.0,
+      "description": "Board room, NE corner (21.601) - GLASS WALLS",
+      "tags": ["room", "conference", "glass", "restricted"]
+    },
+    {
+      "name": "kitchen",
+      "x": 20.0, "y": 22.0,
+      "description": "Kitchen and break area, East wall (21.605)",
+      "tags": ["room", "kitchen", "break"]
+    },
+    {
+      "name": "lounge",
+      "x": 20.0, "y": 16.0,
+      "description": "Lounge and common area, East wall (21.600)",
+      "tags": ["room", "lounge", "social"]
+    },
+    {
+      "name": "focus_rooms",
+      "x": 19.0, "y": 9.0,
+      "description": "Focus rooms and phone booths, East side",
+      "tags": ["room", "focus", "phone_booth"]
+    },
+    {
+      "name": "conf_room_south",
+      "x": 20.0, "y": 3.0,
+      "description": "Conference room, SE corner (21.629) - GLASS WALLS",
+      "tags": ["room", "conference", "glass", "restricted"]
+    },
+    {
+      "name": "office_wing_north",
+      "x": 14.0, "y": 20.0,
+      "description": "Private offices, north wing (21.201-21.203)",
+      "tags": ["room", "office", "private"]
+    },
+    {
+      "name": "office_wing_south",
+      "x": 14.0, "y": 8.0,
+      "description": "Private offices, south wing (21.205-21.207)",
+      "tags": ["room", "office", "private"]
+    },
+    {
+      "name": "huddle_room_north",
+      "x": 13.0, "y": 18.0,
+      "description": "Huddle rooms, north side (21.220-21.222)",
+      "tags": ["room", "huddle", "meeting"]
+    },
+    {
+      "name": "huddle_room_south",
+      "x": 13.0, "y": 10.0,
+      "description": "Huddle rooms, south side (21.224-21.226)",
+      "tags": ["room", "huddle", "meeting"]
+    },
+    {
+      "name": "open_plan_north",
+      "x": 5.0, "y": 22.0,
+      "description": "Open plan workspace, north pod cluster",
+      "tags": ["workspace", "open_plan", "desks"]
+    },
+    {
+      "name": "open_plan_center",
+      "x": 5.0, "y": 15.0,
+      "description": "Open plan workspace, central area",
+      "tags": ["workspace", "open_plan", "desks"]
+    },
+    {
+      "name": "open_plan_south",
+      "x": 5.0, "y": 7.0,
+      "description": "Open plan workspace, south pod cluster",
+      "tags": ["workspace", "open_plan", "desks"]
+    },
+    {
+      "name": "open_plan_west",
+      "x": 2.0, "y": 15.0,
+      "description": "Open plan workspace, far west end",
+      "tags": ["workspace", "open_plan", "desks"]
+    },
+    {
+      "name": "work_cafe",
+      "x": 3.0, "y": 26.0,
+      "description": "Work cafe and innovation area, NW corner",
+      "tags": ["room", "cafe", "social"]
+    },
+    {
+      "name": "stairwell",
+      "x": 14.0, "y": 28.0,
+      "description": "Stairwell and elevator access, North wall",
+      "tags": ["stairs", "elevator", "restricted"]
+    }
+  ],
+  "edges": [
+    {
+      "from": "entrance",
+      "to": "reception",
+      "distance": 2.0,
+      "traversable": true,
+      "description": "from entrance into reception area"
+    },
+    {
+      "from": "reception",
+      "to": "corridor_south",
+      "distance": 4.1,
+      "traversable": true,
+      "description": "north from reception to south corridor"
+    },
+    {
+      "from": "reception",
+      "to": "office_wing_south",
+      "distance": 5.8,
+      "traversable": true,
+      "description": "northeast to south office wing"
+    },
+    {
+      "from": "corridor_south",
+      "to": "charging_station",
+      "distance": 4.0,
+      "traversable": true,
+      "description": "main corridor, south to charging station"
+    },
+    {
+      "from": "charging_station",
+      "to": "corridor_center",
+      "distance": 4.0,
+      "traversable": true,
+      "description": "main corridor, charging station to center"
+    },
+    {
+      "from": "corridor_center",
+      "to": "corridor_north",
+      "distance": 7.0,
+      "traversable": true,
+      "description": "main corridor, center to north"
+    },
+    {
+      "from": "corridor_center",
+      "to": "corridor_east",
+      "distance": 5.0,
+      "traversable": true,
+      "description": "east branch from center junction"
+    },
+    {
+      "from": "corridor_east",
+      "to": "lounge",
+      "distance": 5.1,
+      "traversable": true,
+      "description": "east into lounge area"
+    },
+    {
+      "from": "corridor_east",
+      "to": "kitchen",
+      "distance": 8.6,
+      "traversable": true,
+      "description": "northeast to kitchen"
+    },
+    {
+      "from": "corridor_east",
+      "to": "focus_rooms",
+      "distance": 7.2,
+      "traversable": true,
+      "description": "southeast to focus rooms"
+    },
+    {
+      "from": "lounge",
+      "to": "kitchen",
+      "distance": 6.0,
+      "traversable": true,
+      "description": "north along east wall from lounge to kitchen"
+    },
+    {
+      "from": "corridor_north",
+      "to": "kitchen",
+      "distance": 10.0,
+      "traversable": true,
+      "description": "east from north corridor to kitchen"
+    },
+    {
+      "from": "corridor_north",
+      "to": "office_wing_north",
+      "distance": 4.5,
+      "traversable": true,
+      "description": "east into north office wing"
+    },
+    {
+      "from": "corridor_north",
+      "to": "open_plan_north",
+      "distance": 5.0,
+      "traversable": true,
+      "description": "west into north open plan"
+    },
+    {
+      "from": "corridor_north",
+      "to": "work_cafe",
+      "distance": 8.1,
+      "traversable": true,
+      "description": "northwest to work cafe"
+    },
+    {
+      "from": "corridor_south",
+      "to": "huddle_room_south",
+      "distance": 4.2,
+      "traversable": true,
+      "description": "east to south huddle rooms"
+    },
+    {
+      "from": "corridor_south",
+      "to": "open_plan_south",
+      "distance": 5.0,
+      "traversable": true,
+      "description": "west into south open plan"
+    },
+    {
+      "from": "corridor_center",
+      "to": "huddle_room_north",
+      "distance": 4.2,
+      "traversable": true,
+      "description": "northeast to north huddle rooms"
+    },
+    {
+      "from": "corridor_center",
+      "to": "huddle_room_south",
+      "distance": 5.8,
+      "traversable": true,
+      "description": "east-southeast to south huddle rooms"
+    },
+    {
+      "from": "corridor_center",
+      "to": "open_plan_center",
+      "distance": 5.0,
+      "traversable": true,
+      "description": "west into central open plan"
+    },
+    {
+      "from": "office_wing_north",
+      "to": "huddle_room_north",
+      "distance": 2.2,
+      "traversable": true,
+      "description": "west from offices to huddle rooms"
+    },
+    {
+      "from": "office_wing_south",
+      "to": "huddle_room_south",
+      "distance": 2.2,
+      "traversable": true,
+      "description": "west from offices to huddle rooms"
+    },
+    {
+      "from": "office_wing_south",
+      "to": "focus_rooms",
+      "distance": 5.1,
+      "traversable": true,
+      "description": "east from south offices to focus rooms"
+    },
+    {
+      "from": "open_plan_center",
+      "to": "open_plan_north",
+      "distance": 7.0,
+      "traversable": true,
+      "description": "north through open plan"
+    },
+    {
+      "from": "open_plan_center",
+      "to": "open_plan_south",
+      "distance": 8.0,
+      "traversable": true,
+      "description": "south through open plan"
+    },
+    {
+      "from": "open_plan_center",
+      "to": "open_plan_west",
+      "distance": 3.0,
+      "traversable": true,
+      "description": "west to far end of open plan"
+    },
+    {
+      "from": "open_plan_north",
+      "to": "work_cafe",
+      "distance": 4.5,
+      "traversable": true,
+      "description": "northwest to work cafe"
+    },
+    {
+      "from": "kitchen",
+      "to": "board_room",
+      "distance": 5.0,
+      "traversable": false,
+      "description": "NO-BOT: board room has glass walls"
+    },
+    {
+      "from": "corridor_north",
+      "to": "board_room",
+      "distance": 11.2,
+      "traversable": false,
+      "description": "NO-BOT: board room has glass walls"
+    },
+    {
+      "from": "focus_rooms",
+      "to": "conf_room_south",
+      "distance": 6.1,
+      "traversable": false,
+      "description": "NO-BOT: conference room has glass walls"
+    },
+    {
+      "from": "corridor_north",
+      "to": "stairwell",
+      "distance": 7.2,
+      "traversable": false,
+      "description": "NO-BOT: stairwell - dangerous for robot"
+    }
+  ],
+  "exclusion_zones": [
+    {
+      "name": "board_room",
+      "type": "rectangle",
+      "reason": "Glass walls - robot cannot detect transparent barriers",
+      "corners": [[18.0, 25.0], [22.0, 30.0]],
+      "buffer_m": 0.3
+    },
+    {
+      "name": "conf_room_south",
+      "type": "rectangle",
+      "reason": "Glass walls - robot cannot detect transparent barriers",
+      "corners": [[18.0, 0.5], [22.0, 5.0]],
+      "buffer_m": 0.3
+    },
+    {
+      "name": "stairwell",
+      "type": "rectangle",
+      "reason": "Stairs and elevator - fall hazard",
+      "corners": [[12.0, 27.0], [16.0, 30.0]],
+      "buffer_m": 0.5
+    },
+    {
+      "name": "focus_booth_cluster",
+      "type": "rectangle",
+      "reason": "Glass phone booth doors - robot cannot detect",
+      "corners": [[17.5, 7.0], [21.0, 11.0]],
+      "buffer_m": 0.3
+    }
+  ]
+}
