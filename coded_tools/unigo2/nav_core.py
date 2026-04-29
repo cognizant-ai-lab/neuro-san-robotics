@@ -42,6 +42,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from coded_tools.unigo2.depth_processor import (
+    CenterDepthReading,
     DepthProcessor,
     DepthProcessorConfig,
     ObstacleGrid,
@@ -653,6 +654,11 @@ class NavCore:
     MAX_YAW_RATE: float = _env_float("NAV_MAX_YAW_RATE", 0.5)
     GOAL_TOLERANCE_M: float = _env_float("NAV_GOAL_TOLERANCE", 0.3)
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 10.0)
+    FORWARD_SPEED: float = _env_float("NAV_FORWARD_SPEED", 0.45)
+    FORWARD_STOP_DISTANCE_M: float = _env_float("NAV_FORWARD_STOP_DISTANCE", 0.75)
+    FORWARD_MAX_SECONDS: float = _env_float("NAV_FORWARD_MAX_SECONDS", 15.0)
+    FORWARD_COMMAND_PERIOD_S: float = _env_float("NAV_FORWARD_COMMAND_PERIOD", 0.20)
+    FORWARD_ACTUAL_SPEED_RATIO: float = _env_float("NAV_FORWARD_ACTUAL_SPEED_RATIO", 0.35)
 
     @classmethod
     def get_instance(cls) -> "NavCore":
@@ -773,6 +779,122 @@ class NavCore:
         self._ensure_running()
         logger.info("NavCore: moving relative d=%.2f a=%.2f", distance, angle)
         return True
+
+    def move_forward_guarded(
+        self,
+        max_distance_m: Optional[float] = None,
+        stop_distance_m: Optional[float] = None,
+        speed: Optional[float] = None,
+        max_seconds: Optional[float] = None,
+        command_period_s: Optional[float] = None,
+    ) -> str:
+        """Move forward continuously while a raw depth watchdog stays clear.
+
+        This is the hardware-safe forward primitive validated on CAIL-E. It does
+        not declare success from dead-reckoned distance. Instead, it keeps a
+        continuous Go2 gait command active and stops immediately when the raw
+        center depth band sees an obstacle at or inside stop_distance_m.
+
+        Args:
+            max_distance_m: Optional requested travel distance. Until real
+                odometry is available, this is converted to a conservative time
+                backstop rather than used as an arrival guarantee.
+            stop_distance_m: Depth threshold at which to stop.
+            speed: Forward command velocity.
+            max_seconds: Safety timeout. If omitted, derived from max_distance_m
+                when provided, otherwise NAV_FORWARD_MAX_SECONDS.
+            command_period_s: How often to refresh the Go2 move command.
+
+        Returns:
+            Human-readable result for the agent/tool layer.
+        """
+        stop_distance = stop_distance_m or self.FORWARD_STOP_DISTANCE_M
+        forward_speed = speed or self.FORWARD_SPEED
+        command_period = (
+            self.FORWARD_COMMAND_PERIOD_S
+            if command_period_s is None
+            else command_period_s
+        )
+
+        if max_seconds is None:
+            if max_distance_m is not None:
+                actual_speed_estimate = max(
+                    forward_speed * self.FORWARD_ACTUAL_SPEED_RATIO,
+                    0.05,
+                )
+                max_seconds = max(2.0, max_distance_m / actual_speed_estimate)
+            else:
+                max_seconds = self.FORWARD_MAX_SECONDS
+
+        if not self._depth_processor.is_available:
+            return "Cannot move forward: no depth camera is available."
+
+        initial_reading = self._depth_processor.get_center_depth_reading()
+        if initial_reading is None:
+            return "Cannot move forward: no reliable center depth reading is available."
+
+        if initial_reading.distance_m <= stop_distance:
+            return (
+                "Already stopped: obstacle is "
+                f"{initial_reading.distance_m:.2f}m ahead."
+            )
+
+        self.stop()
+        self._ensure_go2()
+
+        with self._state_lock:
+            self._goal = NavGoal(
+                goal_type="guarded_forward",
+                x=max_distance_m or 0.0,
+                y=0.0,
+                label="guarded_forward",
+            )
+            self._state = NavState.NAVIGATING
+            self._reset_progress_tracker()
+
+        start = time.monotonic()
+        last_reading: CenterDepthReading = initial_reading
+        stop_reason = "timeout"
+
+        try:
+            while time.monotonic() - start < max_seconds:
+                reading = self._depth_processor.get_center_depth_reading()
+                if reading is None:
+                    stop_reason = "depth_unavailable"
+                    with self._state_lock:
+                        self._state = NavState.E_STOP
+                    break
+
+                last_reading = reading
+                if reading.distance_m <= stop_distance:
+                    stop_reason = "obstacle"
+                    break
+
+                if self._go2 and getattr(self._go2, "available", False):
+                    self._go2.move(vx=forward_speed, vy=0.0, vyaw=0.0)
+
+                if command_period > 0:
+                    time.sleep(command_period)
+        finally:
+            if self._go2 and getattr(self._go2, "available", False):
+                self._go2.stop_move()
+
+            with self._state_lock:
+                if self._state != NavState.E_STOP:
+                    self._state = NavState.IDLE
+                self._goal = None
+
+        if stop_reason == "obstacle":
+            return (
+                "Stopped forward movement: obstacle is "
+                f"{last_reading.distance_m:.2f}m ahead."
+            )
+        if stop_reason == "depth_unavailable":
+            return "Emergency stopped: center depth reading became unavailable."
+        return (
+            "Stopped forward movement after the safety timeout; last center "
+            f"depth was {last_reading.distance_m:.2f}m."
+        )
 
     def turn(self, angle_rad: float) -> bool:
         """Rotate in place by the given angle (radians, positive=left)."""
@@ -956,10 +1078,13 @@ class NavCore:
             if grid:
                 cmd = self._local_planner.compute_velocity(grid, goal_dir, goal_dist)
             else:
-                # No depth data: drive carefully toward goal
-                speed = min(0.1, self.MAX_LINEAR_SPEED)
-                vyaw = np.clip(goal_dir, -self.MAX_YAW_RATE, self.MAX_YAW_RATE)
-                cmd = VelocityCommand(vx=speed, vy=0.0, vyaw=float(vyaw))
+                self._ensure_go2()
+                if self._go2 and getattr(self._go2, "available", False):
+                    self._go2.stop_move()
+                with self._state_lock:
+                    self._state = NavState.E_STOP
+                logger.warning("NavCore: E-STOP triggered (no depth grid available)")
+                return
 
         elif state == NavState.AVOIDING:
             if grid:

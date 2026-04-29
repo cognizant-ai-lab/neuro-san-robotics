@@ -20,6 +20,7 @@ Once a goal is set, the NavCore background loop (10 Hz) handles all
 obstacle avoidance and path following autonomously.
 """
 
+import asyncio
 import math
 import logging
 from typing import Any, Dict
@@ -35,7 +36,8 @@ class NavPlannerTool(CodedTool):
 
     Supported commands:
     - navigate_to: Go to a named location on the topological map
-    - move_forward: Move forward a specified distance in meters
+    - move_forward: Move forward with depth watchdog protection
+    - move_until_obstacle: Move forward until an obstacle is near
     - turn: Rotate by a specified angle in degrees
     - stop: Cancel current navigation
     - status: Get navigation state summary
@@ -72,8 +74,19 @@ class NavPlannerTool(CodedTool):
         elif command == "move_forward":
             distance = float(args.get("distance", 1.0))
             distance = max(0.1, min(distance, 10.0))
-            nav.move_relative(distance, 0.0)
-            return f"Moving forward {distance:.1f} meters."
+            return await asyncio.to_thread(
+                nav.move_forward_guarded,
+                max_distance_m=distance,
+            )
+
+        elif command == "move_until_obstacle":
+            stop_distance = float(args.get("distance", nav.FORWARD_STOP_DISTANCE_M))
+            stop_distance = max(0.3, min(stop_distance, 2.0))
+            return await asyncio.to_thread(
+                nav.move_forward_guarded,
+                max_distance_m=None,
+                stop_distance_m=stop_distance,
+            )
 
         elif command == "turn":
             target = args.get("target", "").lower()

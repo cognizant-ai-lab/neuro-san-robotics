@@ -89,7 +89,8 @@ If you choose to perform a physical action, call your robot_macros tool with one
 
 If the user asks you to go somewhere, move to a location, or navigate, use your nav_planner tool.
 You can check your surroundings and navigation progress using nav_status.
-Available navigation commands: navigate_to (go to a named place), move_forward (go straight a distance),
+Available navigation commands: navigate_to (go to a named place), move_forward (go forward with depth safety),
+move_until_obstacle (walk forward until the front depth sensor reaches the requested stop distance),
 turn (rotate left/right), stop (cancel navigation).
 When navigating, you will be informed when you arrive or if navigation fails.
             """,
@@ -166,7 +167,7 @@ When navigating, you will be informed when you arrive or if navigation fails.
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "Navigation command: 'navigate_to', 'move_forward', 'turn', 'stop', 'status'"
+                            "description": "Navigation command: 'navigate_to', 'move_forward', 'move_until_obstacle', 'turn', 'stop', 'status'"
                         },
                         "target": {
                             "type": "string",
@@ -174,7 +175,7 @@ When navigating, you will be informed when you arrive or if navigation fails.
                         },
                         "distance": {
                             "type": "number",
-                            "description": "Distance in meters (for move_forward) or angle in degrees (for turn)"
+                            "description": "Distance in meters (for move_forward), stop distance in meters (for move_until_obstacle), or angle in degrees (for turn)"
                         }
                     },
                     "required": ["command"]

@@ -150,6 +150,150 @@ python -m pip install -e .
 cd ..
 ```
 
+### Set up navigation and RealSense depth on the robot
+
+`nav_core` needs a forward-facing depth camera for physical movement. Do not
+run navigation movement commands until `DepthProcessor` reports
+`backend: realsense` and returns a valid grid.
+
+On the Jetson/Go2, install the system tools first:
+
+```shell
+sudo apt-get update
+sudo apt-get install -y \
+  git cmake build-essential pkg-config \
+  libssl-dev libusb-1.0-0-dev libudev-dev libgtk-3-dev \
+  v4l-utils librealsense2-utils librealsense2-dev
+```
+
+Verify that the camera is visible to librealsense:
+
+```shell
+rs-enumerate-devices
+```
+
+You should see an Intel RealSense device, such as `Intel RealSense D435I`.
+
+#### Build `pyrealsense2` for Jetson/aarch64
+
+Jetson/aarch64 usually cannot install `pyrealsense2` from pip because there is
+no matching wheel. Build the Python binding against the active Python 3.11 venv:
+
+```shell
+cd ~/exp/neuro-san-robotics-hormoz
+source venv/bin/activate
+export PYTHONPATH="$PWD:$PYTHONPATH"
+
+SDK_VER="$(dpkg-query -W -f='${Version}' librealsense2-utils 2>/dev/null | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+echo "SDK_VER=$SDK_VER"
+
+cd ~
+git clone --depth 1 --branch "v${SDK_VER}" \
+  https://github.com/IntelRealSense/librealsense.git \
+  "librealsense-${SDK_VER}"
+
+cd "librealsense-${SDK_VER}"
+mkdir -p build && cd build
+
+cmake .. \
+  -DBUILD_PYTHON_BINDINGS:bool=true \
+  -DPYTHON_EXECUTABLE="$(which python)" \
+  -DFORCE_RSUSB_BACKEND=ON \
+  -DBUILD_EXAMPLES=OFF \
+  -DBUILD_GRAPHICAL_EXAMPLES=OFF \
+  -DBUILD_TOOLS=OFF \
+  -DCMAKE_BUILD_TYPE=Release
+
+make -j"$(nproc)"
+```
+
+Add the built binding and librealsense library to the robot shell environment.
+These exports can also go into `setmyenv.sh`:
+
+```shell
+SDK_VER="${SDK_VER:-$(dpkg-query -W -f='${Version}' librealsense2-utils 2>/dev/null | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')}"
+export PYTHONPATH="$HOME/librealsense-${SDK_VER}/build/Release:$PWD:$PYTHONPATH"
+export LD_LIBRARY_PATH="$HOME/librealsense-${SDK_VER}/build:$LD_LIBRARY_PATH"
+export NAV_DEPTH_CAMERA_SOURCE=realsense
+```
+
+Verify Python can see the RealSense camera:
+
+```shell
+python - <<'PY'
+import pyrealsense2 as rs
+ctx = rs.context()
+print("pyrealsense2:", rs.__file__)
+print("devices:", len(ctx.query_devices()))
+PY
+```
+
+Expected result: `devices: 1`.
+
+#### Verify nav depth before movement
+
+```shell
+cd ~/exp/neuro-san-robotics-hormoz
+source venv/bin/activate
+SDK_VER="${SDK_VER:-$(dpkg-query -W -f='${Version}' librealsense2-utils 2>/dev/null | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')}"
+export PYTHONPATH="$HOME/librealsense-${SDK_VER}/build/Release:$PWD:$PYTHONPATH"
+export LD_LIBRARY_PATH="$HOME/librealsense-${SDK_VER}/build:$LD_LIBRARY_PATH"
+export NAV_DEPTH_CAMERA_SOURCE=realsense
+
+python - <<'PY'
+from coded_tools.unigo2.depth_processor import DepthProcessor
+
+dp = DepthProcessor()
+print("backend:", dp.backend)
+grid = dp.get_single_frame_grid()
+print("grid:", grid is not None)
+if grid:
+    print("nearest_obstacle_m:", grid.nearest_obstacle_m)
+    print("occupied_cells:", int((grid.grid > 0).sum()))
+reading = dp.get_center_depth_reading()
+print("center_depth_m:", None if reading is None else reading.distance_m)
+dp.stop()
+PY
+```
+
+Expected result: `backend: realsense`, `grid: True`, and a finite
+`center_depth_m` when something is in the camera's center view.
+
+#### Run guarded forward movement
+
+For physical movement, prefer the guarded forward primitive. It keeps a
+continuous Go2 walking command active while a raw RealSense center-depth
+watchdog stops the robot when something is close enough. This avoids the
+dead-reckoned low-speed crawl that can make the Go2 tiptoe or shake.
+
+Set the movement defaults:
+
+```shell
+export NAV_FORWARD_SPEED=0.45
+export NAV_FORWARD_STOP_DISTANCE=0.75
+export NAV_FORWARD_MAX_SECONDS=15
+export NAV_FORWARD_COMMAND_PERIOD=0.20
+```
+
+To move forward until the center-depth watchdog sees an obstacle at about
+`0.75m`:
+
+```shell
+python - <<'PY'
+from coded_tools.unigo2.nav_core import NavCore
+
+nav = NavCore.get_instance()
+try:
+    print(nav.move_forward_guarded(stop_distance_m=0.75))
+finally:
+    nav.shutdown()
+PY
+```
+
+The Neuro SAN agent command `move_until_obstacle` uses the same guarded
+movement path. `move_forward` also uses this path with a time backstop derived
+from the requested distance until real odometry is available.
+
 ### Troubleshooting
 
 If you run into the following error:

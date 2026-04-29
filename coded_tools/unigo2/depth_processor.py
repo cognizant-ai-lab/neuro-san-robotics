@@ -35,10 +35,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+try:
+    import cv2
+    _HAS_CV2 = True
+except ImportError:
+    cv2 = None
+    _HAS_CV2 = False
 
 # ---------------------------------------------------------------------------
 # Environment helpers (same pattern as vision_core.py)
@@ -102,6 +108,14 @@ class ObstacleGrid:
 
 
 @dataclass
+class CenterDepthReading:
+    """Raw center-band depth estimate used as a forward-motion watchdog."""
+    distance_m: float
+    coverage: float
+    timestamp: float = 0.0
+
+
+@dataclass
 class DepthProcessorConfig:
     """Configuration for depth processing pipeline."""
     # Grid parameters
@@ -153,6 +167,8 @@ class DepthProcessor:
         self._config = config or self._config_from_env()
         self._lock = threading.Lock()
         self._latest_grid: Optional[ObstacleGrid] = None
+        self._latest_depth_m: Optional[np.ndarray] = None
+        self._latest_depth_timestamp: float = 0.0
         self._pipeline = None          # RealSense pipeline
         self._cv_capture = None        # OpenCV VideoCapture fallback
         self._running = False
@@ -260,6 +276,9 @@ class DepthProcessor:
 
     def _init_opencv_depth(self, source: str):
         """Open a specific depth camera via OpenCV (device index or path)."""
+        if not _HAS_CV2:
+            logger.warning("DepthProcessor: OpenCV is not installed")
+            return
         try:
             idx = int(source)
             cap = cv2.VideoCapture(idx)
@@ -276,6 +295,8 @@ class DepthProcessor:
 
     def _try_opencv_depth_auto(self):
         """Scan /dev/video* for a single-channel depth camera, skipping RGB devices."""
+        if not _HAS_CV2:
+            return
         from pathlib import Path
         video_devices = sorted(
             (p for p in Path("/dev").glob("video*") if p.name.removeprefix("video").isdigit()),
@@ -308,7 +329,12 @@ class DepthProcessor:
         radius_cells = max(1, int(self._config.robot_half_width / self._config.grid_resolution))
         size = 2 * radius_cells + 1
         kernel = np.zeros((size, size), dtype=np.uint8)
-        cv2.circle(kernel, (radius_cells, radius_cells), radius_cells, 1, -1)
+        if _HAS_CV2:
+            cv2.circle(kernel, (radius_cells, radius_cells), radius_cells, 1, -1)
+        else:
+            yy, xx = np.ogrid[:size, :size]
+            mask = (yy - radius_cells) ** 2 + (xx - radius_cells) ** 2 <= radius_cells ** 2
+            kernel[mask] = 1
         return kernel
 
     # ------------------------------------------------------------------
@@ -355,6 +381,8 @@ class DepthProcessor:
                 if depth_frame is not None:
                     grid = self._process_depth_to_grid(depth_frame)
                     with self._lock:
+                        self._latest_depth_m = depth_frame
+                        self._latest_depth_timestamp = time.time()
                         self._latest_grid = grid
             except Exception as exc:
                 logger.error("DepthProcessor: capture error: %s", exc)
@@ -429,11 +457,16 @@ class DepthProcessor:
 
         # Step 1: Downsample
         if depth_m.shape[0] != cfg.process_height or depth_m.shape[1] != cfg.process_width:
-            depth_m = cv2.resize(
-                depth_m,
-                (cfg.process_width, cfg.process_height),
-                interpolation=cv2.INTER_NEAREST,
-            )
+            if _HAS_CV2:
+                depth_m = cv2.resize(
+                    depth_m,
+                    (cfg.process_width, cfg.process_height),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            else:
+                row_idx = np.linspace(0, depth_m.shape[0] - 1, cfg.process_height).astype(np.int32)
+                col_idx = np.linspace(0, depth_m.shape[1] - 1, cfg.process_width).astype(np.int32)
+                depth_m = depth_m[np.ix_(row_idx, col_idx)]
 
         # Step 2: Mask invalid depths
         valid = (depth_m > cfg.min_depth_m) & (depth_m < cfg.max_depth_m)
@@ -494,9 +527,12 @@ class DepthProcessor:
 
         # Step 6: Inflate obstacles by robot radius
         if np.any(grid > 0):
-            grid_u8 = (grid * 255).astype(np.uint8)
-            grid_u8 = cv2.dilate(grid_u8, self._inflation_kernel, iterations=1)
-            grid = (grid_u8 > 0).astype(np.float32)
+            if _HAS_CV2:
+                grid_u8 = (grid * 255).astype(np.uint8)
+                grid_u8 = cv2.dilate(grid_u8, self._inflation_kernel, iterations=1)
+                grid = (grid_u8 > 0).astype(np.float32)
+            else:
+                grid = self._dilate_grid_numpy(grid)
 
         # Step 7: Compute nearest obstacle distance and bearing
         nearest_dist = float("inf")
@@ -525,6 +561,22 @@ class DepthProcessor:
             nearest_obstacle_bearing=nearest_bearing,
         )
 
+    def _dilate_grid_numpy(self, grid: np.ndarray) -> np.ndarray:
+        """Numpy fallback for one binary dilation iteration."""
+        binary = grid > 0
+        kernel = self._inflation_kernel > 0
+        pad_y = kernel.shape[0] // 2
+        pad_x = kernel.shape[1] // 2
+        padded = np.pad(binary, ((pad_y, pad_y), (pad_x, pad_x)), mode="constant")
+        dilated = np.zeros_like(binary, dtype=bool)
+
+        for ky, kx in np.argwhere(kernel):
+            y0 = ky
+            x0 = kx
+            dilated |= padded[y0:y0 + binary.shape[0], x0:x0 + binary.shape[1]]
+
+        return dilated.astype(np.float32)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -543,7 +595,89 @@ class DepthProcessor:
         depth = self._read_depth_frame()
         if depth is None:
             return None
+        with self._lock:
+            self._latest_depth_m = depth
+            self._latest_depth_timestamp = time.time()
         return self._process_depth_to_grid(depth)
+
+    def get_center_depth_reading(
+        self,
+        vertical_band: Tuple[float, float] = (0.375, 0.708),
+        half_width_ratio: float = 0.22,
+        percentile: float = 10.0,
+        max_depth_m: float = 8.0,
+        min_coverage: float = 0.02,
+    ) -> Optional[CenterDepthReading]:
+        """Return a raw center-band depth estimate for forward obstacle stopping.
+
+        This intentionally bypasses the ground-plane projection used by
+        get_obstacle_grid(). On the Go2, the projected grid can include floor or
+        side false positives during walking; a raw mid-image band gave the most
+        stable "object straight ahead" signal during robot testing.
+        """
+        depth = self._get_latest_depth_frame()
+        if depth is None:
+            return None
+        return self._center_depth_reading_from_frame(
+            depth,
+            vertical_band=vertical_band,
+            half_width_ratio=half_width_ratio,
+            percentile=percentile,
+            max_depth_m=max_depth_m,
+            min_coverage=min_coverage,
+        )
+
+    def _get_latest_depth_frame(self) -> Optional[np.ndarray]:
+        """Return the latest raw depth frame, capturing one if the thread has none."""
+        if self._backend == "simulation":
+            return self._generate_synthetic_depth()
+
+        with self._lock:
+            depth = None if self._latest_depth_m is None else self._latest_depth_m.copy()
+
+        if depth is not None:
+            return depth
+
+        depth = self._read_depth_frame()
+        if depth is not None:
+            with self._lock:
+                self._latest_depth_m = depth
+                self._latest_depth_timestamp = time.time()
+        return depth
+
+    def _center_depth_reading_from_frame(
+        self,
+        depth_m: np.ndarray,
+        vertical_band: Tuple[float, float] = (0.375, 0.708),
+        half_width_ratio: float = 0.22,
+        percentile: float = 10.0,
+        max_depth_m: float = 8.0,
+        min_coverage: float = 0.02,
+    ) -> Optional[CenterDepthReading]:
+        """Compute a robust low-percentile depth from the center image band."""
+        if depth_m is None or depth_m.size == 0:
+            return None
+
+        h, w = depth_m.shape[:2]
+        row_start = max(0, min(h - 1, int(h * vertical_band[0])))
+        row_end = max(row_start + 1, min(h, int(h * vertical_band[1])))
+        half_width = max(1, int(w * half_width_ratio))
+        col_center = w // 2
+        col_start = max(0, col_center - half_width)
+        col_end = min(w, col_center + half_width)
+
+        roi = depth_m[row_start:row_end, col_start:col_end]
+        valid = roi[(roi > self._config.min_depth_m) & (roi < max_depth_m)]
+        coverage = float(valid.size / max(roi.size, 1))
+
+        if coverage < min_coverage or valid.size == 0:
+            return None
+
+        return CenterDepthReading(
+            distance_m=float(np.percentile(valid, percentile)),
+            coverage=coverage,
+            timestamp=time.time(),
+        )
 
     @property
     def backend(self) -> str:

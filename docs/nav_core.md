@@ -170,7 +170,8 @@ Commands the robot to navigate.
 | Command | Parameters | Example |
 |---------|-----------|---------|
 | `navigate_to` | `target`: destination name | "Go to the kitchen" |
-| `move_forward` | `distance`: meters (0.1-10) | "Move forward 2 meters" |
+| `move_forward` | `distance`: max meters (0.1-10) | "Move forward 2 meters" |
+| `move_until_obstacle` | `distance`: stop distance in meters | "Move forward until something is 0.75 meters ahead" |
 | `turn` | `target`: left/right/around, `distance`: degrees | "Turn left 90 degrees" |
 | `stop` | — | "Stop moving" |
 | `status` | — | "Where are you?" |
@@ -201,6 +202,9 @@ Both tools are registered in `registries/conscious_agent.hocon`.
 | `NAV_MAX_YAW_RATE` | `0.5` | Max rotation speed (rad/s) |
 | `NAV_SAFETY_DISTANCE` | `0.4` | E-stop distance (meters) |
 | `NAV_AVOIDANCE_DISTANCE` | `0.8` | Start slowing down (meters) |
+| `NAV_FORWARD_SPEED` | `0.45` | Continuous guarded forward command speed |
+| `NAV_FORWARD_STOP_DISTANCE` | `0.75` | Center-depth watchdog stop distance |
+| `NAV_FORWARD_MAX_SECONDS` | `15` | Timeout for move_until_obstacle |
 | `NAV_DEPTH_CAMERA_SOURCE` | `auto` | `auto`, `realsense`, or OpenCV device index |
 | `NAV_GRID_RESOLUTION` | `0.05` | Obstacle grid cell size (meters) |
 | `NAV_CAMERA_MOUNT_HEIGHT` | `0.30` | Depth camera height from ground (meters) |

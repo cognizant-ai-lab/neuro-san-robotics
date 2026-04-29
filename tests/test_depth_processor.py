@@ -4,6 +4,7 @@ import unittest
 import numpy as np
 
 from coded_tools.unigo2.depth_processor import (
+    CenterDepthReading,
     DepthProcessor,
     DepthProcessorConfig,
     ObstacleGrid,
@@ -105,6 +106,25 @@ class TestDepthProcessing(unittest.TestCase):
         occupied = int(np.sum(grid.grid > 0))
         self.assertGreater(occupied, 0, "1m wall should produce obstacles in grid")
         self.assertLess(grid.nearest_obstacle_m, 2.0)
+
+    def test_center_depth_reading_uses_mid_image_band(self):
+        proc = DepthProcessor(config=_make_config(simulation_mode=True))
+        depth = np.full((480, 640), 6.0, dtype=np.float32)
+        depth[180:340, 320 - 120:320 + 120] = 0.7
+
+        reading = proc._center_depth_reading_from_frame(depth)
+
+        self.assertIsInstance(reading, CenterDepthReading)
+        self.assertAlmostEqual(reading.distance_m, 0.7, places=2)
+        self.assertGreater(reading.coverage, 0.02)
+
+    def test_center_depth_reading_returns_none_when_band_has_no_signal(self):
+        proc = DepthProcessor(config=_make_config(simulation_mode=True))
+        depth = np.full((480, 640), 10.0, dtype=np.float32)
+
+        reading = proc._center_depth_reading_from_frame(depth, max_depth_m=8.0)
+
+        self.assertIsNone(reading)
 
 
 class TestBboxDistanceEstimation(unittest.TestCase):

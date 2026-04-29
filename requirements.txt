@@ -20,11 +20,15 @@ pyttsx3>=2.90 ; sys_platform == "darwin"
 piper-tts>=1.2 ; sys_platform == "linux"
 
 # Vision dependencies
+numpy>=1.24
 ultralytics>=8.4.7
 deepface>=0.0.97
 tf-keras>=2.20.1
 opencv-python>=4.13.0.90
 
 # Navigation dependencies (nav_core)
-pyrealsense2>=2.50 ; sys_platform == "linux"
+# RealSense publishes pip wheels for some Linux platforms, but not for Jetson
+# aarch64. On Jetson, install librealsense2-utils/librealsense2-dev with apt
+# and build the Python bindings for the active venv; see README.md.
+pyrealsense2>=2.50 ; sys_platform == "linux" and platform_machine != "aarch64" and platform_machine != "arm64"
 scipy>=1.10

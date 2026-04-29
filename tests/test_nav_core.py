@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import numpy as np
 
-from coded_tools.unigo2.depth_processor import ObstacleGrid
+from coded_tools.unigo2.depth_processor import CenterDepthReading, ObstacleGrid
 from coded_tools.unigo2.nav_core import (
     GlobalPlanner,
     LocalPlanner,
@@ -412,6 +412,63 @@ class TestNavCoreStatus(unittest.TestCase):
             nav = NavCore.get_instance()
             result = nav.list_destinations()
             self.assertIn("No map loaded", result)
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_guarded_forward_moves_until_center_depth_threshold(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            fake_depth = MagicMock()
+            fake_depth.is_available = True
+            fake_depth.get_center_depth_reading.side_effect = [
+                CenterDepthReading(distance_m=2.0, coverage=0.5),
+                CenterDepthReading(distance_m=2.0, coverage=0.5),
+                CenterDepthReading(distance_m=0.7, coverage=0.5),
+            ]
+            nav._depth_processor = fake_depth
+
+            result = nav.move_forward_guarded(
+                stop_distance_m=0.75,
+                speed=0.45,
+                max_seconds=1.0,
+                command_period_s=0.0,
+            )
+
+            self.assertIn("Stopped forward movement", result)
+            self.assertGreaterEqual(fake_go2.move.call_count, 1)
+            fake_go2.stop_move.assert_called()
+            self.assertEqual(nav.state, NavState.IDLE)
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_guarded_forward_refuses_without_center_depth(self, mock_go2):
+        mock_go2.return_value = MagicMock()
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            fake_depth = MagicMock()
+            fake_depth.is_available = True
+            fake_depth.get_center_depth_reading.return_value = None
+            nav._depth_processor = fake_depth
+
+            result = nav.move_forward_guarded(max_seconds=1.0, command_period_s=0.0)
+
+            self.assertIn("Cannot move forward", result)
+            mock_go2.assert_not_called()
             nav.shutdown()
         finally:
             NavCore._instance = None
