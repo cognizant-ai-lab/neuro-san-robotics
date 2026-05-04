@@ -62,6 +62,21 @@ class _FakeVision:
         return frame.copy()
 
 
+class _FakeVideoClient:
+    instances = []
+
+    def __init__(self):
+        self.timeout = None
+        self.initialized = False
+        _FakeVideoClient.instances.append(self)
+
+    def SetTimeout(self, timeout):
+        self.timeout = timeout
+
+    def Init(self):
+        self.initialized = True
+
+
 class _FakeILoc:
     def __init__(self, row):
         self._row = row
@@ -218,6 +233,24 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertIs(capture, fake_capture)
         self.assertEqual(info["description"], "Unitree Go2 front camera via eth0")
         self.assertEqual(info["backend"], "Unitree SDK2")
+
+    def test_unitree_capture_reuses_go2_initialized_channel(self):
+        vision_core._UNITREE_CHANNEL_STATE.update({"initialized": False, "ifname": None})
+        _FakeVideoClient.instances.clear()
+
+        channel_factory = __import__("unittest").mock.MagicMock()
+        with (
+            patch.object(vision_core, "_go2_channel_already_initialized", return_value=(True, "eth0")),
+            patch.object(vision_core, "_load_unitree_video_sdk", return_value=(channel_factory, _FakeVideoClient)),
+        ):
+            capture = vision_core.UnitreeVideoCapture(ifname="eth0")
+
+        self.assertTrue(capture.isOpened())
+        channel_factory.assert_not_called()
+        self.assertEqual(vision_core._UNITREE_CHANNEL_STATE["ifname"], "eth0")
+        self.assertEqual(len(_FakeVideoClient.instances), 1)
+        self.assertEqual(_FakeVideoClient.instances[0].timeout, 3.0)
+        self.assertTrue(_FakeVideoClient.instances[0].initialized)
 
     def test_detect_camera_snapshot_reuses_headless_detection_flow(self):
         cap = _FakeCapture(

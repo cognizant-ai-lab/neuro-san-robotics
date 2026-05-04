@@ -615,6 +615,8 @@ def conscious_thinking_process():
                 processing_started = True
 
                 if execute_direct_robot_command(user_input):
+                    socketio.emit("processing_complete", namespace="/chat")
+                    processing_started = False
                     continue
 
                 # Speak acknowledgment immediately to fill the gap

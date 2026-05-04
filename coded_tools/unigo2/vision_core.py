@@ -163,6 +163,20 @@ def _unitree_camera_available() -> bool:
         return False
 
 
+def _go2_channel_already_initialized() -> tuple[bool, Optional[str]]:
+    """Detect DDS initialization done by Go2Macros in the same process."""
+    try:
+        from coded_tools.unigo2 import go2_macros
+    except Exception:
+        return False, None
+
+    state = getattr(go2_macros, "_ROBOT_INIT_STATE", {})
+    if not state.get("channel_initialized"):
+        return False, None
+
+    return True, getattr(go2_macros, "IFNAME", None)
+
+
 class UnitreeVideoCapture:
     """Small VideoCapture-compatible wrapper around Unitree's Go2 VideoClient."""
 
@@ -178,12 +192,17 @@ class UnitreeVideoCapture:
 
         channel_ifname = self.ifname
         if not _UNITREE_CHANNEL_STATE["initialized"]:
-            if channel_ifname:
-                channel_factory_initialize(0, channel_ifname)
+            go2_initialized, go2_ifname = _go2_channel_already_initialized()
+            if go2_initialized:
+                _UNITREE_CHANNEL_STATE["initialized"] = True
+                _UNITREE_CHANNEL_STATE["ifname"] = go2_ifname or channel_ifname
             else:
-                channel_factory_initialize(0)
-            _UNITREE_CHANNEL_STATE["initialized"] = True
-            _UNITREE_CHANNEL_STATE["ifname"] = channel_ifname
+                if channel_ifname:
+                    channel_factory_initialize(0, channel_ifname)
+                else:
+                    channel_factory_initialize(0)
+                _UNITREE_CHANNEL_STATE["initialized"] = True
+                _UNITREE_CHANNEL_STATE["ifname"] = channel_ifname
 
         self._client = video_client_cls()
         self._client.SetTimeout(self.timeout)
