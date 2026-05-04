@@ -2,6 +2,7 @@ import os
 import time
 import platform
 import traceback
+import threading
 
 USE_REAL_ROBOT = True
 IFNAME = "eth0"                     # "eth0" if you're on wired
@@ -26,7 +27,10 @@ _ROBOT_INIT_STATE = {
     "available": True,
     "error": None,
     "reported_disabled": False,
+    "client": None,
+    "channel_initialized": False,
 }
+_ROBOT_INIT_LOCK = threading.Lock()
 
 
 def _coerce_status(ret):
@@ -50,47 +54,66 @@ class Go2Macros:
             self._log("⚙️ Running in simulation/offline mode (no robot)")
             return
 
-        if _ROBOT_INIT_STATE["attempted"] and not _ROBOT_INIT_STATE["available"]:
-            if not _ROBOT_INIT_STATE["reported_disabled"]:
-                self._log(
-                    "⚙️ Robot control disabled after prior initialization failure: "
-                    f"{_ROBOT_INIT_STATE['error']}"
+        with _ROBOT_INIT_LOCK:
+            cached_client = _ROBOT_INIT_STATE.get("client")
+            if cached_client is not None and _ROBOT_INIT_STATE["available"]:
+                self.cli = cached_client
+                self.available = True
+                return
+
+            if _ROBOT_INIT_STATE["attempted"] and not _ROBOT_INIT_STATE["available"]:
+                if not _ROBOT_INIT_STATE["reported_disabled"]:
+                    self._log(
+                        "⚙️ Robot control disabled after prior initialization failure: "
+                        f"{_ROBOT_INIT_STATE['error']}"
+                    )
+                    _ROBOT_INIT_STATE["reported_disabled"] = True
+                return
+
+            try:
+                if not _ROBOT_INIT_STATE["channel_initialized"]:
+                    # DDS is process-global. Initializing it more than once can fail when
+                    # Flask, vision, deferred actions, and nav all create Go2 helpers.
+                    self._log("🔍 Initializing ChannelFactory")
+                    try:
+                        ChannelFactoryInitialize(0)
+                        _ROBOT_INIT_STATE["channel_initialized"] = True
+                    except Exception as channel_error:
+                        self._log(
+                            "⚠️ ChannelFactory init raised; trying existing DDS participant: "
+                            f"{channel_error}"
+                        )
+
+                # --- Initialize Sport client (matches go2_sport_client.py) ---
+                self._log("🔍 Initializing SportClient")
+                self.cli = sport_client.SportClient()
+                self.cli.SetTimeout(10.0)
+                self.cli.Init()
+                self.available = True
+                _ROBOT_INIT_STATE.update(
+                    {
+                        "attempted": True,
+                        "available": True,
+                        "error": None,
+                        "reported_disabled": False,
+                        "client": self.cli,
+                        "channel_initialized": True,
+                    }
                 )
-                _ROBOT_INIT_STATE["reported_disabled"] = True
-            return
+                self._log("✅ SportClient initialized and ready")
 
-        try:
-            # --- Initialize DDS channel (matches go2_sport_client.py) ---
-            self._log("🔍 Initializing ChannelFactory")
-            ChannelFactoryInitialize(0)
-
-            # --- Initialize Sport client (matches go2_sport_client.py) ---
-            self._log("🔍 Initializing SportClient")
-            self.cli = sport_client.SportClient()
-            self.cli.SetTimeout(10.0)
-            self.cli.Init()
-            self.available = True
-            _ROBOT_INIT_STATE.update(
-                {
-                    "attempted": True,
-                    "available": True,
-                    "error": None,
-                    "reported_disabled": False,
-                }
-            )
-            self._log("✅ SportClient initialized and ready")
-
-        except Exception as e:
-            _ROBOT_INIT_STATE.update(
-                {
-                    "attempted": True,
-                    "available": False,
-                    "error": str(e),
-                    "reported_disabled": False,
-                }
-            )
-            self._log(f"❌ Failed to initialize: {e}")
-            traceback.print_exc()
+            except Exception as e:
+                _ROBOT_INIT_STATE.update(
+                    {
+                        "attempted": True,
+                        "available": False,
+                        "error": str(e),
+                        "reported_disabled": False,
+                        "client": None,
+                    }
+                )
+                self._log(f"❌ Failed to initialize: {e}")
+                traceback.print_exc()
 
     def _log(self, msg: str):
         print(f"[{time.strftime('%H:%M:%S')}] {msg}")
