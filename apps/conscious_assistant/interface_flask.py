@@ -9,7 +9,6 @@ import site
 import sys
 import tempfile
 import threading
-import time
 from datetime import datetime
 
 from pathlib import Path
@@ -206,15 +205,6 @@ THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
 
 # Robot motion configuration
 ROBOT_MOTION_PROBABILITY = _env_float("CONSCIOUS_ROBOT_MOTION_PROBABILITY", 0.0)
-ACK_WAIT_SECONDS = _env_float("CONSCIOUS_ACK_WAIT_SECONDS", 0.0)
-TTS_TIMEOUT_SECONDS = _env_float("CONSCIOUS_TTS_TIMEOUT_SECONDS", 6.0)
-AGENT_TIMEOUT_SECONDS = _env_float("CONSCIOUS_AGENT_TIMEOUT_SECONDS", 20.0)
-AGENT_TIMEOUT_ENABLED = _env_flag("CONSCIOUS_ENABLE_AGENT_TIMEOUT", default=False)
-IDLE_THINKING_ENABLED = _env_flag("CONSCIOUS_ENABLE_IDLE_THINKING", default=False)
-SCENE_AGENT_INPUT_ENABLED = _env_flag("CONSCIOUS_ENABLE_SCENE_AGENT_INPUT", default=False)
-CONVERSATION_BACKEND = os.environ.get("CONSCIOUS_CONVERSATION_BACKEND", "openai").strip().lower()
-OPENAI_CHAT_MODEL = os.environ.get("CONSCIOUS_OPENAI_CHAT_MODEL", "gpt-4.1")
-OPENAI_CHAT_TIMEOUT_SECONDS = _env_float("CONSCIOUS_OPENAI_CHAT_TIMEOUT_SECONDS", 12.0)
 ALLOWED_ROBOT_ACTIONS = [
     "sit_rise",
     "step_backward",
@@ -275,9 +265,6 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 thread_started = False  # pylint: disable=invalid-name
-_agent_executor = None
-_conversation_history_lock = threading.Lock()
-_conversation_history = []
 
 user_input_queue = queue.Queue()
 
@@ -393,42 +380,13 @@ def speak_text_streaming(
         logging.info("No text to speak after sanitization")
         return
 
-    if on_speech_complete:
-        try:
+    try:
+        logging.info("Speaking: %s", clean_text[:50])
+        tts_say(clean_text, chunked=False)
+        if on_speech_complete:
             on_speech_complete(clean_text)
-        except Exception:
-            logging.exception("Failed to emit speech text to UI")
-
-    def run_tts():
-        try:
-            logging.info("Speaking: %s", clean_text[:50])
-            tts_say(clean_text, chunked=False)
-        except Exception:
-            logging.exception("TTS failed for text: %s", clean_text[:50])
-
-    if TTS_TIMEOUT_SECONDS <= 0:
-        run_tts()
-        return
-
-    tts_thread = threading.Thread(target=run_tts, daemon=True, name="tts-call")
-    tts_thread.start()
-    tts_thread.join(TTS_TIMEOUT_SECONDS)
-    if tts_thread.is_alive():
-        logging.warning(
-            "TTS timed out after %.1fs; continuing so agent/actions do not block",
-            TTS_TIMEOUT_SECONDS,
-        )
-
-
-def _wait_for_queue_drain(work_queue: queue.Queue, timeout_s: float) -> bool:
-    if timeout_s <= 0:
-        return False
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if getattr(work_queue, "unfinished_tasks", 0) == 0:
-            return True
-        time.sleep(0.05)
-    return getattr(work_queue, "unfinished_tasks", 0) == 0
+    except Exception:
+        logging.exception("TTS failed for text: %s", clean_text[:50])
 
 
 def speak_text(text: str) -> None:
@@ -442,211 +400,6 @@ def speak_text(text: str) -> None:
     Speaks full text at once for better prosody.
     """
     speak_text_streaming(text, on_speech_complete=None)
-
-
-
-def _direct_robot_action_for_text(user_text: str):
-    """Map simple spoken commands to deterministic robot actions."""
-    if not _env_flag("CONSCIOUS_DIRECT_ROBOT_COMMANDS", default=True):
-        return None
-
-    text = user_text.strip().lower()
-    if not text:
-        return None
-
-    normalized = re.sub(r"[^a-z0-9]+", " ", text).strip()
-    words = set(normalized.split())
-    logging.info("Direct robot command parse: raw=%r normalized=%r words=%s", user_text, normalized, sorted(words))
-
-    forward_words = {"forward", "forwards", "forth", "ahead"}
-    backward_words = {"back", "backward", "backwards", "reverse"}
-    move_words = {"step", "move", "walk", "go", "come", "run", "straight"}
-    show_words = {"show", "do", "perform", "make", "give"}
-    trick_words = {"move", "moves", "trick", "tricks", "dance", "dancing", "boogie"}
-
-    if words & {"stop", "halt", "freeze"}:
-        return "stop_move", "Stopping now."
-    if words & backward_words and (words & move_words or normalized in backward_words):
-        return "step_backward", "Stepping backward now."
-    if words & forward_words and (words & move_words or normalized in forward_words):
-        return "step_forward", "Stepping forward now."
-    if "step" in words:
-        return "step_forward", "Stepping forward now."
-    if (words & show_words) and (words & trick_words):
-        return "dance", "Dancing now."
-    if words & {"dance", "dancing", "boogie"}:
-        return "dance", "Dancing now."
-    if words & {"shake", "shaking", "hello", "wave", "waving"}:
-        return "shake", "Shaking now."
-    if words & {"stretch", "stretching"}:
-        return "stretch", "Stretching now."
-    if "heart" in words:
-        return "heart_pose", "Doing a heart pose now."
-    if "sit" in words:
-        return "sit", "Sitting now."
-    if words & {"stand", "standing"}:
-        return "balance_stand", "Standing now."
-
-    return None
-
-
-def execute_direct_robot_command(user_text: str) -> bool:
-    """Execute obvious robot commands without waiting for the LLM agent."""
-    match = _direct_robot_action_for_text(user_text)
-    if match is None:
-        return False
-
-    action, speech = match
-    logging.info("Direct robot command matched action=%s for input=%r", action, user_text)
-    socketio.emit("update_speech", {"data": speech}, namespace="/chat")
-    speech_queue.put(speech)
-
-    if not ROBOT_AVAILABLE or Go2Macros is None:
-        logging.warning("Robot not available for direct command %s", action)
-        return True
-
-    try:
-        go2 = Go2Macros()
-        if not getattr(go2, "available", False):
-            logging.warning("Robot control unavailable for direct command %s", action)
-            return True
-
-        if action == "step_forward":
-            go2.step_forward()
-        elif action == "step_backward":
-            go2.step_backward()
-        elif action == "dance":
-            go2.dance1()
-        elif action == "shake":
-            go2.shake()
-        elif action == "stretch":
-            go2.stretch()
-        elif action == "heart_pose":
-            go2.heart_pose()
-        elif action == "sit":
-            go2.sit()
-        elif action == "balance_stand":
-            go2.balance_stand()
-        elif action == "stop_move":
-            go2.stop_move()
-        else:
-            logging.warning("Unhandled direct robot action: %s", action)
-            return True
-
-        logging.info("Direct robot command completed: %s", action)
-    except Exception:
-        logging.exception("Direct robot command failed: %s", action)
-
-    return True
-
-
-def _extract_user_text(thoughts: str) -> str:
-    """Extract the latest user text from the timestamped thoughts string."""
-    if not thoughts:
-        return ""
-    marker = " user: "
-    if marker in thoughts:
-        return thoughts.rsplit(marker, maxsplit=1)[-1].strip()
-    return str(thoughts).strip()
-
-
-def _call_openai_conversation(thoughts: str) -> str:
-    """Small direct-chat fallback for the Flask UI when the full agent is unstable."""
-    user_text = _extract_user_text(thoughts)
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if not openai_api_key:
-        logging.warning("OPENAI_API_KEY is not configured for conversation fallback")
-        return "say: My chat brain is missing its API key, but direct robot commands still work."
-
-    observation = scene_observer.latest_observation()
-    observation_summary = ""
-    if observation:
-        observation_summary = observation.get("summary") or ""
-
-    system_prompt = (
-        "You are CAIL-E, a friendly robot dog in the Cognizant AI Lab in San Francisco. "
-        "Answer briefly, warmly, and naturally. Use one or two short sentences. "
-        "If the user asks for physical motion, say that you can do it, but the app may "
-        "handle simple commands like dance, forward, sit, stand, shake, stretch, and stop directly."
-    )
-    if observation_summary:
-        system_prompt += f" Current camera observation: {observation_summary}."
-
-    with _conversation_history_lock:
-        history = list(_conversation_history[-8:])
-
-    messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
-
-    try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=openai_api_key, timeout=OPENAI_CHAT_TIMEOUT_SECONDS)
-        response = client.chat.completions.create(
-            model=OPENAI_CHAT_MODEL,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=120,
-        )
-        content = response.choices[0].message.content or ""
-    except Exception:
-        logging.exception("OpenAI conversation fallback failed")
-        return "say: My chat brain hiccuped, but I am still ready for direct commands."
-
-    content = sanitize_speech_text(content).strip()
-    if not content:
-        return ""
-
-    with _conversation_history_lock:
-        _conversation_history.append({"role": "user", "content": user_text})
-        _conversation_history.append({"role": "assistant", "content": content})
-        del _conversation_history[:-8]
-
-    if not re.match(r"(?m)^\s*(thought|say)\s*:", content):
-        content = f"say: {content}"
-    return content
-
-
-def _call_conversation_backend(thoughts, current_thread):
-    """Run the configured conversation backend."""
-    if CONVERSATION_BACKEND in {"openai", "direct", "fallback"}:
-        return _call_openai_conversation(thoughts), current_thread
-
-    if not AGENT_TIMEOUT_ENABLED:
-        return conscious_thinker(
-            conscious_session,
-            current_thread,
-            thoughts,
-        )
-
-    import concurrent.futures
-
-    global _agent_executor  # pylint: disable=global-statement
-    if _agent_executor is None:
-        _agent_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="conscious-agent",
-        )
-
-    future = _agent_executor.submit(
-        conscious_thinker,
-        conscious_session,
-        current_thread,
-        thoughts,
-    )
-    try:
-        return future.result(timeout=AGENT_TIMEOUT_SECONDS)
-    except concurrent.futures.TimeoutError:
-        future.cancel()
-        logging.warning(
-            "Conscious thinker timed out after %.1fs; releasing UI",
-            AGENT_TIMEOUT_SECONDS,
-        )
-        return (
-            "say: I got stuck thinking, but I am ready for another direct command.",
-            current_thread,
-        )
 
 
 def perform_random_robot_motion() -> None:
@@ -748,12 +501,6 @@ def conscious_thinking_process():
                 socketio.emit("processing_started", namespace="/chat")
                 processing_started = True
 
-                if execute_direct_robot_command(user_input):
-                    thoughts = None
-                    socketio.emit("processing_complete", namespace="/chat")
-                    processing_started = False
-                    continue
-
                 # Speak acknowledgment immediately to fill the gap
                 acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
                 logging.info("Speaking acknowledgment: %s", acknowledgment)
@@ -765,20 +512,12 @@ def conscious_thinking_process():
                     namespace="/chat",
                 )
 
-                # Perform robot motion during the waiting time (50% chance)
+                # Perform optional robot motion during the waiting time.
                 # This happens while the speech is playing, filling the gap
                 perform_random_robot_motion()
 
-                if ACK_WAIT_SECONDS > 0:
-                    if _wait_for_queue_drain(speech_queue, ACK_WAIT_SECONDS):
-                        logging.info("Acknowledgment speech complete, proceeding with agent")
-                    else:
-                        logging.warning(
-                            "Acknowledgment speech still running after %.1fs; proceeding with agent",
-                            ACK_WAIT_SECONDS,
-                        )
-                else:
-                    logging.info("Proceeding with agent without waiting for acknowledgment TTS")
+                speech_queue.join()
+                logging.info("Acknowledgment speech complete, proceeding with agent")
 
             except queue.Empty:
                 observation = scene_observer.observe()
@@ -786,16 +525,9 @@ def conscious_thinking_process():
                     emit_observation_update(observation)
 
                 scene_input = None
-                if SCENE_AGENT_INPUT_ENABLED and observation and observation.get("objects"):
+                if observation and observation.get("objects"):
                     scene_input = build_scene_input(timestamp, observation["objects"])
                     logging.info("Scene observer detected objects: %s", ", ".join(observation["objects"]))
-
-                if scene_input is None:
-                    if not IDLE_THINKING_ENABLED:
-                        thoughts = None
-                        continue
-                    if thoughts is None:
-                        continue
 
                 if scene_input is None and thoughts is None:
                     continue
@@ -806,9 +538,10 @@ def conscious_thinking_process():
                 processing_started = True
 
             try:
-                raw_output, conscious_thread = _call_conversation_backend(
-                    thoughts,
+                raw_output, conscious_thread = conscious_thinker(
+                    conscious_session,
                     conscious_thread,
+                    thoughts,
                 )
                 thoughts = normalize_agent_output(raw_output)
                 print(thoughts)
@@ -1012,8 +745,6 @@ def cleanup(from_request=False):
 
     print("Bye!")
     scene_observer.cleanup()
-    if _agent_executor is not None:
-        _agent_executor.shutdown(wait=False, cancel_futures=True)
     tear_down_conscious_assistant(conscious_session)
 
     if from_request:

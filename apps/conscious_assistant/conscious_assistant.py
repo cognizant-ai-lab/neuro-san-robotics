@@ -1,4 +1,5 @@
 import os
+import time
 
 from neuro_san.client.agent_session_factory import AgentSessionFactory
 from neuro_san.client.streaming_input_processor import StreamingInputProcessor
@@ -60,7 +61,11 @@ def conscious_thinker(conscious_session, conscious_thread, thoughts):
     )
     # Update the conversation state with this turn's input
     conscious_thread["user_input"] = thoughts
+    start_time = time.monotonic()
+    print("[ConsciousAssistant] process_once starting")
     conscious_thread = input_processor.process_once(conscious_thread)
+    elapsed = time.monotonic() - start_time
+    print(f"[ConsciousAssistant] process_once returned in {elapsed:.2f}s")
     # Get the agent response for this turn
     last_chat_response = conscious_thread.get("last_chat_response")
     return last_chat_response, conscious_thread
