@@ -434,6 +434,88 @@ def speak_text(text: str) -> None:
     speak_text_streaming(text, on_speech_complete=None)
 
 
+
+def _direct_robot_action_for_text(user_text: str):
+    """Map simple spoken commands to deterministic robot actions."""
+    if not _env_flag("CONSCIOUS_DIRECT_ROBOT_COMMANDS", default=True):
+        return None
+
+    text = user_text.strip().lower()
+    if not text:
+        return None
+
+    if "step forward" in text or "move forward" in text or "walk forward" in text:
+        return "step_forward", "Stepping forward now."
+    if "step back" in text or "step backward" in text or "move backward" in text or "walk backward" in text:
+        return "step_backward", "Stepping backward now."
+    if "dance" in text:
+        return "dance", "Dancing now."
+    if "shake" in text or "hello" in text or "wave" in text:
+        return "shake", "Shaking now."
+    if "stretch" in text:
+        return "stretch", "Stretching now."
+    if "heart" in text:
+        return "heart_pose", "Doing a heart pose now."
+    if "sit" in text:
+        return "sit", "Sitting now."
+    if "stand" in text:
+        return "balance_stand", "Standing now."
+    if "stop" in text:
+        return "stop_move", "Stopping now."
+
+    return None
+
+
+def execute_direct_robot_command(user_text: str) -> bool:
+    """Execute obvious robot commands without waiting for the LLM agent."""
+    match = _direct_robot_action_for_text(user_text)
+    if match is None:
+        return False
+
+    action, speech = match
+    logging.info("Direct robot command matched action=%s for input=%r", action, user_text)
+    socketio.emit("update_speech", {"data": speech}, namespace="/chat")
+    speech_queue.put(speech)
+
+    if not ROBOT_AVAILABLE or Go2Macros is None:
+        logging.warning("Robot not available for direct command %s", action)
+        return True
+
+    try:
+        go2 = Go2Macros()
+        if not getattr(go2, "available", False):
+            logging.warning("Robot control unavailable for direct command %s", action)
+            return True
+
+        if action == "step_forward":
+            go2.step_forward()
+        elif action == "step_backward":
+            go2.step_backward()
+        elif action == "dance":
+            go2.dance1()
+        elif action == "shake":
+            go2.shake()
+        elif action == "stretch":
+            go2.stretch()
+        elif action == "heart_pose":
+            go2.heart_pose()
+        elif action == "sit":
+            go2.sit()
+        elif action == "balance_stand":
+            go2.balance_stand()
+        elif action == "stop_move":
+            go2.stop_move()
+        else:
+            logging.warning("Unhandled direct robot action: %s", action)
+            return True
+
+        logging.info("Direct robot command completed: %s", action)
+    except Exception:
+        logging.exception("Direct robot command failed: %s", action)
+
+    return True
+
+
 def perform_random_robot_motion() -> None:
     """
     Perform 1 or 2 random robot motions from the allowed actions list.
@@ -531,6 +613,9 @@ def conscious_thinking_process():
                 thoughts = f"\n{timestamp} user: " + user_input
                 socketio.emit("processing_started", namespace="/chat")
                 processing_started = True
+
+                if execute_direct_robot_command(user_input):
+                    continue
 
                 # Speak acknowledgment immediately to fill the gap
                 acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
