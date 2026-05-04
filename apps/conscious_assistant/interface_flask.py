@@ -212,6 +212,9 @@ AGENT_TIMEOUT_SECONDS = _env_float("CONSCIOUS_AGENT_TIMEOUT_SECONDS", 20.0)
 AGENT_TIMEOUT_ENABLED = _env_flag("CONSCIOUS_ENABLE_AGENT_TIMEOUT", default=False)
 IDLE_THINKING_ENABLED = _env_flag("CONSCIOUS_ENABLE_IDLE_THINKING", default=False)
 SCENE_AGENT_INPUT_ENABLED = _env_flag("CONSCIOUS_ENABLE_SCENE_AGENT_INPUT", default=False)
+CONVERSATION_BACKEND = os.environ.get("CONSCIOUS_CONVERSATION_BACKEND", "openai").strip().lower()
+OPENAI_CHAT_MODEL = os.environ.get("CONSCIOUS_OPENAI_CHAT_MODEL", "gpt-4.1")
+OPENAI_CHAT_TIMEOUT_SECONDS = _env_float("CONSCIOUS_OPENAI_CHAT_TIMEOUT_SECONDS", 12.0)
 ALLOWED_ROBOT_ACTIONS = [
     "sit_rise",
     "step_backward",
@@ -273,6 +276,8 @@ app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 thread_started = False  # pylint: disable=invalid-name
 _agent_executor = None
+_conversation_history_lock = threading.Lock()
+_conversation_history = []
 
 user_input_queue = queue.Queue()
 
@@ -456,6 +461,8 @@ def _direct_robot_action_for_text(user_text: str):
     forward_words = {"forward", "forwards", "forth", "ahead"}
     backward_words = {"back", "backward", "backwards", "reverse"}
     move_words = {"step", "move", "walk", "go", "come", "run", "straight"}
+    show_words = {"show", "do", "perform", "make", "give"}
+    trick_words = {"move", "moves", "trick", "tricks", "dance", "dancing", "boogie"}
 
     if words & {"stop", "halt", "freeze"}:
         return "stop_move", "Stopping now."
@@ -465,6 +472,8 @@ def _direct_robot_action_for_text(user_text: str):
         return "step_forward", "Stepping forward now."
     if "step" in words:
         return "step_forward", "Stepping forward now."
+    if (words & show_words) and (words & trick_words):
+        return "dance", "Dancing now."
     if words & {"dance", "dancing", "boogie"}:
         return "dance", "Dancing now."
     if words & {"shake", "shaking", "hello", "wave", "waving"}:
@@ -531,8 +540,79 @@ def execute_direct_robot_command(user_text: str) -> bool:
     return True
 
 
-def _call_conscious_thinker_with_timeout(thoughts, current_thread):
-    """Run the LLM agent, optionally through a timeout wrapper for debugging."""
+def _extract_user_text(thoughts: str) -> str:
+    """Extract the latest user text from the timestamped thoughts string."""
+    if not thoughts:
+        return ""
+    marker = " user: "
+    if marker in thoughts:
+        return thoughts.rsplit(marker, maxsplit=1)[-1].strip()
+    return str(thoughts).strip()
+
+
+def _call_openai_conversation(thoughts: str) -> str:
+    """Small direct-chat fallback for the Flask UI when the full agent is unstable."""
+    user_text = _extract_user_text(thoughts)
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_api_key:
+        logging.warning("OPENAI_API_KEY is not configured for conversation fallback")
+        return "say: My chat brain is missing its API key, but direct robot commands still work."
+
+    observation = scene_observer.latest_observation()
+    observation_summary = ""
+    if observation:
+        observation_summary = observation.get("summary") or ""
+
+    system_prompt = (
+        "You are CAIL-E, a friendly robot dog in the Cognizant AI Lab in San Francisco. "
+        "Answer briefly, warmly, and naturally. Use one or two short sentences. "
+        "If the user asks for physical motion, say that you can do it, but the app may "
+        "handle simple commands like dance, forward, sit, stand, shake, stretch, and stop directly."
+    )
+    if observation_summary:
+        system_prompt += f" Current camera observation: {observation_summary}."
+
+    with _conversation_history_lock:
+        history = list(_conversation_history[-8:])
+
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_text})
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=openai_api_key, timeout=OPENAI_CHAT_TIMEOUT_SECONDS)
+        response = client.chat.completions.create(
+            model=OPENAI_CHAT_MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=120,
+        )
+        content = response.choices[0].message.content or ""
+    except Exception:
+        logging.exception("OpenAI conversation fallback failed")
+        return "say: My chat brain hiccuped, but I am still ready for direct commands."
+
+    content = clean_speech_text(content).strip()
+    if not content:
+        return ""
+
+    with _conversation_history_lock:
+        _conversation_history.append({"role": "user", "content": user_text})
+        _conversation_history.append({"role": "assistant", "content": content})
+        del _conversation_history[:-8]
+
+    if not re.match(r"(?m)^\s*(thought|say)\s*:", content):
+        content = f"say: {content}"
+    return content
+
+
+def _call_conversation_backend(thoughts, current_thread):
+    """Run the configured conversation backend."""
+    if CONVERSATION_BACKEND in {"openai", "direct", "fallback"}:
+        return _call_openai_conversation(thoughts), current_thread
+
     if not AGENT_TIMEOUT_ENABLED:
         return conscious_thinker(
             conscious_session,
@@ -726,7 +806,7 @@ def conscious_thinking_process():
                 processing_started = True
 
             try:
-                raw_output, conscious_thread = _call_conscious_thinker_with_timeout(
+                raw_output, conscious_thread = _call_conversation_backend(
                     thoughts,
                     conscious_thread,
                 )
