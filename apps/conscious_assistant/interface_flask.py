@@ -19,6 +19,21 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse common boolean environment variable values."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_preinitialize_robot_control() -> bool:
+    return _env_flag(
+        "CONSCIOUS_PREINIT_ROBOT",
+        default=sys.platform.startswith("linux"),
+    )
+
+
 def _should_enable_vision_runtime_prime() -> bool:
     raw_value = os.environ.get("VISION_SKIP_EARLY_IMPORT")
     if raw_value is None:
@@ -67,6 +82,29 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _prime_robot_control() -> None:
+    """
+    Initialize Unitree DDS/SportClient before loading heavy vision runtimes.
+
+    On the robot, initializing CycloneDDS from the long-running Flask worker path
+    can fail after Torch/DeepFace have loaded. Doing the robot client setup once
+    on the main thread lets later Go2Macros instances reuse the cached client.
+    """
+    if not _should_preinitialize_robot_control():
+        return
+
+    try:
+        from coded_tools.unigo2.go2_macros import Go2Macros as _Go2Macros
+
+        robot = _Go2Macros()
+        if getattr(robot, "available", False):
+            print("[Go2] SportClient preinitialized for Flask runtime")
+        else:
+            print("[Go2] SportClient preinitialization did not complete")
+    except Exception as exc:
+        print(f"[Go2] SportClient preinitialization skipped: {exc}")
+
+
 def _prime_vision_runtime_imports() -> None:
     """
     Prime YOLO dependencies before Flask imports on Linux.
@@ -106,6 +144,7 @@ def _prime_vision_runtime_imports() -> None:
         print(f"[VisionCore] Early ultralytics import failed during Flask startup: {exc}")
 
 
+_prime_robot_control()
 _prime_vision_runtime_imports()
 
 # pylint: disable=import-error
@@ -158,7 +197,7 @@ except ImportError:
 THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
 
 # Robot motion configuration
-ROBOT_MOTION_PROBABILITY = 0.5  # 50% chance of performing robot motion
+ROBOT_MOTION_PROBABILITY = _env_float("CONSCIOUS_ROBOT_MOTION_PROBABILITY", 0.5)
 ALLOWED_ROBOT_ACTIONS = [
     "sit_rise",
     "step_backward",

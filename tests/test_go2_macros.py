@@ -32,6 +32,7 @@ def reset_robot_init_state():
             "reported_disabled": False,
             "client": None,
             "channel_initialized": False,
+            "last_failure_at": 0.0,
         }
     )
     FakeSportClient.instances.clear()
@@ -62,19 +63,40 @@ class Go2MacrosInitializationTests(unittest.TestCase):
         self.assertEqual(first.cli.timeout, 10.0)
         self.assertTrue(first.cli.initialized)
 
-    def test_reuses_existing_dds_participant_after_channel_init_error(self):
+    def test_channel_init_failure_does_not_build_client_with_none_participant(self):
         channel_init = MagicMock(side_effect=Exception("channel factory init error."))
 
         with (
             patch.object(go2_macros, "ChannelFactoryInitialize", channel_init),
             patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros.traceback, "print_exc"),
         ):
             bot = go2_macros.Go2Macros()
 
-        self.assertTrue(bot.available)
-        self.assertIs(bot.cli, go2_macros._ROBOT_INIT_STATE["client"])
-        self.assertTrue(go2_macros._ROBOT_INIT_STATE["channel_initialized"])
+        self.assertFalse(bot.available)
+        self.assertIsNone(bot.cli)
+        self.assertIsNone(go2_macros._ROBOT_INIT_STATE["client"])
+        self.assertFalse(go2_macros._ROBOT_INIT_STATE["channel_initialized"])
         self.assertEqual(channel_init.call_count, 1)
+        self.assertEqual(len(FakeSportClient.instances), 0)
+
+    def test_retries_after_channel_init_failure_when_retry_window_has_passed(self):
+        channel_init = MagicMock(side_effect=[Exception("domain error"), None])
+
+        with (
+            patch.dict(go2_macros.os.environ, {"GO2_INIT_RETRY_SECONDS": "0"}),
+            patch.object(go2_macros, "ChannelFactoryInitialize", channel_init),
+            patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros.traceback, "print_exc"),
+        ):
+            first = go2_macros.Go2Macros()
+            second = go2_macros.Go2Macros()
+
+        self.assertFalse(first.available)
+        self.assertTrue(second.available)
+        self.assertIs(second.cli, go2_macros._ROBOT_INIT_STATE["client"])
+        self.assertTrue(go2_macros._ROBOT_INIT_STATE["channel_initialized"])
+        self.assertEqual(channel_init.call_count, 2)
         self.assertEqual(len(FakeSportClient.instances), 1)
 
 

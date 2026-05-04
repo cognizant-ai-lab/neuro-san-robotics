@@ -5,7 +5,11 @@ import traceback
 import threading
 
 USE_REAL_ROBOT = True
-IFNAME = "eth0"                     # "eth0" if you're on wired
+IFNAME = (
+    os.environ.get("GO2_NETWORK_INTERFACE")
+    or os.environ.get("CYCLONEDDS_NETWORK_INTERFACE")
+    or "eth0"
+)
 
 # --- Recommend setting these in your shell profile too ---
 os.environ.setdefault("CYCLONEDDS_NETWORK_INTERFACE", IFNAME)
@@ -29,6 +33,7 @@ _ROBOT_INIT_STATE = {
     "reported_disabled": False,
     "client": None,
     "channel_initialized": False,
+    "last_failure_at": 0.0,
 }
 _ROBOT_INIT_LOCK = threading.Lock()
 
@@ -41,6 +46,16 @@ def _coerce_status(ret):
     if isinstance(ret, tuple) and len(ret) >= 1:
         return ret[0], (None if len(ret) == 1 else ret[1])
     return ret, None
+
+
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
 
 
 class Go2Macros:
@@ -62,27 +77,32 @@ class Go2Macros:
                 return
 
             if _ROBOT_INIT_STATE["attempted"] and not _ROBOT_INIT_STATE["available"]:
-                if not _ROBOT_INIT_STATE["reported_disabled"]:
+                retry_after_s = max(0.0, _env_float("GO2_INIT_RETRY_SECONDS", 2.0))
+                elapsed_s = time.monotonic() - float(_ROBOT_INIT_STATE.get("last_failure_at") or 0.0)
+                if elapsed_s < retry_after_s:
+                    if not _ROBOT_INIT_STATE["reported_disabled"]:
+                        self._log(
+                            "⚙️ Robot control temporarily unavailable after prior "
+                            f"initialization failure: {_ROBOT_INIT_STATE['error']}"
+                        )
+                        _ROBOT_INIT_STATE["reported_disabled"] = True
+                    return
+
+                if _ROBOT_INIT_STATE["reported_disabled"]:
                     self._log(
-                        "⚙️ Robot control disabled after prior initialization failure: "
-                        f"{_ROBOT_INIT_STATE['error']}"
+                        "🔁 Retrying robot control initialization after prior failure"
                     )
-                    _ROBOT_INIT_STATE["reported_disabled"] = True
-                return
 
             try:
                 if not _ROBOT_INIT_STATE["channel_initialized"]:
                     # DDS is process-global. Initializing it more than once can fail when
                     # Flask, vision, deferred actions, and nav all create Go2 helpers.
                     self._log("🔍 Initializing ChannelFactory")
-                    try:
+                    if self.ifname:
+                        ChannelFactoryInitialize(0, self.ifname)
+                    else:
                         ChannelFactoryInitialize(0)
-                        _ROBOT_INIT_STATE["channel_initialized"] = True
-                    except Exception as channel_error:
-                        self._log(
-                            "⚠️ ChannelFactory init raised; trying existing DDS participant: "
-                            f"{channel_error}"
-                        )
+                    _ROBOT_INIT_STATE["channel_initialized"] = True
 
                 # --- Initialize Sport client (matches go2_sport_client.py) ---
                 self._log("🔍 Initializing SportClient")
@@ -98,6 +118,7 @@ class Go2Macros:
                         "reported_disabled": False,
                         "client": self.cli,
                         "channel_initialized": True,
+                        "last_failure_at": 0.0,
                     }
                 )
                 self._log("✅ SportClient initialized and ready")
@@ -110,6 +131,7 @@ class Go2Macros:
                         "error": str(e),
                         "reported_disabled": False,
                         "client": None,
+                        "last_failure_at": time.monotonic(),
                     }
                 )
                 self._log(f"❌ Failed to initialize: {e}")

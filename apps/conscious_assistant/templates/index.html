@@ -73,7 +73,8 @@
         // var socket = io.connect('http://' + document.domain + ':' + location.port + '/chat');
         const socket = io("/chat", {
             path: "/socket.io",
-            transports: ["websocket", "polling"],
+            transports: ["polling"],
+            upgrade: false,
         });
         const MAX_OBSERVATION_HISTORY = 20;
         const MAX_CHAT_HISTORY = 120;
@@ -286,6 +287,10 @@
                                 // Send to server with skip_echo flag since we already displayed the text
                                 var userInput = document.getElementById('user-input').value.trim();
                                 if (userInput) {
+                                    if (!socket.connected) {
+                                        alert('Connection to CAIL-E is not ready yet. Refresh the page and try again.');
+                                        return;
+                                    }
                                     socket.emit('user_input', {data: userInput, skip_echo: true});
                                     document.getElementById('user-input').value = '';
                                     setInputDisabled(true);
@@ -380,7 +385,12 @@
         });
 
         socket.on('connect', function() {
-            console.log('Websocket connected!');
+            console.log('Socket.IO connected');
+        });
+
+        socket.on('connect_error', function(error) {
+            console.error('Socket.IO connection failed:', error);
+            setInputDisabled(false);
         });
 
         // Functions to enable/disable input controls during robot processing
@@ -595,6 +605,10 @@
             }
             var userInput = document.getElementById('user-input').value.trim();
             if (userInput) {
+                if (!socket.connected) {
+                    alert('Connection to CAIL-E is not ready yet. Refresh the page and try again.');
+                    return;
+                }
                 socket.emit('user_input', {data: userInput});
                 document.getElementById('user-input').value = '';
                 // Disable input immediately after sending
