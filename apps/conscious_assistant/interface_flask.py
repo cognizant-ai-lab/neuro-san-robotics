@@ -16,6 +16,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+CODED_TOOLS_ROOT = REPO_ROOT / "coded_tools"
+if str(CODED_TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODED_TOOLS_ROOT))
 
 logging.basicConfig(
     level=getattr(logging, os.environ.get("CONSCIOUS_LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -194,12 +197,18 @@ except ImportError:
 
 # Import deferred action executor for robot actions after speech
 try:
-    from coded_tools.unigo2.robot_macros import execute_deferred_actions
+    # Neuro-SAN loads CodedTools through AGENT_TOOL_PATH as unigo2.*.
+    # Import the same module name here so the deferred-action queue is shared.
+    from unigo2.robot_macros import execute_deferred_actions
     DEFERRED_ACTIONS_AVAILABLE = True
 except ImportError:
-    logging.warning("execute_deferred_actions not available - deferred robot actions disabled")
-    DEFERRED_ACTIONS_AVAILABLE = False
-    execute_deferred_actions = None
+    try:
+        from coded_tools.unigo2.robot_macros import execute_deferred_actions
+        DEFERRED_ACTIONS_AVAILABLE = True
+    except ImportError:
+        logging.warning("execute_deferred_actions not available - deferred robot actions disabled")
+        DEFERRED_ACTIONS_AVAILABLE = False
+        execute_deferred_actions = None
 
 THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
 
