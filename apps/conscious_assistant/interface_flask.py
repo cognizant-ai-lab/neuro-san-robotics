@@ -594,7 +594,7 @@ def _call_openai_conversation(thoughts: str) -> str:
         logging.exception("OpenAI conversation fallback failed")
         return "say: My chat brain hiccuped, but I am still ready for direct commands."
 
-    content = clean_speech_text(content).strip()
+    content = sanitize_speech_text(content).strip()
     if not content:
         return ""
 
