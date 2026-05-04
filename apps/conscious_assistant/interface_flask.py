@@ -210,6 +210,8 @@ ROBOT_MOTION_PROBABILITY = _env_float("CONSCIOUS_ROBOT_MOTION_PROBABILITY", 0.0)
 ACK_WAIT_SECONDS = _env_float("CONSCIOUS_ACK_WAIT_SECONDS", 0.0)
 TTS_TIMEOUT_SECONDS = _env_float("CONSCIOUS_TTS_TIMEOUT_SECONDS", 6.0)
 AGENT_TIMEOUT_SECONDS = _env_float("CONSCIOUS_AGENT_TIMEOUT_SECONDS", 20.0)
+IDLE_THINKING_ENABLED = _env_flag("CONSCIOUS_ENABLE_IDLE_THINKING", default=False)
+SCENE_AGENT_INPUT_ENABLED = _env_flag("CONSCIOUS_ENABLE_SCENE_AGENT_INPUT", default=False)
 ALLOWED_ROBOT_ACTIONS = [
     "sit_rise",
     "step_backward",
@@ -540,6 +542,7 @@ def _call_conscious_thinker_with_timeout(thoughts, current_thread):
     try:
         return future.result(timeout=AGENT_TIMEOUT_SECONDS)
     except concurrent.futures.TimeoutError:
+        future.cancel()
         logging.warning(
             "Conscious thinker timed out after %.1fs; releasing UI",
             AGENT_TIMEOUT_SECONDS,
@@ -650,6 +653,7 @@ def conscious_thinking_process():
                 processing_started = True
 
                 if execute_direct_robot_command(user_input):
+                    thoughts = None
                     socketio.emit("processing_complete", namespace="/chat")
                     processing_started = False
                     continue
@@ -686,9 +690,16 @@ def conscious_thinking_process():
                     emit_observation_update(observation)
 
                 scene_input = None
-                if observation and observation.get("objects"):
+                if SCENE_AGENT_INPUT_ENABLED and observation and observation.get("objects"):
                     scene_input = build_scene_input(timestamp, observation["objects"])
                     logging.info("Scene observer detected objects: %s", ", ".join(observation["objects"]))
+
+                if scene_input is None:
+                    if not IDLE_THINKING_ENABLED:
+                        thoughts = None
+                        continue
+                    if thoughts is None:
+                        continue
 
                 if scene_input is None and thoughts is None:
                     continue
@@ -905,6 +916,7 @@ def cleanup(from_request=False):
 
     print("Bye!")
     scene_observer.cleanup()
+    _agent_executor.shutdown(wait=False, cancel_futures=True)
     tear_down_conscious_assistant(conscious_session)
 
     if from_request:

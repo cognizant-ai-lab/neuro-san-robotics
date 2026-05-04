@@ -15,6 +15,7 @@ Performance optimizations:
 - IoU-based NMS for better accuracy
 """
 
+import importlib
 import os
 import platform
 import time
@@ -122,19 +123,24 @@ def _load_unitree_video_sdk():
     """Load the Unitree camera client from whichever package layout is installed."""
     import_errors = []
 
-    try:
-        from unitree_sdk2py.core.channel import ChannelFactoryInitialize
-        from unitree_sdk2py.go2.video.video_client import VideoClient
-        return ChannelFactoryInitialize, VideoClient
-    except Exception as exc:
-        import_errors.append(exc)
+    sdk_layouts = [
+        (
+            "unitree_sdk2_python.unitree_sdk2py.core.channel",
+            "unitree_sdk2_python.unitree_sdk2py.go2.video.video_client",
+        ),
+        (
+            "unitree_sdk2py.core.channel",
+            "unitree_sdk2py.go2.video.video_client",
+        ),
+    ]
 
-    try:
-        from unitree_sdk2_python.unitree_sdk2py.core.channel import ChannelFactoryInitialize
-        from unitree_sdk2_python.unitree_sdk2py.go2.video.video_client import VideoClient
-        return ChannelFactoryInitialize, VideoClient
-    except Exception as exc:
-        import_errors.append(exc)
+    for channel_module_name, video_module_name in sdk_layouts:
+        try:
+            channel_module = importlib.import_module(channel_module_name)
+            video_module = importlib.import_module(video_module_name)
+            return channel_module.ChannelFactoryInitialize, video_module.VideoClient
+        except Exception as exc:
+            import_errors.append(exc)
 
     error_messages = ", ".join(str(exc) for exc in import_errors if str(exc))
     raise ImportError(
@@ -163,7 +169,7 @@ def _unitree_camera_available() -> bool:
         return False
 
 
-def _go2_channel_already_initialized() -> tuple[bool, Optional[str]]:
+def _go2_channel_already_initialized(channel_factory_initialize=None) -> tuple[bool, Optional[str]]:
     """Detect DDS initialization done by Go2Macros in the same process."""
     try:
         from coded_tools.unigo2 import go2_macros
@@ -173,6 +179,14 @@ def _go2_channel_already_initialized() -> tuple[bool, Optional[str]]:
     state = getattr(go2_macros, "_ROBOT_INIT_STATE", {})
     if not state.get("channel_initialized"):
         return False, None
+
+    go2_channel_init = getattr(go2_macros, "ChannelFactoryInitialize", None)
+    if channel_factory_initialize is not None and go2_channel_init is not None:
+        if (
+            getattr(go2_channel_init, "__module__", None)
+            != getattr(channel_factory_initialize, "__module__", None)
+        ):
+            return False, None
 
     return True, getattr(go2_macros, "IFNAME", None)
 
@@ -192,7 +206,9 @@ class UnitreeVideoCapture:
 
         channel_ifname = self.ifname
         if not _UNITREE_CHANNEL_STATE["initialized"]:
-            go2_initialized, go2_ifname = _go2_channel_already_initialized()
+            go2_initialized, go2_ifname = _go2_channel_already_initialized(
+                channel_factory_initialize
+            )
             if go2_initialized:
                 _UNITREE_CHANNEL_STATE["initialized"] = True
                 _UNITREE_CHANNEL_STATE["ifname"] = go2_ifname or channel_ifname

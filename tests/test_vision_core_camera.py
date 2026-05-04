@@ -1,5 +1,7 @@
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -75,6 +77,12 @@ class _FakeVideoClient:
 
     def Init(self):
         self.initialized = True
+
+
+def _fake_package(name):
+    module = types.ModuleType(name)
+    module.__path__ = []
+    return module
 
 
 class _FakeILoc:
@@ -251,6 +259,81 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertEqual(len(_FakeVideoClient.instances), 1)
         self.assertEqual(_FakeVideoClient.instances[0].timeout, 3.0)
         self.assertTrue(_FakeVideoClient.instances[0].initialized)
+
+    def test_unitree_video_sdk_prefers_robot_sdk_namespace(self):
+        preferred_channel = types.ModuleType("unitree_sdk2_python.unitree_sdk2py.core.channel")
+        preferred_video = types.ModuleType("unitree_sdk2_python.unitree_sdk2py.go2.video.video_client")
+        bare_channel = types.ModuleType("unitree_sdk2py.core.channel")
+        bare_video = types.ModuleType("unitree_sdk2py.go2.video.video_client")
+
+        def preferred_init():
+            return None
+
+        def bare_init():
+            return None
+
+        class PreferredVideoClient:
+            pass
+
+        class BareVideoClient:
+            pass
+
+        preferred_channel.ChannelFactoryInitialize = preferred_init
+        preferred_video.VideoClient = PreferredVideoClient
+        bare_channel.ChannelFactoryInitialize = bare_init
+        bare_video.VideoClient = BareVideoClient
+
+        fake_modules = {
+            "unitree_sdk2_python": _fake_package("unitree_sdk2_python"),
+            "unitree_sdk2_python.unitree_sdk2py": _fake_package("unitree_sdk2_python.unitree_sdk2py"),
+            "unitree_sdk2_python.unitree_sdk2py.core": _fake_package("unitree_sdk2_python.unitree_sdk2py.core"),
+            "unitree_sdk2_python.unitree_sdk2py.core.channel": preferred_channel,
+            "unitree_sdk2_python.unitree_sdk2py.go2": _fake_package("unitree_sdk2_python.unitree_sdk2py.go2"),
+            "unitree_sdk2_python.unitree_sdk2py.go2.video": _fake_package("unitree_sdk2_python.unitree_sdk2py.go2.video"),
+            "unitree_sdk2_python.unitree_sdk2py.go2.video.video_client": preferred_video,
+            "unitree_sdk2py": _fake_package("unitree_sdk2py"),
+            "unitree_sdk2py.core": _fake_package("unitree_sdk2py.core"),
+            "unitree_sdk2py.core.channel": bare_channel,
+            "unitree_sdk2py.go2": _fake_package("unitree_sdk2py.go2"),
+            "unitree_sdk2py.go2.video": _fake_package("unitree_sdk2py.go2.video"),
+            "unitree_sdk2py.go2.video.video_client": bare_video,
+        }
+
+        with patch.dict(sys.modules, fake_modules):
+            channel_init, video_client = vision_core._load_unitree_video_sdk()
+
+        self.assertIs(channel_init, preferred_init)
+        self.assertIs(video_client, PreferredVideoClient)
+
+    def test_go2_channel_reuse_requires_same_sdk_module(self):
+        from coded_tools.unigo2 import go2_macros
+
+        def go2_init():
+            return None
+
+        def matching_init():
+            return None
+
+        def different_init():
+            return None
+
+        go2_init.__module__ = "same.sdk.channel"
+        matching_init.__module__ = "same.sdk.channel"
+        different_init.__module__ = "other.sdk.channel"
+
+        with (
+            patch.object(go2_macros, "IFNAME", "eth0"),
+            patch.object(go2_macros, "ChannelFactoryInitialize", go2_init),
+            patch.dict(go2_macros._ROBOT_INIT_STATE, {"channel_initialized": True}),
+        ):
+            self.assertEqual(
+                vision_core._go2_channel_already_initialized(matching_init),
+                (True, "eth0"),
+            )
+            self.assertEqual(
+                vision_core._go2_channel_already_initialized(different_init),
+                (False, None),
+            )
 
     def test_detect_camera_snapshot_reuses_headless_detection_flow(self):
         cap = _FakeCapture(
