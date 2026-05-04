@@ -3,6 +3,7 @@ import time
 import platform
 import traceback
 import threading
+import math
 
 USE_REAL_ROBOT = True
 IFNAME = (
@@ -140,6 +141,42 @@ class Go2Macros:
     def _log(self, msg: str):
         print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
+    def _call(self, label: str, fn, *args, **kwargs):
+        ret = fn(*args, **kwargs)
+        code, _data = _coerce_status(ret)
+        if code not in (0, None):
+            self._log(f"⚠️ {label} returned {ret!r}")
+        return ret
+
+    def _prepare_locomotion(self):
+        if not self.cli:
+            return
+
+        self._call("RecoveryStand", self.cli.RecoveryStand)
+        time.sleep(_env_float("GO2_RECOVERY_STAND_SETTLE_SECONDS", 1.5))
+        self._call("BalanceStand", self.cli.BalanceStand)
+        time.sleep(_env_float("GO2_BALANCE_STAND_SETTLE_SECONDS", 0.5))
+
+    def _timed_move(
+        self,
+        vx: float,
+        vy: float = 0.0,
+        vyaw: float = 0.0,
+        duration_s: float = 1.0,
+        period_s: float | None = None,
+    ):
+        period_s = period_s or _env_float("GO2_MOVE_COMMAND_PERIOD", 0.2)
+        period_s = max(0.05, period_s)
+        iterations = max(1, math.ceil(max(0.0, duration_s) / period_s))
+
+        if self.cli:
+            for _ in range(iterations):
+                self._call("Move", self.cli.Move, vx=vx, vy=vy, vyaw=vyaw)
+                time.sleep(period_s)
+            self._call("StopMove", self.cli.StopMove)
+
+        self._log(f"Timed move (vx={vx}, vy={vy}, vyaw={vyaw}) for {duration_s}s")
+
     # ----------------------------
     # BASIC MOTIONS
     # ----------------------------
@@ -218,21 +255,21 @@ class Go2Macros:
     def move(self, vx=0.0, vy=0.0, vyaw=0.0):
         """Continuous movement command. Call stop_move() to stop."""
         if self.cli:
-            self.cli.Move(vx=vx, vy=vy, vyaw=vyaw)
+            self._call("Move", self.cli.Move, vx=vx, vy=vy, vyaw=vyaw)
         self._log(f"Move (vx={vx}, vy={vy}, vyaw={vyaw})")
 
-    def step_forward(self, vx=0.1, t=1.0):
-        if self.cli:
-            self.cli.Move(vx=vx, vy=0.0, vyaw=0.0)
-            time.sleep(t)
-            self.cli.StopMove()
+    def step_forward(self, vx=None, t=None):
+        vx = _env_float("GO2_STEP_FORWARD_SPEED", 0.45) if vx is None else vx
+        t = _env_float("GO2_STEP_DURATION_SECONDS", 2.5) if t is None else t
+        self._prepare_locomotion()
+        self._timed_move(vx=vx, vy=0.0, vyaw=0.0, duration_s=t)
         self._log(f"Step forward vx={vx} for {t}s")
 
-    def step_backward(self, vx=-0.1, t=1.0):
-        if self.cli:
-            self.cli.Move(vx=vx, vy=0.0, vyaw=0.0)
-            time.sleep(t)
-            self.cli.StopMove()
+    def step_backward(self, vx=None, t=None):
+        vx = _env_float("GO2_STEP_BACKWARD_SPEED", -0.25) if vx is None else vx
+        t = _env_float("GO2_STEP_DURATION_SECONDS", 2.0) if t is None else t
+        self._prepare_locomotion()
+        self._timed_move(vx=vx, vy=0.0, vyaw=0.0, duration_s=t)
         self._log(f"Step backward vx={vx} for {t}s")
 
     def speed_level(self, level):
@@ -260,19 +297,33 @@ class Go2Macros:
         self._log("Content motion")
 
     def dance(self):
-        if self.cli:
+        if self.cli and os.environ.get("GO2_USE_SDK_SPECIAL_MOTIONS", "").lower() in {"1", "true", "yes"}:
             self.cli.Dance1()
-        self._log("Dance 1 motion")
+            self._log("Dance 1 motion")
+            return
+
+        self._prepare_locomotion()
+        self._timed_move(vx=0.35, vy=0.0, vyaw=0.45, duration_s=1.0)
+        self._timed_move(vx=-0.20, vy=0.0, vyaw=-0.45, duration_s=1.0)
+        self._timed_move(vx=0.30, vy=0.0, vyaw=-0.45, duration_s=0.9)
+        self._timed_move(vx=-0.20, vy=0.0, vyaw=0.45, duration_s=0.8)
+        self._log("Dance 1 motion via timed locomotion")
 
     def dance1(self):
-        if self.cli:
-            self.cli.Dance1()
-        self._log("Dance 1 motion")
+        self.dance()
 
     def dance2(self):
-        if self.cli:
+        if self.cli and os.environ.get("GO2_USE_SDK_SPECIAL_MOTIONS", "").lower() in {"1", "true", "yes"}:
             self.cli.Dance2()
-        self._log("Dance 2 motion")
+            self._log("Dance 2 motion")
+            return
+
+        self._prepare_locomotion()
+        self._timed_move(vx=0.0, vy=0.0, vyaw=0.6, duration_s=1.0)
+        self._timed_move(vx=0.0, vy=0.0, vyaw=-0.6, duration_s=1.0)
+        self._timed_move(vx=0.35, vy=0.0, vyaw=0.0, duration_s=0.9)
+        self._timed_move(vx=-0.25, vy=0.0, vyaw=0.0, duration_s=0.9)
+        self._log("Dance 2 motion via timed locomotion")
 
     def pose(self, flag):
         if self.cli:

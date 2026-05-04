@@ -18,6 +18,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+logging.basicConfig(
+    level=getattr(logging, os.environ.get("CONSCIOUS_LOG_LEVEL", "INFO").upper(), logging.INFO)
+)
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     """Parse common boolean environment variable values."""
@@ -34,10 +38,14 @@ def _should_preinitialize_robot_control() -> bool:
     )
 
 
+def _should_enable_scene_observer() -> bool:
+    return _env_flag("CONSCIOUS_ENABLE_SCENE_OBSERVER", default=False)
+
+
 def _should_enable_vision_runtime_prime() -> bool:
     raw_value = os.environ.get("VISION_SKIP_EARLY_IMPORT")
     if raw_value is None:
-        return sys.platform.startswith("linux")
+        return sys.platform.startswith("linux") and _should_enable_scene_observer()
     return raw_value.strip().lower() not in {"1", "true", "yes", "on"}
 
 
@@ -197,7 +205,9 @@ except ImportError:
 THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
 
 # Robot motion configuration
-ROBOT_MOTION_PROBABILITY = _env_float("CONSCIOUS_ROBOT_MOTION_PROBABILITY", 0.5)
+ROBOT_MOTION_PROBABILITY = _env_float("CONSCIOUS_ROBOT_MOTION_PROBABILITY", 0.0)
+ACK_WAIT_SECONDS = _env_float("CONSCIOUS_ACK_WAIT_SECONDS", 0.0)
+TTS_TIMEOUT_SECONDS = _env_float("CONSCIOUS_TTS_TIMEOUT_SECONDS", 6.0)
 ALLOWED_ROBOT_ACTIONS = [
     "sit_rise",
     "step_backward",
@@ -263,7 +273,7 @@ user_input_queue = queue.Queue()
 
 # Speech queue for TTS - allows non-blocking speech processing
 speech_queue = queue.Queue()
-scene_observer = SceneObserver()
+scene_observer = SceneObserver(enabled=_should_enable_scene_observer())
 os.environ.setdefault("VISION_LATEST_IMAGE_PATH", str(scene_observer.latest_image_path()))
 os.environ.setdefault("VISION_LATEST_IMAGE_MAX_AGE_SECONDS", "0")
 
@@ -373,15 +383,42 @@ def speak_text_streaming(
         logging.info("No text to speak after sanitization")
         return
 
-    try:
-        logging.info("Speaking: %s", clean_text[:50])
-        # Speak without chunking for better prosody
-        tts_say(clean_text, chunked=False)
-        # Call callback AFTER speech completes to update UI
-        if on_speech_complete:
+    if on_speech_complete:
+        try:
             on_speech_complete(clean_text)
-    except Exception:
-        logging.exception("TTS failed for text: %s", clean_text[:50])
+        except Exception:
+            logging.exception("Failed to emit speech text to UI")
+
+    def run_tts():
+        try:
+            logging.info("Speaking: %s", clean_text[:50])
+            tts_say(clean_text, chunked=False)
+        except Exception:
+            logging.exception("TTS failed for text: %s", clean_text[:50])
+
+    if TTS_TIMEOUT_SECONDS <= 0:
+        run_tts()
+        return
+
+    tts_thread = threading.Thread(target=run_tts, daemon=True, name="tts-call")
+    tts_thread.start()
+    tts_thread.join(TTS_TIMEOUT_SECONDS)
+    if tts_thread.is_alive():
+        logging.warning(
+            "TTS timed out after %.1fs; continuing so agent/actions do not block",
+            TTS_TIMEOUT_SECONDS,
+        )
+
+
+def _wait_for_queue_drain(work_queue: queue.Queue, timeout_s: float) -> bool:
+    if timeout_s <= 0:
+        return False
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if getattr(work_queue, "unfinished_tasks", 0) == 0:
+            return True
+        time.sleep(0.05)
+    return getattr(work_queue, "unfinished_tasks", 0) == 0
 
 
 def speak_text(text: str) -> None:
@@ -408,7 +445,11 @@ def perform_random_robot_motion() -> None:
         logging.info("Robot not available, skipping motion")
         return
 
-    # Check probability - only perform motion 50% of the time (or as configured)
+    if ROBOT_MOTION_PROBABILITY <= 0:
+        logging.info("Random acknowledgment robot motion disabled")
+        return
+
+    # Check probability - only perform motion when explicitly configured
     if random.random() > ROBOT_MOTION_PROBABILITY:
         logging.info("Skipping robot motion this time (probability check)")
         return
@@ -506,9 +547,16 @@ def conscious_thinking_process():
                 # This happens while the speech is playing, filling the gap
                 perform_random_robot_motion()
 
-                # Wait for acknowledgment to finish speaking
-                speech_queue.join()
-                logging.info("Acknowledgment speech complete, proceeding with agent")
+                if ACK_WAIT_SECONDS > 0:
+                    if _wait_for_queue_drain(speech_queue, ACK_WAIT_SECONDS):
+                        logging.info("Acknowledgment speech complete, proceeding with agent")
+                    else:
+                        logging.warning(
+                            "Acknowledgment speech still running after %.1fs; proceeding with agent",
+                            ACK_WAIT_SECONDS,
+                        )
+                else:
+                    logging.info("Proceeding with agent without waiting for acknowledgment TTS")
 
             except queue.Empty:
                 observation = scene_observer.observe()

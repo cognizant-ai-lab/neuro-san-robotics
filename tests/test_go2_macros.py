@@ -10,6 +10,7 @@ class FakeSportClient:
     def __init__(self):
         self.timeout = None
         self.initialized = False
+        self.calls = []
         FakeSportClient.instances.append(self)
 
     def SetTimeout(self, timeout):
@@ -17,6 +18,26 @@ class FakeSportClient:
 
     def Init(self):
         self.initialized = True
+
+    def RecoveryStand(self):
+        self.calls.append(("RecoveryStand",))
+        return 0
+
+    def BalanceStand(self):
+        self.calls.append(("BalanceStand",))
+        return 0
+
+    def Move(self, vx=0.0, vy=0.0, vyaw=0.0):
+        self.calls.append(("Move", vx, vy, vyaw))
+        return 0
+
+    def StopMove(self):
+        self.calls.append(("StopMove",))
+        return 0
+
+    def Dance1(self):
+        self.calls.append(("Dance1",))
+        return 0
 
 
 class FakeSportClientModule:
@@ -98,6 +119,39 @@ class Go2MacrosInitializationTests(unittest.TestCase):
         self.assertTrue(go2_macros._ROBOT_INIT_STATE["channel_initialized"])
         self.assertEqual(channel_init.call_count, 2)
         self.assertEqual(len(FakeSportClient.instances), 1)
+
+    def test_step_forward_uses_repeated_known_good_move_commands(self):
+        with (
+            patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
+            patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros.time, "sleep"),
+        ):
+            bot = go2_macros.Go2Macros()
+            bot.step_forward()
+
+        client = FakeSportClient.instances[0]
+        move_calls = [call for call in client.calls if call[0] == "Move"]
+        self.assertEqual(move_calls[0], ("Move", 0.45, 0.0, 0.0))
+        self.assertGreaterEqual(len(move_calls), 10)
+        self.assertIn(("RecoveryStand",), client.calls)
+        self.assertIn(("BalanceStand",), client.calls)
+        self.assertEqual(client.calls[-1], ("StopMove",))
+
+    def test_dance_uses_locomotion_fallback_by_default(self):
+        with (
+            patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
+            patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros.time, "sleep"),
+        ):
+            bot = go2_macros.Go2Macros()
+            bot.dance1()
+
+        client = FakeSportClient.instances[0]
+        self.assertNotIn(("Dance1",), client.calls)
+        self.assertGreaterEqual(
+            len([call for call in client.calls if call[0] == "Move"]),
+            10,
+        )
 
 
 if __name__ == "__main__":

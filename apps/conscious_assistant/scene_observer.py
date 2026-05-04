@@ -32,6 +32,14 @@ else:
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse common boolean environment variable values."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _resolve_repo_relative_path(path_text: str) -> str:
     """
     Resolve model/resource paths relative to the repo root when not absolute.
@@ -118,7 +126,13 @@ class SceneObserver:
         *,
         camera_source: Optional[str] = None,
         public_image_url: str = "/api/observation/latest.jpg",
+        enabled: Optional[bool] = None,
     ):
+        self.enabled = (
+            _env_flag("CONSCIOUS_ENABLE_SCENE_OBSERVER", default=False)
+            if enabled is None
+            else enabled
+        )
         self.camera_source = (
             camera_source
             or os.environ.get("VISION_CAMERA_SOURCE")
@@ -136,7 +150,8 @@ class SceneObserver:
     def available(self) -> bool:
         """Return whether the vision observer can run in this environment."""
         return (
-            VisionCore is not None
+            self.enabled
+            and VisionCore is not None
             and detect_camera_snapshot is not None
             and get_default_vision_core_settings is not None
             and open_camera is not None
@@ -213,6 +228,9 @@ class SceneObserver:
         some deployments, importing the YOLO stack from that worker thread is less
         reliable than doing it once during startup.
         """
+        if not self.enabled:
+            return False
+
         with self._lock:
             vision = self._ensure_vision()
             if vision is None:
@@ -243,6 +261,9 @@ class SceneObserver:
         """
         Capture one frame, detect objects, overwrite the latest JPEG, and return metadata.
         """
+        if not self.enabled:
+            return None
+
         with self._lock:
             vision = self._ensure_vision()
             if vision is None:

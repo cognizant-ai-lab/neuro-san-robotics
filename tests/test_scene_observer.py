@@ -60,7 +60,7 @@ class SceneObserverTests(unittest.TestCase):
         )
 
     def test_ensure_vision_uses_shared_defaults_helper(self):
-        observer = SceneObserver()
+        observer = SceneObserver(enabled=True)
         captured_kwargs = {}
 
         def fake_defaults(**kwargs):
@@ -76,9 +76,14 @@ class SceneObserverTests(unittest.TestCase):
                 "half_precision": False,
             }
 
-        with patch("apps.conscious_assistant.scene_observer.get_default_vision_core_settings", side_effect=fake_defaults):
-            with patch("apps.conscious_assistant.scene_observer.VisionCore", side_effect=lambda **kwargs: _VisionCtorResult(**kwargs)) as ctor:
-                vision = observer._ensure_vision()
+        with (
+            patch("apps.conscious_assistant.scene_observer.cv2", object()),
+            patch("apps.conscious_assistant.scene_observer.detect_camera_snapshot", object()),
+            patch("apps.conscious_assistant.scene_observer.open_camera", object()),
+            patch("apps.conscious_assistant.scene_observer.get_default_vision_core_settings", side_effect=fake_defaults),
+            patch("apps.conscious_assistant.scene_observer.VisionCore", side_effect=lambda **kwargs: _VisionCtorResult(**kwargs)) as ctor,
+        ):
+            vision = observer._ensure_vision()
 
         self.assertIsNotNone(vision)
         self.assertEqual(
@@ -92,7 +97,7 @@ class SceneObserverTests(unittest.TestCase):
         ctor.assert_called_once()
 
     def test_observe_returns_latest_image_payload_from_shared_snapshot_helper(self):
-        observer = SceneObserver(public_image_url="/api/observation/latest.jpg")
+        observer = SceneObserver(public_image_url="/api/observation/latest.jpg", enabled=True)
         frame = np.ones((16, 16, 3), dtype=np.uint8)
         vision = object()
         results = {
@@ -133,7 +138,7 @@ class SceneObserverTests(unittest.TestCase):
         self.assertTrue(observation["timestamp"].startswith("["))
 
     def test_observe_releases_capture_when_shared_snapshot_fails(self):
-        observer = SceneObserver()
+        observer = SceneObserver(enabled=True)
 
         class _FakeCapture:
             def __init__(self):
@@ -156,7 +161,7 @@ class SceneObserverTests(unittest.TestCase):
         self.assertIsNone(observer._capture)
 
     def test_initialize_eagerly_loads_vision_backend(self):
-        observer = SceneObserver()
+        observer = SceneObserver(enabled=True)
 
         with patch.object(observer, "_ensure_vision", return_value=object()) as ensure_vision:
             with patch.object(observer, "_ensure_camera") as ensure_camera:
