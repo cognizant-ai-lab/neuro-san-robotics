@@ -1,4 +1,5 @@
 import atexit
+import concurrent.futures
 
 import logging
 import os
@@ -208,6 +209,7 @@ THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
 ROBOT_MOTION_PROBABILITY = _env_float("CONSCIOUS_ROBOT_MOTION_PROBABILITY", 0.0)
 ACK_WAIT_SECONDS = _env_float("CONSCIOUS_ACK_WAIT_SECONDS", 0.0)
 TTS_TIMEOUT_SECONDS = _env_float("CONSCIOUS_TTS_TIMEOUT_SECONDS", 6.0)
+AGENT_TIMEOUT_SECONDS = _env_float("CONSCIOUS_AGENT_TIMEOUT_SECONDS", 20.0)
 ALLOWED_ROBOT_ACTIONS = [
     "sit_rise",
     "step_backward",
@@ -268,6 +270,7 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 thread_started = False  # pylint: disable=invalid-name
+_agent_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="conscious-agent")
 
 user_input_queue = queue.Queue()
 
@@ -444,24 +447,34 @@ def _direct_robot_action_for_text(user_text: str):
     if not text:
         return None
 
-    if "step forward" in text or "move forward" in text or "walk forward" in text:
-        return "step_forward", "Stepping forward now."
-    if "step back" in text or "step backward" in text or "move backward" in text or "walk backward" in text:
-        return "step_backward", "Stepping backward now."
-    if "dance" in text:
-        return "dance", "Dancing now."
-    if "shake" in text or "hello" in text or "wave" in text:
-        return "shake", "Shaking now."
-    if "stretch" in text:
-        return "stretch", "Stretching now."
-    if "heart" in text:
-        return "heart_pose", "Doing a heart pose now."
-    if "sit" in text:
-        return "sit", "Sitting now."
-    if "stand" in text:
-        return "balance_stand", "Standing now."
-    if "stop" in text:
+    normalized = re.sub(r"[^a-z0-9]+", " ", text).strip()
+    words = set(normalized.split())
+    logging.info("Direct robot command parse: raw=%r normalized=%r words=%s", user_text, normalized, sorted(words))
+
+    forward_words = {"forward", "forwards", "forth", "ahead"}
+    backward_words = {"back", "backward", "backwards", "reverse"}
+    move_words = {"step", "move", "walk", "go", "come", "run", "straight"}
+
+    if words & {"stop", "halt", "freeze"}:
         return "stop_move", "Stopping now."
+    if words & backward_words and (words & move_words or normalized in backward_words):
+        return "step_backward", "Stepping backward now."
+    if words & forward_words and (words & move_words or normalized in forward_words):
+        return "step_forward", "Stepping forward now."
+    if "step" in words:
+        return "step_forward", "Stepping forward now."
+    if words & {"dance", "dancing", "boogie"}:
+        return "dance", "Dancing now."
+    if words & {"shake", "shaking", "hello", "wave", "waving"}:
+        return "shake", "Shaking now."
+    if words & {"stretch", "stretching"}:
+        return "stretch", "Stretching now."
+    if "heart" in words:
+        return "heart_pose", "Doing a heart pose now."
+    if "sit" in words:
+        return "sit", "Sitting now."
+    if words & {"stand", "standing"}:
+        return "balance_stand", "Standing now."
 
     return None
 
@@ -514,6 +527,27 @@ def execute_direct_robot_command(user_text: str) -> bool:
         logging.exception("Direct robot command failed: %s", action)
 
     return True
+
+
+def _call_conscious_thinker_with_timeout(thoughts, current_thread):
+    """Run the LLM agent with a timeout so UI input is always released."""
+    future = _agent_executor.submit(
+        conscious_thinker,
+        conscious_session,
+        current_thread,
+        thoughts,
+    )
+    try:
+        return future.result(timeout=AGENT_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        logging.warning(
+            "Conscious thinker timed out after %.1fs; releasing UI",
+            AGENT_TIMEOUT_SECONDS,
+        )
+        return (
+            "say: I got stuck thinking, but I am ready for another direct command.",
+            current_thread,
+        )
 
 
 def perform_random_robot_motion() -> None:
@@ -608,6 +642,7 @@ def conscious_thinking_process():
                 timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
                 # Wait up to the configured interval for user input
                 user_input = user_input_queue.get(timeout=THINKING_INTERVAL)
+                logging.info("Received user input: %r", user_input)
                 if user_input == "exit":
                     break
                 thoughts = f"\n{timestamp} user: " + user_input
@@ -664,10 +699,9 @@ def conscious_thinking_process():
                 processing_started = True
 
             try:
-                raw_output, conscious_thread = conscious_thinker(
-                    conscious_session,
-                    conscious_thread,
+                raw_output, conscious_thread = _call_conscious_thinker_with_timeout(
                     thoughts,
+                    conscious_thread,
                 )
                 thoughts = normalize_agent_output(raw_output)
                 print(thoughts)
