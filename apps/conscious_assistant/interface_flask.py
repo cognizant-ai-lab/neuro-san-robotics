@@ -1,5 +1,4 @@
 import atexit
-import concurrent.futures
 
 import logging
 import os
@@ -210,6 +209,7 @@ ROBOT_MOTION_PROBABILITY = _env_float("CONSCIOUS_ROBOT_MOTION_PROBABILITY", 0.0)
 ACK_WAIT_SECONDS = _env_float("CONSCIOUS_ACK_WAIT_SECONDS", 0.0)
 TTS_TIMEOUT_SECONDS = _env_float("CONSCIOUS_TTS_TIMEOUT_SECONDS", 6.0)
 AGENT_TIMEOUT_SECONDS = _env_float("CONSCIOUS_AGENT_TIMEOUT_SECONDS", 20.0)
+AGENT_TIMEOUT_ENABLED = _env_flag("CONSCIOUS_ENABLE_AGENT_TIMEOUT", default=False)
 IDLE_THINKING_ENABLED = _env_flag("CONSCIOUS_ENABLE_IDLE_THINKING", default=False)
 SCENE_AGENT_INPUT_ENABLED = _env_flag("CONSCIOUS_ENABLE_SCENE_AGENT_INPUT", default=False)
 ALLOWED_ROBOT_ACTIONS = [
@@ -272,7 +272,7 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 thread_started = False  # pylint: disable=invalid-name
-_agent_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="conscious-agent")
+_agent_executor = None
 
 user_input_queue = queue.Queue()
 
@@ -532,7 +532,23 @@ def execute_direct_robot_command(user_text: str) -> bool:
 
 
 def _call_conscious_thinker_with_timeout(thoughts, current_thread):
-    """Run the LLM agent with a timeout so UI input is always released."""
+    """Run the LLM agent, optionally through a timeout wrapper for debugging."""
+    if not AGENT_TIMEOUT_ENABLED:
+        return conscious_thinker(
+            conscious_session,
+            current_thread,
+            thoughts,
+        )
+
+    import concurrent.futures
+
+    global _agent_executor  # pylint: disable=global-statement
+    if _agent_executor is None:
+        _agent_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="conscious-agent",
+        )
+
     future = _agent_executor.submit(
         conscious_thinker,
         conscious_session,
@@ -916,7 +932,8 @@ def cleanup(from_request=False):
 
     print("Bye!")
     scene_observer.cleanup()
-    _agent_executor.shutdown(wait=False, cancel_futures=True)
+    if _agent_executor is not None:
+        _agent_executor.shutdown(wait=False, cancel_futures=True)
     tear_down_conscious_assistant(conscious_session)
 
     if from_request:
