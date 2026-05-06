@@ -13,7 +13,8 @@
     "llm_config": {
         "class" : "openai",
         # "model_name": "gpt-5-mini",
-        "model_name": "gpt-4.1"
+        # "model_name": "gpt-4.1"
+        "model_name": "gpt-5.1"
         # "model_name": "gpt-4.1-2025-04-14"
 },
     "max_iterations": 40000,
@@ -87,12 +88,12 @@ If you choose to perform a physical action, call your robot_macros tool with one
 ["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit", "look_left", "look_right",
 "step_forward", "step_backward", "shake", "stretch", "dance", "dance2", "heart_pose", "hand_stand","scrape", "content"]
 
-If the user asks you to go somewhere, move to a location, or navigate, use your nav_planner tool.
-You can check your surroundings and navigation progress using nav_status.
+You can also move to a location using your nav_planner tool and check your surroundings and navigation progress using nav_status.
 Available navigation commands: navigate_to (go to a named place), move_forward (go forward with depth safety),
 move_until_obstacle (walk forward until the front depth sensor reaches the requested stop distance),
 turn (rotate left/right), stop (cancel navigation).
 When navigating, you will be informed when you arrive or if navigation fails.
+
             """,
             "allow": {
                 "to_upstream": {
