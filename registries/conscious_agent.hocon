@@ -174,7 +174,7 @@ When navigating, you will be informed when you arrive or if navigation fails.
                             "description": "Target destination name (for navigate_to) or direction (for turn: 'left', 'right')"
                         },
                         "distance": {
-                            "type": "number",
+                            "type": "int",
                             "description": "Distance in meters (for move_forward), stop distance in meters (for move_until_obstacle), or angle in degrees (for turn)"
                         }
                     },
