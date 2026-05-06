@@ -442,14 +442,10 @@ def perform_random_robot_motion() -> None:
 
         logging.info("Performing robot motion: %s", action)
 
-        if action == "look_left":
-            go2.look_left()
-        elif action == "look_right":
-            go2.look_right()
-        elif action == "sit":
-            go2.sit()
-        elif action == "rise_sit":
-            go2.rise_sit()
+        if action == "content":
+            go2.content()
+        elif action == "sit_rise":
+            go2.sit_rise()
         elif action == "step_backward":
             go2.step_backward()
         elif action == "step_forward":
