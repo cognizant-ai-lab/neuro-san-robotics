@@ -441,6 +441,17 @@ def _should_use_openai() -> bool:
     return False
 
 
+def _should_runtime_fallback_to_offline_tts() -> bool:
+    """
+    Return whether runtime OpenAI failures should fall back to offline TTS.
+
+    In `auto` mode we prefer OpenAI when it is healthy, but we do not want a
+    timeout or transient network issue to silently drop speech. In explicit
+    `openai` mode we preserve the failure so the caller can notice it.
+    """
+    return TTS_ENGINE == "auto"
+
+
 # ---------------------------------------------------------------------
 # Audio Cache for Pre-converted Phrases
 # ---------------------------------------------------------------------
@@ -1031,12 +1042,20 @@ def say_streaming(
                 logging.info("TTS: Using OpenAI streaming")
                 if on_chunk_start:
                     on_chunk_start(clean_text, 0, 1)
-                _openai_say_streaming(
-                    clean_text,
-                    volume=volume,
-                    alsa_device=alsa_device,
-                )
-                return
+                try:
+                    _openai_say_streaming(
+                        clean_text,
+                        volume=volume,
+                        alsa_device=alsa_device,
+                    )
+                    return
+                except Exception as exc:
+                    if not _should_runtime_fallback_to_offline_tts():
+                        raise
+                    logging.warning(
+                        "OpenAI TTS failed (%s), falling back to offline TTS",
+                        exc,
+                    )
 
             # Fall back to chunked Piper/espeak
             chunks = split_into_chunks(clean_text, max_chunk_size)
@@ -1187,11 +1206,26 @@ def say(
             try:
                 # Use OpenAI if available
                 if _should_use_openai():
-                    _openai_say_streaming(
-                        clean_text,
-                        volume=volume,
-                        alsa_device=alsa_device,
-                    )
+                    try:
+                        _openai_say_streaming(
+                            clean_text,
+                            volume=volume,
+                            alsa_device=alsa_device,
+                        )
+                    except Exception as exc:
+                        if not _should_runtime_fallback_to_offline_tts():
+                            raise
+                        logging.warning(
+                            "OpenAI TTS failed (%s), falling back to offline TTS",
+                            exc,
+                        )
+                        _say_single_chunk(
+                            clean_text,
+                            rate=rate,
+                            volume=volume,
+                            voice=voice,
+                            alsa_device=alsa_device,
+                        )
                 else:
                     _say_single_chunk(
                         clean_text,
@@ -1229,11 +1263,28 @@ async def say_async(
         return
 
     if _should_use_openai():
-        await _openai_say_streaming_async(
-            clean_text,
-            volume=volume,
-            alsa_device=alsa_device,
-        )
+        try:
+            await _openai_say_streaming_async(
+                clean_text,
+                volume=volume,
+                alsa_device=alsa_device,
+            )
+        except Exception as exc:
+            if not _should_runtime_fallback_to_offline_tts():
+                raise
+            logging.warning(
+                "OpenAI async TTS failed (%s), falling back to offline TTS",
+                exc,
+            )
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: _say_single_chunk(
+                    clean_text,
+                    volume=volume,
+                    alsa_device=alsa_device,
+                ),
+            )
     else:
         # Fall back to sync version in thread pool
         loop = asyncio.get_event_loop()
