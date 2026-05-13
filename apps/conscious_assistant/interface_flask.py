@@ -396,7 +396,7 @@ def speak_text_streaming(
         return
 
     try:
-        logging.info("Speaking: %s", clean_text[:50])
+        logging.info("Speaking TTS utterance (%d chars)", len(clean_text))
         tts_say(clean_text, chunked=False)
         if on_speech_complete:
             on_speech_complete(clean_text)
@@ -465,10 +465,24 @@ def perform_random_robot_motion() -> None:
         logging.exception("Robot motion failed")
 
 
+def emit_speech_state(active: bool) -> None:
+    """Notify the client that robot speech playback started or stopped."""
+    event_name = "speech_started" if active else "speech_complete"
+    try:
+        socketio.emit(
+            event_name,
+            {"active": active},
+            namespace="/chat",
+        )
+    except Exception:
+        logging.exception("Failed to emit %s", event_name)
+
+
 def speech_worker():
     """Background worker that processes the speech queue."""
     while True:
         got_item = False
+        speech_active = False
         try:
             job = speech_queue.get(timeout=1.0)
             got_item = True
@@ -483,20 +497,29 @@ def speech_worker():
                 emit_to_ui = False
                 ui_text = text
 
-            if emit_to_ui and text:
-                socketio.emit(
-                    "update_speech",
-                    {"data": ui_text},
-                    namespace="/chat",
-                )
-            logging.info("Speech worker: starting TTS for text: %s...", text[:50] if text else "")
-            speak_text(text)
-            logging.info("Speech worker: TTS completed")
+            if text:
+                speech_active = True
+                emit_speech_state(True)
+
+            logging.info("Speech worker: starting TTS job (%d chars)", len(text) if text else 0)
+            if text:
+                speak_text(text)
+                logging.info("Speech worker: TTS completed")
+                if emit_to_ui:
+                    socketio.emit(
+                        "update_speech",
+                        {"data": ui_text},
+                        namespace="/chat",
+                    )
+            else:
+                logging.info("Speech worker: skipped empty TTS job")
         except queue.Empty:
             continue
         except Exception:
             logging.exception("Speech worker error")
         finally:
+            if speech_active:
+                emit_speech_state(False)
             if got_item:
                 speech_queue.task_done()
                 logging.info("Speech worker: task_done() called")

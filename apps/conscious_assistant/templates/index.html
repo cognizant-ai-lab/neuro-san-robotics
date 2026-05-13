@@ -84,6 +84,7 @@
         var isRecording = false;
         var micPermissionGranted = false;
         var isProcessing = false;  // Track when robot is processing a response
+        var isSpeaking = false;  // Track when robot audio playback is active
         
         // Whisper (OpenAI) speech recognition variables
         var mediaRecorder = null;
@@ -147,6 +148,11 @@
 
         // Start recording with MediaRecorder (OpenAI Whisper)
         async function startWhisperRecording() {
+            if (isInputLocked()) {
+                console.log('Cannot record while robot is processing or speaking');
+                return;
+            }
+
             if (isRecording || isTranscribing) {
                 console.log('Already recording or transcribing, ignoring start request');
                 return;
@@ -349,8 +355,8 @@
                 spacebarPressed = true;
                 spacebarStartTime = Date.now();
                 
-                if (isProcessing) {
-                    console.log('Cannot record while robot is processing');
+                if (isInputLocked()) {
+                    console.log('Cannot record while robot is processing or speaking');
                     return;
                 }
                 
@@ -393,16 +399,20 @@
             setInputDisabled(false);
         });
 
-        // Functions to enable/disable input controls during robot processing
-        function setInputDisabled(disabled) {
-            isProcessing = disabled;
+        // Functions to enable/disable input controls during robot processing/speech
+        function isInputLocked() {
+            return isProcessing || isSpeaking;
+        }
+
+        function refreshInputControls() {
+            var disabled = isInputLocked();
             var textarea = document.getElementById('user-input');
             var sendButton = document.getElementById('send-button');
             var floatingMicButton = document.getElementById('floating-mic-button');
-            
+
             textarea.disabled = disabled;
             sendButton.disabled = disabled;
-            
+
             if (disabled) {
                 textarea.classList.add('disabled');
                 sendButton.classList.add('disabled');
@@ -412,6 +422,20 @@
                 sendButton.classList.remove('disabled');
                 floatingMicButton.classList.remove('disabled');
             }
+        }
+
+        function setProcessingState(active) {
+            isProcessing = active;
+            refreshInputControls();
+        }
+
+        function setSpeakingState(active) {
+            isSpeaking = active;
+            refreshInputControls();
+        }
+
+        function setInputDisabled(disabled) {
+            setProcessingState(disabled);
         }
 
         function escapeHtml(text) {
@@ -466,7 +490,7 @@
                 return;
             }
             console.log('Robot is processing...');
-            setInputDisabled(true);
+            setProcessingState(true);
         });
 
         socket.on('processing_complete', function(data) {
@@ -474,7 +498,17 @@
                 return;
             }
             console.log('Robot finished processing');
-            setInputDisabled(false);
+            setProcessingState(false);
+        });
+
+        socket.on('speech_started', function() {
+            console.log('Robot is speaking...');
+            setSpeakingState(true);
+        });
+
+        socket.on('speech_complete', function() {
+            console.log('Robot finished speaking');
+            setSpeakingState(false);
         });
 
         socket.on('update_thoughts', function(data) {
@@ -605,8 +639,8 @@
         });
 
         function sendUserInput() {
-            if (isProcessing) {
-                console.log('Cannot send input while robot is processing');
+            if (isInputLocked()) {
+                console.log('Cannot send input while robot is processing or speaking');
                 return;
             }
             var userInput = document.getElementById('user-input').value.trim();
@@ -646,8 +680,8 @@
 
         document.getElementById('floating-mic-button').addEventListener('mousedown', async function(e) {
             e.preventDefault();
-            if (isProcessing) {
-                console.log('Cannot record while robot is processing');
+            if (isInputLocked()) {
+                console.log('Cannot record while robot is processing or speaking');
                 return;
             }
             if (!isRecording && !isTranscribing) {
@@ -676,8 +710,8 @@
 
         document.getElementById('floating-mic-button').addEventListener('touchstart', async function(e) {
             e.preventDefault();
-            if (isProcessing) {
-                console.log('Cannot record while robot is processing');
+            if (isInputLocked()) {
+                console.log('Cannot record while robot is processing or speaking');
                 return;
             }
             if (!isRecording && !isTranscribing) {
