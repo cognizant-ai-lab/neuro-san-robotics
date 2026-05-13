@@ -200,15 +200,18 @@ except ImportError:
 try:
     # Neuro-SAN loads CodedTools through AGENT_TOOL_PATH as unigo2.*.
     # Import the same module name here so the deferred-action queue is shared.
+    from unigo2.robot_macros import clear_deferred_actions
     from unigo2.robot_macros import execute_deferred_actions
     DEFERRED_ACTIONS_AVAILABLE = True
 except ImportError:
     try:
+        from coded_tools.unigo2.robot_macros import clear_deferred_actions
         from coded_tools.unigo2.robot_macros import execute_deferred_actions
         DEFERRED_ACTIONS_AVAILABLE = True
     except ImportError:
         logging.warning("execute_deferred_actions not available - deferred robot actions disabled")
         DEFERRED_ACTIONS_AVAILABLE = False
+        clear_deferred_actions = None
         execute_deferred_actions = None
 
 THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
@@ -465,10 +468,23 @@ def speech_worker():
     while True:
         got_item = False
         try:
-            text = speech_queue.get(timeout=1.0)
+            job = speech_queue.get(timeout=1.0)
             got_item = True
-            if text is None:
+            if job is None:
                 break
+            if isinstance(job, dict):
+                text = str(job.get("text", ""))
+                emit_to_ui = bool(job.get("emit_to_ui", False))
+            else:
+                text = str(job)
+                emit_to_ui = False
+
+            if emit_to_ui and text:
+                socketio.emit(
+                    "update_speech",
+                    {"data": text},
+                    namespace="/chat",
+                )
             logging.info("Speech worker: starting TTS for text: %s...", text[:50] if text else "")
             speak_text(text)
             logging.info("Speech worker: TTS completed")
@@ -480,6 +496,27 @@ def speech_worker():
             if got_item:
                 speech_queue.task_done()
                 logging.info("Speech worker: task_done() called")
+
+
+def enqueue_speech(text: str, *, emit_to_ui: bool = False) -> None:
+    """Queue speech playback, optionally syncing the UI to speech start."""
+    speech_queue.put(
+        {
+            "text": text,
+            "emit_to_ui": emit_to_ui,
+        }
+    )
+
+
+def discard_deferred_actions(reason: str) -> int:
+    """Drop queued deferred robot actions when a turn should not execute them."""
+    if not DEFERRED_ACTIONS_AVAILABLE or clear_deferred_actions is None:
+        return 0
+
+    cleared_count = clear_deferred_actions()
+    if cleared_count:
+        logging.info("Discarded %d deferred action(s): %s", cleared_count, reason)
+    return cleared_count
 
 
 def execute_deferred_actions_after_speech() -> None:
@@ -514,6 +551,7 @@ def conscious_thinking_process():
         global conscious_thread  # pylint: disable=global-statement
         last_scene_signature = ()
         while True:
+            is_interactive_turn = False
             processing_started = False
             thoughts = None
             try:
@@ -523,6 +561,7 @@ def conscious_thinking_process():
                 logging.info("Received user input: %r", user_input)
                 if user_input == "exit":
                     break
+                is_interactive_turn = True
                 thoughts = f"\n{timestamp} user: " + user_input
                 socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
                 processing_started = True
@@ -530,13 +569,7 @@ def conscious_thinking_process():
                 # Speak acknowledgment immediately to fill the gap
                 acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
                 logging.info("Speaking acknowledgment: %s", acknowledgment)
-                speech_queue.put(acknowledgment)
-                # Emit to UI as well
-                socketio.emit(
-                    "update_speech",
-                    {"data": acknowledgment},
-                    namespace="/chat",
-                )
+                enqueue_speech(acknowledgment, emit_to_ui=True)
 
                 # Perform optional robot motion during the waiting time.
                 # This happens while the speech is playing, filling the gap
@@ -582,9 +615,10 @@ def conscious_thinking_process():
                     thoughts,
                 )
                 thoughts = normalize_agent_output(raw_output)
-                print(thoughts)
 
                 if not thoughts:
+                    if not is_interactive_turn:
+                        discard_deferred_actions("passive scene turn returned no output")
                     logging.info("Conscious thinker returned no output")
                     continue
 
@@ -620,20 +654,20 @@ def conscious_thinking_process():
                 if speeches_to_emit:
                     logging.info("Queueing TTS for %d speech blocks", len(speeches_to_emit))
                     for speech_text in speeches_to_emit:
-                        socketio.emit(
-                            "update_speech",
-                            {"data": speech_text},
-                            namespace="/chat",
-                        )
-                        speech_queue.put(speech_text)
+                        enqueue_speech(speech_text, emit_to_ui=True)
+
+                print(thoughts)
 
                 # Execute deferred robot actions after queued speech drains,
                 # but do not block the interaction loop waiting for them.
                 if DEFERRED_ACTIONS_AVAILABLE and execute_deferred_actions is not None:
-                    threading.Thread(
-                        target=execute_deferred_actions_after_speech,
-                        daemon=True,
-                    ).start()
+                    if is_interactive_turn:
+                        threading.Thread(
+                            target=execute_deferred_actions_after_speech,
+                            daemon=True,
+                        ).start()
+                    else:
+                        discard_deferred_actions("passive scene turn")
             except Exception:
                 logging.exception("Conscious thinking loop iteration failed")
             finally:

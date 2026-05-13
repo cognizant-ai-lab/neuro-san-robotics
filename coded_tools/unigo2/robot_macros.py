@@ -33,6 +33,18 @@ def queue_deferred_action(action: str, args: Dict[str, Any]) -> None:
         logging.info("Queued deferred action: %s", action)
 
 
+def clear_deferred_actions() -> int:
+    """Drop any queued deferred actions without executing them."""
+    with _deferred_actions_lock:
+        cleared_count = len(_deferred_actions)
+        _deferred_actions.clear()
+
+    if cleared_count:
+        logging.info("Cleared %d deferred action(s) without executing them", cleared_count)
+
+    return cleared_count
+
+
 def execute_deferred_actions() -> List[str]:
     """
     Execute all queued deferred actions and clear the queue.
