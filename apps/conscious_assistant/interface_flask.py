@@ -169,6 +169,7 @@ from apps.conscious_assistant.conscious_assistant import conscious_thinker
 from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
 from apps.conscious_assistant.scene_observer import SceneObserver
 from apps.conscious_assistant.scene_observer import build_scene_input
+from apps.conscious_assistant.scene_observer import observation_signature
 from apps.conscious_assistant.conscious_assistant import tear_down_conscious_assistant
 
 
@@ -492,9 +493,10 @@ def conscious_thinking_process():
     """Main permanent agent-calling loop."""
     with app.app_context():  # Manually push the application context
         global conscious_thread  # pylint: disable=global-statement
-        thoughts = None  # Start with no initial thought - wait for user input
+        last_scene_signature = ()
         while True:
             processing_started = False
+            thoughts = None
             try:
                 timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
                 # Wait up to the configured interval for user input
@@ -503,7 +505,7 @@ def conscious_thinking_process():
                 if user_input == "exit":
                     break
                 thoughts = f"\n{timestamp} user: " + user_input
-                socketio.emit("processing_started", namespace="/chat")
+                socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
                 processing_started = True
 
                 # Speak acknowledgment immediately to fill the gap
@@ -529,18 +531,31 @@ def conscious_thinking_process():
                 if observation is not None:
                     emit_observation_update(observation)
 
-                scene_input = None
-                if observation and observation.get("objects"):
-                    scene_input = build_scene_input(timestamp, observation["objects"])
-                    logging.info("Scene observer detected objects: %s", ", ".join(observation["objects"]))
-
-                if scene_input is None and thoughts is None:
+                scene_signature = observation_signature(observation)
+                if not scene_signature:
+                    last_scene_signature = ()
                     continue
 
-                thoughts = scene_input or (f"\n{timestamp} user: " + "[Silence]")
-                # Emit processing_started for silence-triggered processing
-                socketio.emit("processing_started", namespace="/chat")
-                processing_started = True
+                if scene_signature == last_scene_signature:
+                    logging.debug(
+                        "Scene observer saw unchanged entities; skipping agent turn: %s",
+                        ", ".join(scene_signature),
+                    )
+                    continue
+
+                # If a user speaks while we're observing the scene, let the next
+                # loop iteration handle the user turn immediately instead.
+                if not user_input_queue.empty():
+                    logging.info("User input arrived during scene observation; prioritizing it")
+                    continue
+
+                thoughts = build_scene_input(timestamp, list(scene_signature))
+                if thoughts is None:
+                    last_scene_signature = ()
+                    continue
+
+                last_scene_signature = scene_signature
+                logging.info("Scene observer detected updated entities: %s", ", ".join(scene_signature))
 
             try:
                 raw_output, conscious_thread = conscious_thinker(
@@ -613,7 +628,7 @@ def conscious_thinking_process():
                 logging.exception("Conscious thinking loop iteration failed")
             finally:
                 if processing_started:
-                    socketio.emit("processing_complete", namespace="/chat")
+                    socketio.emit("processing_complete", {"interactive": True}, namespace="/chat")
 
 
 @socketio.on("connect", namespace="/chat")

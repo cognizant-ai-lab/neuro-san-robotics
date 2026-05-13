@@ -7,6 +7,7 @@ from apps.conscious_assistant.scene_observer import SceneObserver
 from apps.conscious_assistant.scene_observer import REPO_ROOT
 from apps.conscious_assistant.scene_observer import _resolve_repo_relative_path
 from apps.conscious_assistant.scene_observer import build_scene_input
+from apps.conscious_assistant.scene_observer import observation_signature
 from apps.conscious_assistant.scene_observer import summarize_observed_entities
 from apps.conscious_assistant.scene_observer import summarize_observed_objects
 
@@ -42,6 +43,19 @@ class SceneObserverTests(unittest.TestCase):
             payload,
             "\n[04:20:00pm] user: [Silence]\n[04:20:00pm] saw: person\n[04:20:00pm] saw: chair",
         )
+
+    def test_observation_signature_returns_stable_object_tuple(self):
+        signature = observation_signature(
+            {
+                "objects": ["Alice", "chair", "Alice", " "],
+                "summary": "Objects: 1 chair(s) | Recognized: Alice",
+            }
+        )
+
+        self.assertEqual(signature, ("Alice", "chair", "Alice"))
+
+    def test_observation_signature_handles_missing_observation(self):
+        self.assertEqual(observation_signature(None), ())
 
     def test_summarize_observed_entities_prefers_known_face_names_over_person(self):
         results = {

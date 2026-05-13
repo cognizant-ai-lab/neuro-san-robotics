@@ -1048,6 +1048,19 @@ class VisionCore:
             "ArcFace": 0.68,
         }.get(self.face_model, 0.40)
 
+    def _refresh_face_database_on_lookup(self) -> bool:
+        """
+        Return whether DeepFace should force-refresh the face DB on each lookup.
+
+        The default is off because newly learned faces already invalidate the
+        cached representation files, and forcing a refresh every frame makes the
+        long-running assistant much slower on the robot.
+        """
+        raw_value = os.environ.get("VISION_FACE_REFRESH_DATABASE_ON_LOOKUP")
+        if raw_value is None:
+            return False
+        return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
     def _extract_detected_faces(
         self,
         image: np.ndarray,
@@ -1351,8 +1364,9 @@ class VisionCore:
                         "enforce_detection": False,
                         "detector_backend": self._face_detector_backend(),
                         "silent": True,
-                        "refresh_database": True,
                     }
+                    if self._refresh_face_database_on_lookup():
+                        find_kwargs["refresh_database"] = True
                     try:
                         results = self.deepface.find(**find_kwargs)
                     except TypeError:

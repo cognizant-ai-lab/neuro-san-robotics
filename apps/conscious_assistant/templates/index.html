@@ -461,12 +461,18 @@
         }
 
         // Listen for processing state changes from server
-        socket.on('processing_started', function() {
+        socket.on('processing_started', function(data) {
+            if (data && data.interactive === false) {
+                return;
+            }
             console.log('Robot is processing...');
             setInputDisabled(true);
         });
 
-        socket.on('processing_complete', function() {
+        socket.on('processing_complete', function(data) {
+            if (data && data.interactive === false) {
+                return;
+            }
             console.log('Robot finished processing');
             setInputDisabled(false);
         });

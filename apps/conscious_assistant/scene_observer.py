@@ -113,6 +113,23 @@ def build_scene_input(timestamp: str, object_names: List[str]) -> Optional[str]:
     return "\n" + "\n".join(lines)
 
 
+def observation_signature(observation: Optional[Dict[str, Any]]) -> tuple[str, ...]:
+    """
+    Normalize an observation into a stable signature for duplicate suppression.
+
+    Repeated identical scene labels should not wake the top agent every interval,
+    but the camera UI should still be free to refresh the latest image.
+    """
+    if not observation:
+        return ()
+
+    return tuple(
+        str(object_name).strip()
+        for object_name in observation.get("objects", [])
+        if str(object_name).strip()
+    )
+
+
 class SceneObserver:
     """
     Captures a single scene observation on demand and keeps only the latest JPEG.
