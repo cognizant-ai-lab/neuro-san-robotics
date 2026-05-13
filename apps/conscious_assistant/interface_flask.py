@@ -165,6 +165,8 @@ from flask import request
 from flask import send_file
 from flask_socketio import SocketIO
 
+from apps.conscious_assistant.agent_output import combine_speech_blocks
+from apps.conscious_assistant.agent_output import parse_agent_output_blocks
 from apps.conscious_assistant.conscious_assistant import conscious_thinker
 from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
 from apps.conscious_assistant.scene_observer import SceneObserver
@@ -475,14 +477,16 @@ def speech_worker():
             if isinstance(job, dict):
                 text = str(job.get("text", ""))
                 emit_to_ui = bool(job.get("emit_to_ui", False))
+                ui_text = str(job.get("ui_text", text))
             else:
                 text = str(job)
                 emit_to_ui = False
+                ui_text = text
 
             if emit_to_ui and text:
                 socketio.emit(
                     "update_speech",
-                    {"data": text},
+                    {"data": ui_text},
                     namespace="/chat",
                 )
             logging.info("Speech worker: starting TTS for text: %s...", text[:50] if text else "")
@@ -498,12 +502,18 @@ def speech_worker():
                 logging.info("Speech worker: task_done() called")
 
 
-def enqueue_speech(text: str, *, emit_to_ui: bool = False) -> None:
+def enqueue_speech(
+    text: str,
+    *,
+    emit_to_ui: bool = False,
+    ui_text: str | None = None,
+) -> None:
     """Queue speech playback, optionally syncing the UI to speech start."""
     speech_queue.put(
         {
             "text": text,
             "emit_to_ui": emit_to_ui,
+            "ui_text": text if ui_text is None else ui_text,
         }
     )
 
@@ -624,24 +634,11 @@ def conscious_thinking_process():
 
                 # Separating thoughts and speeches
                 thoughts_to_emit = []
-                speeches_to_emit = []
+                thought_blocks, speech_blocks = parse_agent_output_blocks(thoughts)
 
-                # --- 1.  Slice the input into blocks ------------------------------------
-                pattern = re.compile(
-                    r"(?m)^(thought|say):[ \t]*(.*?)(?=^\s*(?:thought|say):|\Z)",
-                    re.S,
-                )
-
-                for kind, raw in pattern.findall(thoughts):
-                    content = raw.lstrip()
-                    if not content:
-                        continue
-
-                    if kind == "thought":
-                        timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
-                        thoughts_to_emit.append(f"{timestamp} thought: {content}")
-                    else:
-                        speeches_to_emit.append(content)
+                for content in thought_blocks:
+                    timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
+                    thoughts_to_emit.append(f"{timestamp} thought: {content}")
 
                 # --- 2.  Emit the blocks ------------------------------------------------
                 if thoughts_to_emit:
@@ -651,12 +648,18 @@ def conscious_thinking_process():
                         namespace="/chat",
                     )
 
-                if speeches_to_emit:
-                    logging.info("Queueing TTS for %d speech blocks", len(speeches_to_emit))
-                    for speech_text in speeches_to_emit:
-                        enqueue_speech(speech_text, emit_to_ui=True)
-
-                print(thoughts)
+                if speech_blocks:
+                    display_text, spoken_text = combine_speech_blocks(speech_blocks)
+                    if spoken_text:
+                        logging.info(
+                            "Queueing %d speech block(s) as one utterance",
+                            len(speech_blocks),
+                        )
+                        enqueue_speech(
+                            spoken_text,
+                            emit_to_ui=True,
+                            ui_text=display_text,
+                        )
 
                 # Execute deferred robot actions after queued speech drains,
                 # but do not block the interaction loop waiting for them.
