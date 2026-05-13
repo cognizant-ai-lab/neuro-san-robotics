@@ -482,6 +482,25 @@ def speech_worker():
                 logging.info("Speech worker: task_done() called")
 
 
+def execute_deferred_actions_after_speech() -> None:
+    """
+    Run deferred robot actions after queued speech drains, without blocking the UI.
+
+    The assistant should be ready for the next turn as soon as the text response
+    is available, even if TTS playback or robot motions take longer.
+    """
+    if not DEFERRED_ACTIONS_AVAILABLE or execute_deferred_actions is None:
+        return
+
+    try:
+        speech_queue.join()
+        results = execute_deferred_actions()
+        if results:
+            logging.info("Executed %d deferred robot actions", len(results))
+    except Exception:
+        logging.exception("Failed to execute deferred robot actions")
+
+
 # Start speech worker thread
 speech_thread = threading.Thread(target=speech_worker, daemon=True)
 speech_thread.start()
@@ -523,8 +542,7 @@ def conscious_thinking_process():
                 # This happens while the speech is playing, filling the gap
                 perform_random_robot_motion()
 
-                speech_queue.join()
-                logging.info("Acknowledgment speech complete, proceeding with agent")
+                logging.info("Acknowledgment queued, proceeding with agent")
 
             except queue.Empty:
                 observation = scene_observer.observe()
@@ -600,30 +618,22 @@ def conscious_thinking_process():
                     )
 
                 if speeches_to_emit:
-                    logging.info("Starting TTS for %d speech blocks", len(speeches_to_emit))
-
-                    def emit_speech_to_ui(speech_text):
-                        """Callback after speech completes to update UI."""
-                        logging.debug("Emitting speech to UI: %s...", speech_text[:30])
+                    logging.info("Queueing TTS for %d speech blocks", len(speeches_to_emit))
+                    for speech_text in speeches_to_emit:
                         socketio.emit(
                             "update_speech",
                             {"data": speech_text},
                             namespace="/chat",
                         )
+                        speech_queue.put(speech_text)
 
-                    for speech_text in speeches_to_emit:
-                        speak_text_streaming(speech_text, on_speech_complete=emit_speech_to_ui)
-
-                    logging.info("TTS complete")
-
-                # Execute any deferred robot actions AFTER speech and UI update
+                # Execute deferred robot actions after queued speech drains,
+                # but do not block the interaction loop waiting for them.
                 if DEFERRED_ACTIONS_AVAILABLE and execute_deferred_actions is not None:
-                    try:
-                        results = execute_deferred_actions()
-                        if results:
-                            logging.info("Executed %d deferred robot actions", len(results))
-                    except Exception:
-                        logging.exception("Failed to execute deferred robot actions")
+                    threading.Thread(
+                        target=execute_deferred_actions_after_speech,
+                        daemon=True,
+                    ).start()
             except Exception:
                 logging.exception("Conscious thinking loop iteration failed")
             finally:
