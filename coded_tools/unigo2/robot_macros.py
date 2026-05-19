@@ -131,13 +131,13 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
         go2.move(vx=vx, vy=vy, vyaw=vyaw)
         logging.info("===== GO2 move (vx=%s, vy=%s, vyaw=%s)...", vx, vy, vyaw)
     elif action == "step_forward":
-        vx = args.get("vx", 0.45)
-        t = args.get("t", 2.5)
+        vx = args.get("vx")
+        t = args.get("t")
         go2.step_forward(vx=vx, t=t)
         logging.info("===== GO2 stepping forward (vx=%s, t=%s)...", vx, t)
     elif action == "step_backward":
-        vx = args.get("vx", -0.25)
-        t = args.get("t", 2.0)
+        vx = args.get("vx")
+        t = args.get("t")
         go2.step_backward(vx=vx, t=t)
         logging.info("===== GO2 stepping backward (vx=%s, t=%s)...", vx, t)
     elif action == "speed_level":

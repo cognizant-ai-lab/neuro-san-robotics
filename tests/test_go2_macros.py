@@ -132,7 +132,7 @@ class Go2MacrosInitializationTests(unittest.TestCase):
         client = FakeSportClient.instances[0]
         move_calls = [call for call in client.calls if call[0] == "Move"]
         self.assertEqual(move_calls[0], ("Move", 0.45, 0.0, 0.0))
-        self.assertGreaterEqual(len(move_calls), 10)
+        self.assertEqual(len(move_calls), 4)
         self.assertIn(("RecoveryStand",), client.calls)
         self.assertIn(("BalanceStand",), client.calls)
         self.assertEqual(client.calls[-1], ("StopMove",))

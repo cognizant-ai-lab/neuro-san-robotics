@@ -418,6 +418,39 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_scales_dead_reckoning_for_calibrated_motion(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0)
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            commanded_vx = fake_go2.move.call_args.kwargs["vx"]
+            pose = nav._odometry.get_pose()
+            expected_x = commanded_vx * nav.ODOMETRY_LINEAR_SPEED_RATIO / nav.NAV_LOOP_HZ
+            self.assertAlmostEqual(pose.x, expected_x, places=4)
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_guarded_forward_moves_until_center_depth_threshold(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True

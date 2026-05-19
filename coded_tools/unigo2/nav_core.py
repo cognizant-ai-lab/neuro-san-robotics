@@ -655,10 +655,16 @@ class NavCore:
     GOAL_TOLERANCE_M: float = _env_float("NAV_GOAL_TOLERANCE", 0.3)
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 10.0)
     FORWARD_SPEED: float = _env_float("NAV_FORWARD_SPEED", 0.45)
-    FORWARD_STOP_DISTANCE_M: float = _env_float("NAV_FORWARD_STOP_DISTANCE", 0.75)
+    FORWARD_STOP_DISTANCE_M: float = _env_float("NAV_FORWARD_STOP_DISTANCE", 0.50)
     FORWARD_MAX_SECONDS: float = _env_float("NAV_FORWARD_MAX_SECONDS", 15.0)
+    FORWARD_MIN_SECONDS: float = _env_float("NAV_FORWARD_MIN_SECONDS", 0.50)
     FORWARD_COMMAND_PERIOD_S: float = _env_float("NAV_FORWARD_COMMAND_PERIOD", 0.20)
-    FORWARD_ACTUAL_SPEED_RATIO: float = _env_float("NAV_FORWARD_ACTUAL_SPEED_RATIO", 0.35)
+    FORWARD_ACTUAL_SPEED_RATIO: float = _env_float("NAV_FORWARD_ACTUAL_SPEED_RATIO", 1.40)
+    ODOMETRY_LINEAR_SPEED_RATIO: float = _env_float(
+        "NAV_ODOMETRY_LINEAR_SPEED_RATIO",
+        FORWARD_ACTUAL_SPEED_RATIO,
+    )
+    ODOMETRY_YAW_RATE_RATIO: float = _env_float("NAV_ODOMETRY_YAW_RATE_RATIO", 1.0)
 
     @classmethod
     def get_instance(cls) -> "NavCore":
@@ -822,7 +828,10 @@ class NavCore:
                     forward_speed * self.FORWARD_ACTUAL_SPEED_RATIO,
                     0.05,
                 )
-                max_seconds = max(2.0, max_distance_m / actual_speed_estimate)
+                max_seconds = max(
+                    self.FORWARD_MIN_SECONDS,
+                    max_distance_m / actual_speed_estimate,
+                )
             else:
                 max_seconds = self.FORWARD_MAX_SECONDS
 
@@ -1131,7 +1140,12 @@ class NavCore:
 
         # 7. Update odometry (dead-reckoning)
         dt = 1.0 / self.NAV_LOOP_HZ
-        self._odometry.update_from_velocity(cmd, dt)
+        odometry_cmd = VelocityCommand(
+            vx=cmd.vx * self.ODOMETRY_LINEAR_SPEED_RATIO,
+            vy=cmd.vy * self.ODOMETRY_LINEAR_SPEED_RATIO,
+            vyaw=cmd.vyaw * self.ODOMETRY_YAW_RATE_RATIO,
+        )
+        self._odometry.update_from_velocity(odometry_cmd, dt)
 
         # 8. Update progress tracker
         self._update_progress(pose)

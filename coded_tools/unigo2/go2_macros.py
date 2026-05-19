@@ -260,14 +260,28 @@ class Go2Macros:
 
     def step_forward(self, vx=None, t=None):
         vx = _env_float("GO2_STEP_FORWARD_SPEED", 0.45) if vx is None else vx
-        t = _env_float("GO2_STEP_DURATION_SECONDS", 2.5) if t is None else t
+        t = (
+            _env_float(
+                "GO2_STEP_FORWARD_DURATION_SECONDS",
+                _env_float("GO2_STEP_DURATION_SECONDS", 0.8),
+            )
+            if t is None
+            else t
+        )
         self._prepare_locomotion()
         self._timed_move(vx=vx, vy=0.0, vyaw=0.0, duration_s=t)
         self._log(f"Step forward vx={vx} for {t}s")
 
     def step_backward(self, vx=None, t=None):
         vx = _env_float("GO2_STEP_BACKWARD_SPEED", -0.25) if vx is None else vx
-        t = _env_float("GO2_STEP_DURATION_SECONDS", 2.0) if t is None else t
+        t = (
+            _env_float(
+                "GO2_STEP_BACKWARD_DURATION_SECONDS",
+                _env_float("GO2_STEP_DURATION_SECONDS", 2.0),
+            )
+            if t is None
+            else t
+        )
         self._prepare_locomotion()
         self._timed_move(vx=vx, vy=0.0, vyaw=0.0, duration_s=t)
         self._log(f"Step backward vx={vx} for {t}s")
