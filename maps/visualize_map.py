@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""One-shot visualization of nav_core topological map overlaid on the PDF floor plan."""
+"""One-shot visualization of nav_core topological map overlaid on the floor plan."""
 
 import json
+import os
+import textwrap
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch, Polygon
 import numpy as np
-import seaborn as sns
 
 MAP_FILE = Path(__file__).parent / "office_535_suite21.json"
-PDF_FILE = Path.home() / "Downloads" / "535_21_floor_plan.pdf"
+BACKGROUND_FILE = Path(__file__).parent / "535-mission-map.png"
 
 TAG_PALETTE = {
+    "waypoint":   "#00a6ff",
+    "red_marker": "#00a6ff",
     "entrance":   "#e74c3c",
     "corridor":   "#95a5a6",
     "charging":   "#2ecc71",
@@ -38,23 +41,32 @@ def tag_color(tags):
     return "#7f8c8d"
 
 
-def load_pdf_background():
-    """Render page 1 of the PDF to a numpy array, rotated 90° CW (Up=East → North-up)."""
-    try:
-        import fitz  # PyMuPDF
-    except ImportError:
-        print("PyMuPDF not installed — skipping PDF background. pip install PyMuPDF")
+def node_label(node):
+    description = node.get("description", "")
+    marker_suffix = ", red marker"
+    if marker_suffix in description:
+        return description.split(marker_suffix, 1)[0]
+    return node["name"].replace("_", " ")
+
+
+def load_image_background(data):
+    """Load the annotated PNG, cropped and rotated into the map coordinate frame."""
+    if not BACKGROUND_FILE.exists():
+        print(f"Background image not found — skipping: {BACKGROUND_FILE}")
         return None
 
-    doc = fitz.open(str(PDF_FILE))
-    page = doc[0]
-    # Rotate 90° clockwise so PDF-Up (East) becomes plot-Right (East)
-    # and PDF-Left (North) becomes plot-Up (North)
-    mat = fitz.Matrix(2.0, 2.0).prerotate(-90)
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
-    doc.close()
-    return img
+    img = plt.imread(str(BACKGROUND_FILE))
+    bbox = data.get("coordinate_system", {}).get("source_floor_bbox_px", {})
+    if bbox:
+        left = int(bbox["left"])
+        top = int(bbox["top"])
+        right = int(bbox["right"])
+        bottom = int(bbox["bottom"])
+        img = img[top:bottom + 1, left:right + 1]
+
+    # Source image orientation matches the map metadata: Up=East, Left=North.
+    # Rotate 90° clockwise so East is plot-right and North is plot-up.
+    return np.rot90(img, k=-1)
 
 
 def main():
@@ -65,13 +77,24 @@ def main():
     ew = dims["east_west"]   # x-axis range
     ns = dims["north_south"] # y-axis range
 
-    sns.set_theme(style="whitegrid", context="talk")
+    plt.rcParams.update({
+        "axes.grid": True,
+        "grid.alpha": 0.25,
+        "font.size": 9,
+    })
     fig, ax = plt.subplots(figsize=(12, 17))
 
-    # --- PDF background ---
-    bg = load_pdf_background()
+    # --- Image background ---
+    bg = load_image_background(data)
     if bg is not None:
-        ax.imshow(bg, extent=[0, ew, 0, ns], aspect="auto", alpha=0.25, zorder=0)
+        ax.imshow(
+            bg,
+            extent=[0, ew, 0, ns],
+            origin="upper",
+            aspect="auto",
+            alpha=0.7,
+            zorder=0,
+        )
 
     # --- Floor boundary ---
     boundary = data.get("floor_boundary", [])
@@ -82,6 +105,28 @@ def main():
 
     # --- Exclusion zones ---
     for zone in data.get("exclusion_zones", []):
+        if zone.get("type") == "polygon":
+            points = zone.get("points", [])
+            if not points:
+                continue
+            poly = Polygon(
+                points,
+                closed=True,
+                facecolor="#e74c3c",
+                alpha=0.22,
+                edgecolor="#c0392b",
+                linewidth=1.8,
+                linestyle="--",
+                zorder=2,
+            )
+            ax.add_patch(poly)
+            pts = np.array(points)
+            cx, cy = pts[:, 0].mean(), pts[:, 1].mean()
+            ax.text(cx, cy, f"NO-BOT\n{zone['name'].replace('_', ' ')}",
+                    ha="center", va="center",
+                    fontsize=6.2, color="#c0392b", fontweight="bold", zorder=10)
+            continue
+
         c = zone["corners"]
         x0, y0 = c[0]
         x1, y1 = c[1]
@@ -106,10 +151,10 @@ def main():
         if not a or not b:
             continue
         traversable = edge.get("traversable", True)
-        color = "#7f8c8d" if traversable else "#e74c3c"
+        color = "#00a6ff" if traversable else "#e74c3c"
         style = "-" if traversable else ":"
-        lw = 1.6 if traversable else 1.0
-        alpha = 0.6 if traversable else 0.35
+        lw = 2.2 if traversable else 1.0
+        alpha = 0.9 if traversable else 0.35
         ax.plot([a["x"], b["x"]], [a["y"], b["y"]],
                 color=color, linestyle=style, linewidth=lw, alpha=alpha, zorder=3)
 
@@ -118,25 +163,20 @@ def main():
         color = tag_color(node.get("tags", []))
         is_restricted = "restricted" in node.get("tags", [])
         marker = "X" if is_restricted else "o"
-        size = 140 if is_restricted else 100
+        size = 140 if is_restricted else 115
         ax.scatter(node["x"], node["y"], c=color, s=size, marker=marker,
                    edgecolors="white", linewidths=1.0, zorder=5)
         ax.annotate(
-            node["name"].replace("_", " "),
+            textwrap.fill(node_label(node), width=14),
             (node["x"], node["y"]),
             textcoords="offset points", xytext=(6, 6),
-            fontsize=6.5, color="#2c3e50", fontweight="medium", zorder=6,
+            fontsize=6.5, color="#102a43", fontweight="bold", zorder=6,
+            bbox={"boxstyle": "round,pad=0.15", "fc": "white", "ec": "none", "alpha": 0.75},
         )
 
     # --- Legend ---
     legend_items = [
-        mpatches.Patch(facecolor="#95a5a6", label="Corridor / Waypoint"),
-        mpatches.Patch(facecolor="#2ecc71", label="Charging Station"),
-        mpatches.Patch(facecolor="#3498db", label="Office / Huddle"),
-        mpatches.Patch(facecolor="#f1c40f", label="Open Plan / Workspace"),
-        mpatches.Patch(facecolor="#e67e22", label="Kitchen / Cafe"),
-        mpatches.Patch(facecolor="#1abc9c", label="Lounge"),
-        mpatches.Patch(facecolor="#e74c3c", label="Restricted / Entrance"),
+        mpatches.Patch(facecolor="#00a6ff", label="Mapped Node / Edge"),
         mpatches.Patch(facecolor="#e74c3c", alpha=0.18, edgecolor="#c0392b",
                        linestyle="--", label="Exclusion Zone (NO-BOT)"),
     ]
@@ -166,7 +206,10 @@ def main():
     out = MAP_FILE.with_suffix(".png")
     fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Saved: {out}")
-    plt.show()
+    if os.environ.get("SHOW_MAP", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 if __name__ == "__main__":
