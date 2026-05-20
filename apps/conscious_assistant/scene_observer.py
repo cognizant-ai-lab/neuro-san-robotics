@@ -326,9 +326,14 @@ class SceneObserver:
             finally:
                 self._capture = None
 
-    def cleanup(self) -> None:
+    def cleanup(self, timeout_s: float = 2.0) -> None:
         """Release resources and remove the retained image."""
-        with self._lock:
+        acquired = self._lock.acquire(timeout=timeout_s)
+        if not acquired:
+            logging.warning("Scene observer cleanup skipped because camera is busy")
+            return
+
+        try:
             self._release_capture()
             if self.image_path.exists():
                 try:
@@ -336,3 +341,5 @@ class SceneObserver:
                 except OSError:  # pragma: no cover - filesystem-dependent
                     logging.exception("Failed to delete latest observation image")
             self._last_observation = None
+        finally:
+            self._lock.release()

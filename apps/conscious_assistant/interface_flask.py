@@ -280,6 +280,8 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 thread_started = False  # pylint: disable=invalid-name
+thinking_task = None
+shutdown_event = threading.Event()
 
 user_input_queue = queue.Queue()
 
@@ -514,6 +516,8 @@ def speech_worker():
             else:
                 logging.info("Speech worker: skipped empty TTS job")
         except queue.Empty:
+            if shutdown_event.is_set():
+                break
             continue
         except Exception:
             logging.exception("Speech worker error")
@@ -532,6 +536,10 @@ def enqueue_speech(
     ui_text: str | None = None,
 ) -> None:
     """Queue speech playback, optionally syncing the UI to speech start."""
+    if shutdown_event.is_set():
+        logging.debug("Skipping speech enqueue during shutdown")
+        return
+
     speech_queue.put(
         {
             "text": text,
@@ -561,6 +569,8 @@ def execute_deferred_actions_after_speech() -> None:
     """
     if not DEFERRED_ACTIONS_AVAILABLE or execute_deferred_actions is None:
         return
+    if shutdown_event.is_set():
+        return
 
     try:
         speech_queue.join()
@@ -583,7 +593,7 @@ def conscious_thinking_process():
     with app.app_context():  # Manually push the application context
         global conscious_thread  # pylint: disable=global-statement
         last_scene_signature = ()
-        while True:
+        while not shutdown_event.is_set():
             is_interactive_turn = False
             processing_started = False
             thoughts = None
@@ -592,7 +602,7 @@ def conscious_thinking_process():
                 # Wait up to the configured interval for user input
                 user_input = user_input_queue.get(timeout=THINKING_INTERVAL)
                 logging.info("Received user input: %r", user_input)
-                if user_input == "exit":
+                if user_input is None or user_input == "exit":
                     break
                 is_interactive_turn = True
                 thoughts = f"\n{timestamp} user: " + user_input
@@ -611,6 +621,9 @@ def conscious_thinking_process():
                 logging.info("Acknowledgment queued, proceeding with agent")
 
             except queue.Empty:
+                if shutdown_event.is_set():
+                    break
+
                 observation = scene_observer.observe()
                 if observation is not None:
                     emit_observation_update(observation)
@@ -704,12 +717,12 @@ def conscious_thinking_process():
 @socketio.on("connect", namespace="/chat")
 def on_connect():
     """Start background task on connect."""
-    global thread_started  # pylint: disable=global-statement
+    global thread_started, thinking_task  # pylint: disable=global-statement
     emit_observation_update(sid=request.sid)
     if not thread_started:
         thread_started = True
         # let socketio manage the green-thread
-        socketio.start_background_task(conscious_thinking_process)
+        thinking_task = socketio.start_background_task(conscious_thinking_process)
 
 
 @app.route("/")
@@ -834,6 +847,20 @@ def cleanup(from_request=False):
     cleaned_up = True
 
     print("Bye!")
+    shutdown_event.set()
+    user_input_queue.put(None)
+    speech_queue.put(None)
+    discard_deferred_actions("shutdown")
+
+    try:
+        if thinking_task is not None and hasattr(thinking_task, "join"):
+            thinking_task.join(timeout=3.0)
+    except RuntimeError:
+        logging.debug("Skipping join on current thinking thread during shutdown")
+
+    if threading.current_thread() is not speech_thread:
+        speech_thread.join(timeout=3.0)
+
     scene_observer.cleanup()
     tear_down_conscious_assistant(conscious_session)
 
