@@ -767,6 +767,7 @@ class NavCore:
         0.70,
     )
     ODOMETRY_YAW_RATE_RATIO: float = _env_float("NAV_ODOMETRY_YAW_RATE_RATIO", 1.0)
+    DEPTH_STOP_WHEN_IDLE: bool = _env_flag("NAV_DEPTH_STOP_WHEN_IDLE", True)
 
     @classmethod
     def get_instance(cls) -> "NavCore":
@@ -828,10 +829,6 @@ class NavCore:
             if self._topo_map.load_from_file(map_file):
                 self._anchor_initial_pose()
 
-        # Start depth processor
-        if self._depth_processor.is_available:
-            self._depth_processor.start()
-
         logger.info(
             "NavCore: initialized (depth=%s, map=%s, loop=%d Hz)",
             self._depth_processor.backend,
@@ -861,6 +858,21 @@ class NavCore:
         """Lazily initialize the Go2Macros motor controller."""
         if self._go2 is None:
             self._go2 = _get_go2_macros()
+
+    def _ensure_depth_running(self) -> bool:
+        """Start or restart depth capture before a command that requires it."""
+        start = getattr(self._depth_processor, "start", None)
+        if callable(start):
+            start()
+        return bool(getattr(self._depth_processor, "is_available", False))
+
+    def _stop_depth_when_idle(self) -> None:
+        """Release depth camera resources between navigation actions."""
+        if not self.DEPTH_STOP_WHEN_IDLE:
+            return
+        stop = getattr(self._depth_processor, "stop", None)
+        if callable(stop):
+            stop()
 
     def _notify_status_change(self, message: str) -> None:
         """Notify the host application of a terminal navigation status change."""
@@ -907,6 +919,7 @@ class NavCore:
                 self._last_stop_reason = reason
                 self._global_planner.clear()
             logger.warning("NavCore: %s before navigating to '%s'", reason, destination)
+            self._stop_depth_when_idle()
             return False
 
         with self._state_lock:
@@ -926,7 +939,7 @@ class NavCore:
 
     def _wait_for_depth_grid(self, timeout_s: float) -> bool:
         """Wait briefly for the depth capture thread to publish its first grid."""
-        if not self._depth_processor.is_available:
+        if not self._ensure_depth_running():
             return False
 
         deadline = time.monotonic() + max(0.0, timeout_s)
@@ -970,6 +983,11 @@ class NavCore:
 
     def move_relative(self, distance: float, angle: float = 0.0) -> bool:
         """Move a given distance (meters) at a given angle offset (radians) from current heading."""
+        if not self._wait_for_depth_grid(self.DEPTH_READY_TIMEOUT_S):
+            logger.warning("NavCore: E-STOP: depth grid unavailable before relative move")
+            self._stop_depth_when_idle()
+            return False
+
         pose = self._odometry.get_pose()
         target_yaw = pose.yaw + angle
         goal_x = pose.x + distance * math.cos(target_yaw)
@@ -1039,20 +1057,22 @@ class NavCore:
             else:
                 max_seconds = self.FORWARD_MAX_SECONDS
 
-        if not self._depth_processor.is_available:
+        if not self._ensure_depth_running():
             return "Cannot move forward: no depth camera is available."
 
         initial_reading = self._depth_processor.get_center_depth_reading()
         if initial_reading is None:
+            self._stop_depth_when_idle()
             return "Cannot move forward: no reliable center depth reading is available."
 
         if initial_reading.distance_m <= stop_distance:
+            self._stop_depth_when_idle()
             return (
                 "Already stopped: obstacle is "
                 f"{initial_reading.distance_m:.2f}m ahead."
             )
 
-        self.stop()
+        self.stop(stop_depth=False)
         self._ensure_go2()
 
         with self._state_lock:
@@ -1102,6 +1122,7 @@ class NavCore:
                     if stop_reason != "obstacle":
                         self._last_stop_reason = None
                 self._goal = None
+            self._stop_depth_when_idle()
 
         if stop_reason == "obstacle":
             return (
@@ -1117,6 +1138,11 @@ class NavCore:
 
     def turn(self, angle_rad: float) -> bool:
         """Rotate in place by the given angle (radians, positive=left)."""
+        if not self._wait_for_depth_grid(self.DEPTH_READY_TIMEOUT_S):
+            logger.warning("NavCore: E-STOP: depth grid unavailable before turn")
+            self._stop_depth_when_idle()
+            return False
+
         pose = self._odometry.get_pose()
         with self._state_lock:
             self._goal = NavGoal(
@@ -1132,7 +1158,7 @@ class NavCore:
         self._ensure_running()
         return True
 
-    def stop(self):
+    def stop(self, stop_depth: bool = True):
         """Cancel current navigation and send stop command to the robot."""
         with self._state_lock:
             self._state = NavState.IDLE
@@ -1142,6 +1168,8 @@ class NavCore:
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
             self._go2.stop_move()
+        if stop_depth:
+            self._stop_depth_when_idle()
         logger.info("NavCore: navigation stopped")
 
     def resume(self):
@@ -1272,6 +1300,7 @@ class NavCore:
                 self._last_stop_reason = None
                 self._global_planner.clear()
             logger.info("NavCore: goal reached (dist=%.2fm)", dist_to_goal)
+            self._stop_depth_when_idle()
             if goal.goal_type == "semantic":
                 self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
             return
@@ -1287,6 +1316,7 @@ class NavCore:
                         self._goal = None
                         self._last_stop_reason = None
                         self._global_planner.clear()
+                    self._stop_depth_when_idle()
                     self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
                     return
                 target_x, target_y = waypoint.x, waypoint.y
@@ -1312,6 +1342,7 @@ class NavCore:
                     f"I stopped before reaching {self._goal_display_name(goal)} "
                     "because my depth grid became unavailable."
                 )
+                self._stop_depth_when_idle()
                 return
 
         elif state == NavState.AVOIDING:
@@ -1361,6 +1392,7 @@ class NavCore:
                         f"because {reason.lower()}."
                     )
                 self._notify_status_change(message)
+                self._stop_depth_when_idle()
                 return
             elif event.startswith("stuck"):
                 reason = "Stuck: no progress toward the goal"
@@ -1372,6 +1404,7 @@ class NavCore:
                     f"I stopped before reaching {self._goal_display_name(goal)} "
                     "because I was not making progress."
                 )
+                self._stop_depth_when_idle()
                 return
 
         if self._handle_obstacle_limited_motion(cmd, nearest_dist, goal, dist_to_goal):
@@ -1440,6 +1473,7 @@ class NavCore:
             f"my depth sensor kept seeing something nearby at {nearest_dist:.2f} meters "
             "and I was only able to crawl."
         )
+        self._stop_depth_when_idle()
         self._obstacle_limited_since = None
         return True
 

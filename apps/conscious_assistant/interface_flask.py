@@ -61,6 +61,10 @@ def _should_enable_scene_observer() -> bool:
     return _env_flag("CONSCIOUS_ENABLE_SCENE_OBSERVER", default=False)
 
 
+def _should_enable_passive_agent_turns() -> bool:
+    return _env_flag("CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS", default=False)
+
+
 def _should_enable_vision_runtime_prime() -> bool:
     raw_value = os.environ.get("VISION_SKIP_EARLY_IMPORT")
     if raw_value is None:
@@ -701,6 +705,14 @@ def conscious_thinking_process():
                 # loop iteration handle the user turn immediately instead.
                 if not user_input_queue.empty():
                     logging.info("User input arrived during scene observation; prioritizing it")
+                    continue
+
+                if not _should_enable_passive_agent_turns():
+                    last_scene_signature = scene_signature
+                    logging.info(
+                        "Scene observer detected updated entities without passive agent turn: %s",
+                        ", ".join(scene_signature),
+                    )
                     continue
 
                 thoughts = build_scene_input(timestamp, list(scene_signature))

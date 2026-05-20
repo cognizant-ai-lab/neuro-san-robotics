@@ -813,6 +813,7 @@ class TestNavCoreStatus(unittest.TestCase):
             result = nav.navigate_to("Shrushti's desk")
 
             self.assertTrue(result)
+            fake_depth.start.assert_called()
             self.assertGreaterEqual(calls["count"], 2)
             self.assertEqual(nav.state, NavState.NAVIGATING)
             nav.shutdown()
@@ -858,10 +859,44 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertFalse(result)
             self.assertEqual(nav.state, NavState.E_STOP)
             self.assertIn("E-STOP: depth grid unavailable", nav.get_status_summary())
+            fake_depth.start.assert_called()
+            fake_depth.stop.assert_called()
             fake_go2.stop_move.assert_called()
             nav.shutdown()
         finally:
             NavCore.DEPTH_READY_TIMEOUT_S = original_timeout
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_releases_depth_after_goal(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._odometry.set_pose(1.0, 1.0, 0.0)
+
+            goal = NavGoal(goal_type="semantic", x=1.0, y=1.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.IDLE)
+            fake_go2.stop_move.assert_called()
+            fake_depth.stop.assert_called()
+            nav.shutdown()
+        finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 

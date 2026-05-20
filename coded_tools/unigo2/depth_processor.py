@@ -341,12 +341,27 @@ class DepthProcessor:
     # Background capture thread
     # ------------------------------------------------------------------
 
+    def _camera_resources_ready(self) -> bool:
+        """Return True when the selected backend has live camera resources."""
+        if self._backend == "simulation":
+            return True
+        if self._backend == "realsense":
+            return self._pipeline is not None
+        if self._backend == "opencv":
+            return self._cv_capture is not None and self._cv_capture.isOpened()
+        return False
+
     def start(self):
         """Start the background depth capture thread."""
         if self._running:
             return
+
+        if not self._camera_resources_ready() and not self._config.simulation_mode:
+            self._init_camera()
+
         if self._backend == "none":
             return
+
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True, name="depth-capture")
         self._thread.start()
@@ -371,6 +386,12 @@ class DepthProcessor:
         if self._cv_capture:
             self._cv_capture.release()
             self._cv_capture = None
+        with self._lock:
+            self._latest_grid = None
+            self._latest_depth_m = None
+            self._latest_depth_timestamp = 0.0
+        if self._backend in {"realsense", "opencv"}:
+            self._backend = "none"
 
     def _capture_loop(self):
         """Background thread loop: read depth frames and update the latest grid."""
@@ -688,6 +709,11 @@ class DepthProcessor:
     def is_available(self) -> bool:
         """True if any depth source is active (including simulation)."""
         return self._backend != "none"
+
+    @property
+    def is_running(self) -> bool:
+        """True while the background capture thread is active."""
+        return self._running
 
     def get_obstacle_summary(self) -> str:
         """Human-readable obstacle summary for agent consumption."""
