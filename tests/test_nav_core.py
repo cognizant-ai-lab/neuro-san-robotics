@@ -336,6 +336,11 @@ class TestTopologicalMap(unittest.TestCase):
                     "x": 1,
                     "y": 0,
                     "description": "Shrushti's desk, red marker 2",
+                    "aliases": [
+                        "Shush desk",
+                        "Shush this desk",
+                        "Shushdi Fest",
+                    ],
                 },
                 {
                     "name": "charging_station",
@@ -350,6 +355,9 @@ class TestTopologicalMap(unittest.TestCase):
         self.assertEqual(topo.get_node("AI Hall of Fame").name, "ai_hall_of_fame")
         self.assertEqual(topo.get_node("Shrushti's desk").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("Shushti's desk").name, "shrushtis_desk")
+        self.assertEqual(topo.get_node("shush desk").name, "shrushtis_desk")
+        self.assertEqual(topo.get_node("Shush this desk").name, "shrushtis_desk")
+        self.assertEqual(topo.get_node("Shushdi Fest").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("base").name, "charging_station")
 
     def test_load_from_file(self):
@@ -591,6 +599,38 @@ class TestNavCoreStatus(unittest.TestCase):
             pose = nav._odometry.get_pose()
             expected_x = commanded_vx * nav.ODOMETRY_LINEAR_SPEED_RATIO / nav.NAV_LOOP_HZ
             self.assertAlmostEqual(pose.x, expected_x, places=4)
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_status_reports_estop_obstacle_reason(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.23)
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0)
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.E_STOP)
+            self.assertIn("E-STOP: obstacle at 0.23m", nav.get_status_summary())
+            fake_go2.stop_move.assert_called()
             nav.shutdown()
         finally:
             NavCore._instance = None

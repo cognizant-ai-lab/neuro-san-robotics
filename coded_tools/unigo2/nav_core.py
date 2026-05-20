@@ -751,6 +751,7 @@ class NavCore:
         """Initialize all sub-components: depth processor, planners, safety, odometry."""
         self._state = NavState.IDLE
         self._goal: Optional[NavGoal] = None
+        self._last_stop_reason: Optional[str] = None
         self._state_lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -851,6 +852,7 @@ class NavCore:
                 label=destination,
             )
             self._state = NavState.NAVIGATING
+            self._last_stop_reason = None
             self._reset_progress_tracker()
 
         self._ensure_running()
@@ -871,6 +873,7 @@ class NavCore:
         with self._state_lock:
             self._state = NavState.IDLE
             self._goal = None
+            self._last_stop_reason = None
             self._global_planner.clear()
 
         self._odometry.set_pose(node.x, node.y, heading_rad)
@@ -902,6 +905,7 @@ class NavCore:
                 yaw=target_yaw if abs(angle) > 0.01 else None,
             )
             self._state = NavState.NAVIGATING
+            self._last_stop_reason = None
             self._reset_progress_tracker()
 
         self._ensure_running()
@@ -981,6 +985,7 @@ class NavCore:
                 label="guarded_forward",
             )
             self._state = NavState.NAVIGATING
+            self._last_stop_reason = None
             self._reset_progress_tracker()
 
         start = time.monotonic()
@@ -994,11 +999,14 @@ class NavCore:
                     stop_reason = "depth_unavailable"
                     with self._state_lock:
                         self._state = NavState.E_STOP
+                        self._last_stop_reason = "E-STOP: center depth unavailable"
                     break
 
                 last_reading = reading
                 if reading.distance_m <= stop_distance:
                     stop_reason = "obstacle"
+                    with self._state_lock:
+                        self._last_stop_reason = f"Stopped: obstacle at {reading.distance_m:.2f}m"
                     break
 
                 if self._go2 and getattr(self._go2, "available", False):
@@ -1013,6 +1021,8 @@ class NavCore:
             with self._state_lock:
                 if self._state != NavState.E_STOP:
                     self._state = NavState.IDLE
+                    if stop_reason != "obstacle":
+                        self._last_stop_reason = None
                 self._goal = None
 
         if stop_reason == "obstacle":
@@ -1038,6 +1048,7 @@ class NavCore:
                 yaw=pose.yaw + angle_rad,
             )
             self._state = NavState.NAVIGATING
+            self._last_stop_reason = None
             self._reset_progress_tracker()
 
         self._ensure_running()
@@ -1048,6 +1059,7 @@ class NavCore:
         with self._state_lock:
             self._state = NavState.IDLE
             self._goal = None
+            self._last_stop_reason = None
             self._global_planner.clear()
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
@@ -1059,6 +1071,7 @@ class NavCore:
         with self._state_lock:
             if self._state == NavState.E_STOP:
                 self._state = NavState.IDLE
+                self._last_stop_reason = None
                 logger.info("NavCore: resumed from E-STOP")
 
     # ------------------------------------------------------------------
@@ -1080,6 +1093,7 @@ class NavCore:
         with self._state_lock:
             state = self._state
             goal = self._goal
+            last_stop_reason = self._last_stop_reason
 
         pose = self._odometry.get_pose()
         parts = [f"Navigation state: {state.value}"]
@@ -1090,6 +1104,9 @@ class NavCore:
                 parts.append(f"Destination: {goal.label}")
             dist = math.hypot(goal.x - pose.x, goal.y - pose.y)
             parts.append(f"Distance to goal: {dist:.1f}m")
+
+        if last_stop_reason:
+            parts.append(last_stop_reason)
 
         grid = self._depth_processor.get_obstacle_grid()
         if grid:
@@ -1170,9 +1187,11 @@ class NavCore:
             self._ensure_go2()
             if self._go2 and getattr(self._go2, "available", False):
                 self._go2.stop_move()
+            reason = f"E-STOP: obstacle at {nearest_dist:.2f}m"
             with self._state_lock:
                 self._state = NavState.E_STOP
-            logger.warning("NavCore: E-STOP triggered (obstacle at %.2fm)", nearest_dist)
+                self._last_stop_reason = reason
+            logger.warning("NavCore: %s", reason)
             return
 
         # 3. Check if goal reached
@@ -1184,6 +1203,7 @@ class NavCore:
             with self._state_lock:
                 self._state = NavState.IDLE
                 self._goal = None
+                self._last_stop_reason = None
                 self._global_planner.clear()
             logger.info("NavCore: goal reached (dist=%.2fm)", dist_to_goal)
             return
@@ -1197,6 +1217,7 @@ class NavCore:
                     with self._state_lock:
                         self._state = NavState.IDLE
                         self._goal = None
+                        self._last_stop_reason = None
                     return
                 target_x, target_y = waypoint.x, waypoint.y
             else:
@@ -1215,6 +1236,7 @@ class NavCore:
                     self._go2.stop_move()
                 with self._state_lock:
                     self._state = NavState.E_STOP
+                    self._last_stop_reason = "E-STOP: depth grid unavailable"
                 logger.warning("NavCore: E-STOP triggered (no depth grid available)")
                 return
 
@@ -1243,16 +1265,23 @@ class NavCore:
 
         if event:
             if event.startswith("e_stop"):
+                if event == "e_stop:obstacle_too_close":
+                    reason = f"E-STOP: obstacle at {nearest_dist:.2f}m"
+                else:
+                    reason = f"E-STOP: {event.split(':', 1)[-1].replace('_', ' ')}"
                 with self._state_lock:
                     self._state = NavState.E_STOP
+                    self._last_stop_reason = reason
                 self._ensure_go2()
                 if self._go2 and getattr(self._go2, "available", False):
                     self._go2.stop_move()
-                logger.warning("NavCore: safety event: %s", event)
+                logger.warning("NavCore: safety event: %s (%s)", event, reason)
                 return
             elif event.startswith("stuck"):
+                reason = "Stuck: no progress toward the goal"
                 with self._state_lock:
                     self._state = NavState.STUCK
+                    self._last_stop_reason = reason
                 logger.warning("NavCore: stuck detected")
                 return
 
@@ -1297,6 +1326,7 @@ class NavCore:
         with self._state_lock:
             self._state = NavState.IDLE
             self._goal = None
+            self._last_stop_reason = None
             self._global_planner.clear()
 
         if self._go2 and getattr(self._go2, "available", False):
