@@ -60,6 +60,10 @@ export NAV_DEPTH_CAMERA_SOURCE=realsense
 export NAV_MAP_FILE="$PWD/maps/cail_lab.json"
 export NAV_MAX_LINEAR_SPEED=0.40
 export NAV_MAX_YAW_RATE=0.08
+export NAV_PIVOT_YAW_RATE=0.30
+export NAV_USE_SDK_ODOMETRY=1
+export NAV_SPORT_MODE_STATE_TOPIC=rt/sportmodestate
+export NAV_ODOMETRY_YAW_RATE_RATIO=0.30
 export NAV_SAFETY_DISTANCE=0.20
 export NAV_AVOIDANCE_DISTANCE=0.60
 export NAV_PIVOT_HARD_STOP_DISTANCE=0.00
@@ -92,6 +96,10 @@ printf 'NAV_DEPTH_CAMERA_SOURCE=%s\n' "$NAV_DEPTH_CAMERA_SOURCE"
 printf 'NAV_MAP_FILE=%s\n' "$NAV_MAP_FILE"
 printf 'NAV_MAX_LINEAR_SPEED=%s\n' "$NAV_MAX_LINEAR_SPEED"
 printf 'NAV_MAX_YAW_RATE=%s\n' "$NAV_MAX_YAW_RATE"
+printf 'NAV_PIVOT_YAW_RATE=%s\n' "$NAV_PIVOT_YAW_RATE"
+printf 'NAV_USE_SDK_ODOMETRY=%s\n' "$NAV_USE_SDK_ODOMETRY"
+printf 'NAV_SPORT_MODE_STATE_TOPIC=%s\n' "$NAV_SPORT_MODE_STATE_TOPIC"
+printf 'NAV_ODOMETRY_YAW_RATE_RATIO=%s\n' "$NAV_ODOMETRY_YAW_RATE_RATIO"
 printf 'NAV_SAFETY_DISTANCE=%s\n' "$NAV_SAFETY_DISTANCE"
 printf 'NAV_AVOIDANCE_DISTANCE=%s\n' "$NAV_AVOIDANCE_DISTANCE"
 printf 'NAV_PIVOT_HARD_STOP_DISTANCE=%s\n' "$NAV_PIVOT_HARD_STOP_DISTANCE"
@@ -129,7 +137,11 @@ defaults before Flask starts.
 | `NAV_DEPTH_CAMERA_SOURCE` | `realsense` | Uses RealSense depth for navigation safety. |
 | `NAV_MAP_FILE` | `$PWD/maps/cail_lab.json` | Topological map for named destinations. |
 | `NAV_MAX_LINEAR_SPEED` | `0.40` | Maximum planned forward speed in meters per second. |
-| `NAV_MAX_YAW_RATE` | `0.08` | Maximum planned yaw rate in radians per second. |
+| `NAV_MAX_YAW_RATE` | `0.08` | Maximum yaw correction while translating. This keeps walking from weaving aggressively. |
+| `NAV_PIVOT_YAW_RATE` | `0.30` | In-place yaw rate for planned map turns, such as the 90-degree turn from Shrushti's desk toward the kitchen. |
+| `NAV_USE_SDK_ODOMETRY` | `1` | Uses Unitree SportModeState as the primary pose source when available. |
+| `NAV_SPORT_MODE_STATE_TOPIC` | `rt/sportmodestate` | DDS topic used for measured Unitree sport-mode position and yaw. |
+| `NAV_ODOMETRY_YAW_RATE_RATIO` | `0.30` | Conservative fallback yaw scale used only when measured SDK odometry is unavailable or stale. |
 | `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed safety stop threshold: path obstacles at or below 0.20 m are treated as stop conditions. |
 | `NAV_AVOIDANCE_DISTANCE` | `0.60` | Slowdown begins when a supported path obstacle is closer than 0.60 m. |
 | `NAV_PIVOT_HARD_STOP_DISTANCE` | `0.00` | Keeps the hard-stop bypass below the safety threshold so close path obstacles use the confirmation window. During confirmation, motion is still stopped. |

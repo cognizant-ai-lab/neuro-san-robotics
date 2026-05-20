@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import numpy as np
@@ -24,6 +25,7 @@ from coded_tools.unigo2.nav_core import (
     OdometryProvider,
     RobotPose,
     SafetyMonitor,
+    SdkSportModeOdometryProvider,
     TopologicalMap,
     VelocityCommand,
 )
@@ -215,8 +217,12 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertAlmostEqual(cmd.vx, 0.0)
         self.assertGreater(cmd.vyaw, 0.0)
 
-    def test_pivot_respects_configured_yaw_limit(self):
-        planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
+    def test_pivot_uses_configured_pivot_rate_independent_of_steering_limit(self):
+        planner = LocalPlanner(
+            max_linear_speed=0.3,
+            max_yaw_rate=0.08,
+            pivot_yaw_rate=0.30,
+        )
         grid = _empty_grid()
 
         cmd = planner.compute_velocity(
@@ -227,7 +233,7 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertAlmostEqual(cmd.vx, 0.0)
         self.assertLess(cmd.vyaw, 0.0)
-        self.assertLessEqual(abs(cmd.vyaw), 0.08)
+        self.assertAlmostEqual(abs(cmd.vyaw), 0.30)
 
     def test_clear_path_uses_direct_heading_without_vfh_wobble(self):
         planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
@@ -625,6 +631,40 @@ class TestOdometryProvider(unittest.TestCase):
         odom.reset()
         pose = odom.get_pose()
         self.assertAlmostEqual(pose.x, 0.0)
+
+    def test_sdk_odometry_aligns_measured_yaw_to_map_anchor(self):
+        odom = SdkSportModeOdometryProvider(start_subscriber=False)
+        odom.set_pose(5.62, 15.70, math.radians(0.0))
+
+        odom._handle_sample(SimpleNamespace(
+            position=[10.0, 20.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, math.radians(30.0)]),
+        ))
+        odom._handle_sample(SimpleNamespace(
+            position=[10.0, 20.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, math.radians(-60.0)]),
+        ))
+
+        pose = odom.get_pose()
+        self.assertAlmostEqual(pose.x, 5.62, places=2)
+        self.assertAlmostEqual(pose.y, 15.70, places=2)
+        self.assertAlmostEqual(pose.yaw, math.radians(-90.0), places=2)
+
+    def test_sdk_odometry_falls_back_when_sample_is_stale(self):
+        odom = SdkSportModeOdometryProvider(start_subscriber=False)
+        odom.set_pose(0.0, 0.0, 0.0)
+        odom._handle_sample(SimpleNamespace(
+            position=[0.0, 0.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0]),
+        ))
+
+        with odom._lock:
+            x, y, yaw, _timestamp = odom._latest_sdk_pose
+            odom._latest_sdk_pose = (x, y, yaw, time.monotonic() - 10.0)
+
+        odom.update_from_velocity(VelocityCommand(vx=1.0), dt=1.0)
+        pose = odom.get_pose()
+        self.assertAlmostEqual(pose.x, 1.0, places=2)
 
 
 # ---------------------------------------------------------------------------
@@ -1061,6 +1101,60 @@ class TestNavCoreStatus(unittest.TestCase):
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_pivots_for_right_angle_mapped_waypoint(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            nav._local_planner = LocalPlanner(
+                max_linear_speed=0.40,
+                max_yaw_rate=0.08,
+                pivot_yaw_rate=0.30,
+                safety_distance=0.20,
+                avoidance_distance=0.60,
+            )
+            nav._topo_map.load_from_dict({
+                "name": "suite21",
+                "nodes": [
+                    {"name": "shrushtis_desk", "x": 5.62, "y": 15.70},
+                    {"name": "wellness_room", "x": 5.62, "y": 11.59},
+                    {"name": "kitchen", "x": 5.62, "y": 4.11},
+                ],
+                "edges": [
+                    {"from": "shrushtis_desk", "to": "wellness_room", "distance": 4.11},
+                    {"from": "wellness_room", "to": "kitchen", "distance": 7.48},
+                ],
+            })
+            nav._odometry.set_pose(5.62, 15.70, 0.0)
+            path = nav._global_planner.plan_path(nav._odometry.get_pose(), "kitchen")
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(goal_type="semantic", x=path[-1].x, y=path[-1].y, label="kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            fake_go2.move.assert_called_once()
+            self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
+            self.assertLess(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
+            self.assertAlmostEqual(abs(fake_go2.move.call_args.kwargs["vyaw"]), 0.30)
+            nav.shutdown()
+        finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 

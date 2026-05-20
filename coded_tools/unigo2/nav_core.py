@@ -29,6 +29,7 @@ See docs/nav_core_design.md for full architecture documentation.
 
 import difflib
 import heapq
+import importlib
 import json
 import math
 import os
@@ -458,12 +459,16 @@ class LocalPlanner:
     SMOOTHING_WEIGHT = 0.3         # heading change smoothing
     PIVOT_HEADING_ERROR_RAD = _env_float("NAV_PIVOT_HEADING_ERROR_RAD", math.radians(20.0))
     FORWARD_HAZARD_CONE_RAD = _env_float("NAV_FORWARD_HAZARD_CONE_RAD", math.radians(20.0))
-    MIN_PIVOT_YAW_RATE = _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.30)
+    DEFAULT_PIVOT_YAW_RATE = _env_float(
+        "NAV_PIVOT_YAW_RATE",
+        _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.30),
+    )
 
     def __init__(
         self,
         max_linear_speed: float = 0.3,
         max_yaw_rate: float = 0.5,
+        pivot_yaw_rate: Optional[float] = None,
         safety_distance: float = 0.4,
         avoidance_distance: float = 0.8,
     ):
@@ -471,12 +476,16 @@ class LocalPlanner:
 
         Args:
             max_linear_speed: Maximum forward speed in m/s.
-            max_yaw_rate: Maximum rotation rate in rad/s.
+            max_yaw_rate: Maximum steering yaw rate while translating in rad/s.
+            pivot_yaw_rate: In-place yaw rate for planned map turns in rad/s.
             safety_distance: E-stop distance in meters (speed = 0 below this).
             avoidance_distance: Start slowing down at this distance in meters.
         """
         self.max_linear_speed = max_linear_speed
         self.max_yaw_rate = max_yaw_rate
+        self.pivot_yaw_rate = abs(
+            self.DEFAULT_PIVOT_YAW_RATE if pivot_yaw_rate is None else pivot_yaw_rate
+        )
         self.safety_distance = safety_distance
         self.avoidance_distance = avoidance_distance
         self._prev_heading = 0.0
@@ -593,10 +602,10 @@ class LocalPlanner:
         """Return a decisive in-place turn rate for large heading corrections."""
         if abs(heading_error) < 1e-6:
             return 0.0
-        yaw_limit = abs(self.max_yaw_rate)
-        min_pivot_rate = min(self.MIN_PIVOT_YAW_RATE, yaw_limit)
-        requested = min(abs(heading_error), yaw_limit)
-        magnitude = max(requested, min_pivot_rate)
+        yaw_limit = max(self.pivot_yaw_rate, 0.0)
+        if yaw_limit <= 1e-6:
+            return 0.0
+        magnitude = min(abs(heading_error), yaw_limit)
         return math.copysign(magnitude, heading_error)
 
     def _build_histogram(self, grid: ObstacleGrid) -> np.ndarray:
@@ -747,8 +756,9 @@ class SafetyMonitor:
 
 class OdometryProvider:
     """
-    Tracks robot pose. In the initial implementation, uses dead-reckoning
-    from velocity commands. Phase 3 adds DDS subscription to SDK odometry.
+    Tracks robot pose with dead-reckoning from velocity commands.
+
+    This remains the fallback when measured SDK odometry is unavailable.
     """
 
     def __init__(self):
@@ -790,6 +800,262 @@ class OdometryProvider:
             self._pose = RobotPose()
             self._last_update = time.monotonic()
 
+    def shutdown(self):
+        """Release provider resources. Base dead-reckoning has none."""
+
+    @property
+    def source_name(self) -> str:
+        """Human-readable pose source name for diagnostics."""
+        return "dead_reckoning"
+
+
+class SdkSportModeOdometryProvider(OdometryProvider):
+    """Align Unitree SportModeState pose into the loaded map frame.
+
+    The SDK publishes position and IMU yaw in its own odometry frame. When the
+    app anchors the robot to a known map node, we remember the SDK pose at that
+    instant and transform subsequent SDK deltas into map coordinates. If SDK
+    samples stop arriving, the provider falls back to the base dead-reckoning
+    integration so navigation can still degrade gracefully.
+    """
+
+    MAX_SAMPLE_AGE_S = _env_float("NAV_SDK_ODOMETRY_MAX_AGE", 0.75)
+
+    def __init__(
+        self,
+        topic: str = "rt/sportmodestate",
+        network_interface: Optional[str] = None,
+        start_subscriber: bool = True,
+    ):
+        super().__init__()
+        self._topic = topic
+        self._subscriber = None
+        self._latest_sdk_pose: Optional[Tuple[float, float, float, float]] = None
+        self._sdk_anchor: Optional[Tuple[float, float, float]] = None
+        self._map_anchor = RobotPose()
+        self._subscriber_error: Optional[str] = None
+
+        if start_subscriber:
+            self._start_subscriber(network_interface)
+
+    @property
+    def source_name(self) -> str:
+        """Human-readable pose source name for diagnostics."""
+        if self._subscriber is not None:
+            return f"sdk_sportmodestate:{self._topic}"
+        if self._subscriber_error:
+            return "dead_reckoning_after_sdk_error"
+        return "sdk_sportmodestate:manual"
+
+    @property
+    def subscriber_error(self) -> Optional[str]:
+        """Return SDK subscriber startup error, if any."""
+        return self._subscriber_error
+
+    def _start_subscriber(self, network_interface: Optional[str]) -> None:
+        """Initialize the Unitree SportModeState subscriber."""
+        try:
+            ChannelSubscriber, ChannelFactoryInitialize, SportModeState_ = (
+                self._import_unitree_sport_state()
+            )
+
+            if network_interface:
+                ChannelFactoryInitialize(0, network_interface)
+            else:
+                ChannelFactoryInitialize(0)
+
+            self._subscriber = ChannelSubscriber(self._topic, SportModeState_)
+            self._subscriber.Init(self._handle_sample, 1)
+            logger.info(
+                "SdkSportModeOdometryProvider: subscribed to %s", self._topic
+            )
+        except Exception as exc:
+            self._subscriber = None
+            self._subscriber_error = str(exc)
+            logger.warning(
+                "SdkSportModeOdometryProvider: unavailable, using dead-reckoning fallback: %s",
+                exc,
+            )
+
+    @staticmethod
+    def _import_unitree_sport_state():
+        """Import Unitree SDK2 symbols across the two package layouts in use."""
+        import_errors = []
+        for root in ("unitree_sdk2_python.unitree_sdk2py", "unitree_sdk2py"):
+            try:
+                channel_mod = importlib.import_module(f"{root}.core.channel")
+                dds_mod = importlib.import_module(f"{root}.idl.unitree_go.msg.dds_")
+                return (
+                    channel_mod.ChannelSubscriber,
+                    channel_mod.ChannelFactoryInitialize,
+                    dds_mod.SportModeState_,
+                )
+            except Exception as exc:
+                import_errors.append(f"{root}: {exc}")
+        raise ImportError("; ".join(import_errors))
+
+    @staticmethod
+    def _normalize_angle(angle: float) -> float:
+        """Normalize an angle to [-pi, pi]."""
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    @staticmethod
+    def _read_field(obj: Any, name: str) -> Any:
+        """Read either a dataclass field or method-style generated IDL field."""
+        value = getattr(obj, name, None)
+        if callable(value):
+            return value()
+        return value
+
+    @classmethod
+    def _extract_sample_pose(
+        cls,
+        sample: Any,
+    ) -> Optional[Tuple[float, float, float, float]]:
+        """Extract x, y, yaw, monotonic_timestamp from a SportModeState sample."""
+        position = cls._read_field(sample, "position")
+        imu_state = cls._read_field(sample, "imu_state")
+        rpy = cls._read_field(imu_state, "rpy") if imu_state is not None else None
+
+        if position is None or rpy is None or len(position) < 2 or len(rpy) < 3:
+            return None
+
+        return (
+            float(position[0]),
+            float(position[1]),
+            cls._normalize_angle(float(rpy[2])),
+            time.monotonic(),
+        )
+
+    def _handle_sample(self, sample: Any) -> None:
+        """DDS callback for incoming SportModeState samples."""
+        sdk_pose = self._extract_sample_pose(sample)
+        if sdk_pose is None:
+            return
+
+        with self._lock:
+            self._latest_sdk_pose = sdk_pose
+            if self._sdk_anchor is None:
+                self._sdk_anchor = (sdk_pose[0], sdk_pose[1], sdk_pose[2])
+                self._map_anchor = RobotPose(
+                    x=self._pose.x,
+                    y=self._pose.y,
+                    yaw=self._pose.yaw,
+                    timestamp=self._pose.timestamp,
+                )
+            self._pose = self._aligned_pose_from_sdk_locked(sdk_pose)
+
+    def _has_fresh_sdk_pose_locked(self) -> bool:
+        """True if the last SDK sample is recent enough to trust."""
+        if self._latest_sdk_pose is None:
+            return False
+        return time.monotonic() - self._latest_sdk_pose[3] <= self.MAX_SAMPLE_AGE_S
+
+    def _aligned_pose_from_sdk_locked(
+        self,
+        sdk_pose: Tuple[float, float, float, float],
+    ) -> RobotPose:
+        """Transform SDK odometry deltas into the current map-anchor frame."""
+        if self._sdk_anchor is None:
+            self._sdk_anchor = (sdk_pose[0], sdk_pose[1], sdk_pose[2])
+
+        sdk_anchor_x, sdk_anchor_y, sdk_anchor_yaw = self._sdk_anchor
+        dx = sdk_pose[0] - sdk_anchor_x
+        dy = sdk_pose[1] - sdk_anchor_y
+        frame_yaw = self._map_anchor.yaw - sdk_anchor_yaw
+        cos_yaw = math.cos(frame_yaw)
+        sin_yaw = math.sin(frame_yaw)
+
+        map_dx = cos_yaw * dx - sin_yaw * dy
+        map_dy = sin_yaw * dx + cos_yaw * dy
+        map_yaw = self._normalize_angle(
+            self._map_anchor.yaw + self._normalize_angle(sdk_pose[2] - sdk_anchor_yaw)
+        )
+        return RobotPose(
+            x=self._map_anchor.x + map_dx,
+            y=self._map_anchor.y + map_dy,
+            yaw=map_yaw,
+            timestamp=time.time(),
+        )
+
+    def update_from_velocity(self, cmd: VelocityCommand, dt: float):
+        """Use SDK pose when fresh; otherwise fall back to dead-reckoning."""
+        with self._lock:
+            if self._has_fresh_sdk_pose_locked():
+                self._pose = self._aligned_pose_from_sdk_locked(self._latest_sdk_pose)
+                return
+
+            self._pose.x += cmd.vx * math.cos(self._pose.yaw) * dt
+            self._pose.y += cmd.vx * math.sin(self._pose.yaw) * dt
+            self._pose.yaw = self._normalize_angle(self._pose.yaw + cmd.vyaw * dt)
+            self._pose.timestamp = time.time()
+
+    def set_pose(self, x: float, y: float, yaw: float = 0.0):
+        """Anchor the map pose and align future SDK odometry samples to it."""
+        with self._lock:
+            now = time.time()
+            normalized_yaw = self._normalize_angle(yaw)
+            self._pose = RobotPose(x=x, y=y, yaw=normalized_yaw, timestamp=now)
+            self._map_anchor = RobotPose(x=x, y=y, yaw=normalized_yaw, timestamp=now)
+            if self._latest_sdk_pose is not None:
+                sdk_pose = self._latest_sdk_pose
+                self._sdk_anchor = (sdk_pose[0], sdk_pose[1], sdk_pose[2])
+            else:
+                self._sdk_anchor = None
+            self._last_update = time.monotonic()
+
+    def get_pose(self) -> RobotPose:
+        """Return measured pose when fresh, otherwise the fallback pose."""
+        with self._lock:
+            if self._has_fresh_sdk_pose_locked():
+                self._pose = self._aligned_pose_from_sdk_locked(self._latest_sdk_pose)
+            return RobotPose(
+                x=self._pose.x,
+                y=self._pose.y,
+                yaw=self._pose.yaw,
+                timestamp=self._pose.timestamp,
+            )
+
+    def reset(self):
+        """Reset pose and SDK/map anchors."""
+        with self._lock:
+            self._pose = RobotPose()
+            self._map_anchor = RobotPose()
+            self._sdk_anchor = None
+            self._latest_sdk_pose = None
+            self._last_update = time.monotonic()
+
+    def shutdown(self):
+        """Close the SDK subscriber if it was started."""
+        if self._subscriber is None:
+            return
+        try:
+            self._subscriber.Close()
+        except Exception:
+            logger.debug("SdkSportModeOdometryProvider: subscriber close failed", exc_info=True)
+        finally:
+            self._subscriber = None
+
+
+def _create_odometry_provider() -> OdometryProvider:
+    """Create the preferred odometry provider with graceful fallback."""
+    use_sdk_default = not _env_flag("NAV_SIMULATION_MODE", False)
+    if not _env_flag("NAV_USE_SDK_ODOMETRY", use_sdk_default):
+        return OdometryProvider()
+
+    topic = os.environ.get("NAV_SPORT_MODE_STATE_TOPIC", "rt/sportmodestate")
+    network_interface = (
+        os.environ.get("GO2_NETWORK_INTERFACE")
+        or os.environ.get("CYCLONEDDS_NETWORK_INTERFACE")
+    )
+    provider = SdkSportModeOdometryProvider(
+        topic=topic,
+        network_interface=network_interface,
+    )
+    if provider.subscriber_error:
+        return provider
+    return provider
+
 
 # ---------------------------------------------------------------------------
 # NavCore (singleton)
@@ -820,6 +1086,10 @@ class NavCore:
     AVOIDANCE_DISTANCE_M: float = _env_float("NAV_AVOIDANCE_DISTANCE", 0.8)
     MAX_LINEAR_SPEED: float = _env_float("NAV_MAX_LINEAR_SPEED", 0.3)
     MAX_YAW_RATE: float = _env_float("NAV_MAX_YAW_RATE", 0.5)
+    PIVOT_YAW_RATE: float = _env_float(
+        "NAV_PIVOT_YAW_RATE",
+        _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.30),
+    )
     GOAL_TOLERANCE_M: float = _env_float("NAV_GOAL_TOLERANCE", 0.3)
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 10.0)
     PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.2)
@@ -880,6 +1150,7 @@ class NavCore:
         self._local_planner = LocalPlanner(
             max_linear_speed=self.MAX_LINEAR_SPEED,
             max_yaw_rate=self.MAX_YAW_RATE,
+            pivot_yaw_rate=self.PIVOT_YAW_RATE,
             safety_distance=self.SAFETY_DISTANCE_M,
             avoidance_distance=self.AVOIDANCE_DISTANCE_M,
         )
@@ -890,7 +1161,7 @@ class NavCore:
             pivot_hard_stop_distance=self.PIVOT_HARD_STOP_DISTANCE_M,
             forward_hazard_cone_rad=self.FORWARD_HAZARD_CONE_RAD,
         )
-        self._odometry = OdometryProvider()
+        self._odometry = _create_odometry_provider()
 
         # Global planner (optional, requires map)
         self._topo_map = TopologicalMap()
@@ -920,14 +1191,16 @@ class NavCore:
             self.NAV_LOOP_HZ,
         )
         logger.info(
-            "NavCore: config max_vx=%.2f max_vyaw=%.2f safety=%.2f "
-            "avoidance=%.2f goal_tol=%.2f odom_linear_ratio=%.2f "
-            "odom_yaw_ratio=%.2f",
+            "NavCore: config max_vx=%.2f steer_vyaw=%.2f pivot_vyaw=%.2f "
+            "safety=%.2f avoidance=%.2f goal_tol=%.2f odom_source=%s "
+            "odom_linear_ratio=%.2f odom_yaw_ratio=%.2f",
             self.MAX_LINEAR_SPEED,
             self.MAX_YAW_RATE,
+            self.PIVOT_YAW_RATE,
             self.SAFETY_DISTANCE_M,
             self.AVOIDANCE_DISTANCE_M,
             self.GOAL_TOLERANCE_M,
+            self._odometry.source_name,
             self.ODOMETRY_LINEAR_SPEED_RATIO,
             self.ODOMETRY_YAW_RATE_RATIO,
         )
@@ -1808,6 +2081,7 @@ class NavCore:
             self._thread.join(timeout=2.0)
             self._thread = None
         self._depth_processor.stop()
+        self._odometry.shutdown()
         logger.info("NavCore: shutdown complete")
 
     def __del__(self):
