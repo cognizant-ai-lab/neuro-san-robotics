@@ -718,6 +718,7 @@ class NavCore:
 
     _instance: Optional["NavCore"] = None
     _instance_lock = threading.Lock()
+    _global_status_callback: Optional[Callable[[str], None]] = None
 
     # Configuration (overridable via environment variables)
     NAV_LOOP_HZ: int = _env_int("NAV_LOOP_HZ", 10)
@@ -748,11 +749,20 @@ class NavCore:
                 cls._instance = cls()
             return cls._instance
 
+    @classmethod
+    def set_status_callback(cls, callback: Optional[Callable[[str], None]]) -> None:
+        """Register a callback for terminal navigation status updates."""
+        with cls._instance_lock:
+            cls._global_status_callback = callback
+            if cls._instance is not None:
+                cls._instance._on_status_change = callback
+
     def __init__(self):
         """Initialize all sub-components: depth processor, planners, safety, odometry."""
         self._state = NavState.IDLE
         self._goal: Optional[NavGoal] = None
         self._last_stop_reason: Optional[str] = None
+        self._on_status_change = self._global_status_callback
         self._state_lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -789,9 +799,6 @@ class NavCore:
             if self._topo_map.load_from_file(map_file):
                 self._anchor_initial_pose()
 
-        # Status callback (for agent notifications)
-        self._on_status_change: Optional[Callable[[str], None]] = None
-
         # Start depth processor
         if self._depth_processor.is_available:
             self._depth_processor.start()
@@ -825,6 +832,21 @@ class NavCore:
         """Lazily initialize the Go2Macros motor controller."""
         if self._go2 is None:
             self._go2 = _get_go2_macros()
+
+    def _notify_status_change(self, message: str) -> None:
+        """Notify the host application of a terminal navigation status change."""
+        callback = self._on_status_change
+        if callback is None:
+            return
+        try:
+            callback(message)
+        except Exception:
+            logger.exception("NavCore: status callback failed")
+
+    @staticmethod
+    def _goal_display_name(goal: NavGoal) -> str:
+        """Return a friendly destination name for status updates."""
+        return goal.label or "the destination"
 
     # ------------------------------------------------------------------
     # Public navigation commands
@@ -1219,6 +1241,10 @@ class NavCore:
                 self._state = NavState.E_STOP
                 self._last_stop_reason = reason
             logger.warning("NavCore: %s", reason)
+            self._notify_status_change(
+                f"I stopped before reaching {self._goal_display_name(goal)} "
+                f"because my depth sensor reported something at {nearest_dist:.2f} meters."
+            )
             return
 
         # 3. Check if goal reached
@@ -1233,6 +1259,8 @@ class NavCore:
                 self._last_stop_reason = None
                 self._global_planner.clear()
             logger.info("NavCore: goal reached (dist=%.2fm)", dist_to_goal)
+            if goal.goal_type == "semantic":
+                self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
             return
 
         # 4. Compute velocity command
@@ -1245,6 +1273,8 @@ class NavCore:
                         self._state = NavState.IDLE
                         self._goal = None
                         self._last_stop_reason = None
+                        self._global_planner.clear()
+                    self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
                     return
                 target_x, target_y = waypoint.x, waypoint.y
             else:
@@ -1265,6 +1295,10 @@ class NavCore:
                     self._state = NavState.E_STOP
                     self._last_stop_reason = "E-STOP: depth grid unavailable"
                 logger.warning("NavCore: E-STOP triggered (no depth grid available)")
+                self._notify_status_change(
+                    f"I stopped before reaching {self._goal_display_name(goal)} "
+                    "because my depth grid became unavailable."
+                )
                 return
 
         elif state == NavState.AVOIDING:
@@ -1303,6 +1337,17 @@ class NavCore:
                 if self._go2 and getattr(self._go2, "available", False):
                     self._go2.stop_move()
                 logger.warning("NavCore: safety event: %s (%s)", event, reason)
+                if event == "e_stop:obstacle_too_close":
+                    message = (
+                        f"I stopped before reaching {self._goal_display_name(goal)} "
+                        f"because my depth sensor reported something at {nearest_dist:.2f} meters."
+                    )
+                else:
+                    message = (
+                        f"I stopped before reaching {self._goal_display_name(goal)} "
+                        f"because {reason.lower()}."
+                    )
+                self._notify_status_change(message)
                 return
             elif event.startswith("stuck"):
                 reason = "Stuck: no progress toward the goal"
@@ -1310,6 +1355,10 @@ class NavCore:
                     self._state = NavState.STUCK
                     self._last_stop_reason = reason
                 logger.warning("NavCore: stuck detected")
+                self._notify_status_change(
+                    f"I stopped before reaching {self._goal_display_name(goal)} "
+                    "because I was not making progress."
+                )
                 return
 
         # 6. Execute

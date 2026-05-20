@@ -549,6 +549,28 @@ def enqueue_speech(
     )
 
 
+def enqueue_navigation_status_update(message: str) -> None:
+    """Speak terminal navigation updates emitted by NavCore's background loop."""
+    if not message:
+        return
+    logging.info("Navigation status update: %s", message)
+    enqueue_speech(message, emit_to_ui=True)
+
+
+def register_navigation_status_callback() -> None:
+    """Register the Flask speech bridge without eagerly constructing NavCore."""
+    try:
+        from coded_tools.unigo2.nav_core import NavCore
+
+        NavCore.set_status_callback(enqueue_navigation_status_update)
+        logging.info("Registered NavCore status callback for spoken navigation updates")
+    except Exception:
+        logging.exception("Failed to register NavCore status callback")
+
+
+register_navigation_status_callback()
+
+
 def discard_deferred_actions(reason: str) -> int:
     """Drop queued deferred robot actions when a turn should not execute them."""
     if not DEFERRED_ACTIONS_AVAILABLE or clear_deferred_actions is None:

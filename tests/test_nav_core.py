@@ -612,6 +612,8 @@ class TestNavCoreStatus(unittest.TestCase):
 
         NavCore._instance = None
         os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
         try:
             nav = NavCore.get_instance()
             nav._go2 = fake_go2
@@ -630,9 +632,17 @@ class TestNavCoreStatus(unittest.TestCase):
 
             self.assertEqual(nav.state, NavState.E_STOP)
             self.assertIn("E-STOP: obstacle at 0.23m", nav.get_status_summary())
+            self.assertEqual(
+                events,
+                [
+                    "I stopped before reaching the destination because my depth sensor "
+                    "reported something at 0.23 meters."
+                ],
+            )
             fake_go2.stop_move.assert_called()
             nav.shutdown()
         finally:
+            NavCore.set_status_callback(None)
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
