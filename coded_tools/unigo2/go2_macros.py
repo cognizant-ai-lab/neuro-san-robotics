@@ -65,7 +65,7 @@ class Go2Macros:
         self.ifname = ifname
         self.cli = None
         self.available = False
-        self._move_log_interval_s = max(0.0, _env_float("GO2_MOVE_LOG_INTERVAL_SECONDS", 2.0))
+        self._move_log_interval_s = _env_float("GO2_MOVE_LOG_INTERVAL_SECONDS", 2.0)
         self._last_move_log_at = 0.0
 
         if not self.use_robot or sport_client is None or ChannelFactoryInitialize is None:
@@ -144,6 +144,9 @@ class Go2Macros:
         print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
     def _log_move_command(self, vx: float, vy: float, vyaw: float):
+        if self._move_log_interval_s < 0.0:
+            return
+
         now = time.monotonic()
         if (
             self._move_log_interval_s <= 0.0

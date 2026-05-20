@@ -215,7 +215,7 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertAlmostEqual(cmd.vx, 0.0)
         self.assertGreater(cmd.vyaw, 0.0)
 
-    def test_pivot_uses_decisive_rate_even_when_yaw_limit_is_too_low(self):
+    def test_pivot_respects_configured_yaw_limit(self):
         planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
         grid = _empty_grid()
 
@@ -227,7 +227,21 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertAlmostEqual(cmd.vx, 0.0)
         self.assertLess(cmd.vyaw, 0.0)
-        self.assertGreaterEqual(abs(cmd.vyaw), planner.MIN_PIVOT_YAW_RATE)
+        self.assertLessEqual(abs(cmd.vyaw), 0.08)
+
+    def test_clear_path_uses_direct_heading_without_vfh_wobble(self):
+        planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
+        grid = _grid_with_side_obstacle(distance_m=0.37)
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(5.0),
+            goal_distance=2.0,
+        )
+
+        self.assertGreater(cmd.vx, 0.0)
+        self.assertGreater(cmd.vyaw, 0.0)
+        self.assertLessEqual(abs(cmd.vyaw), 0.08)
 
     def test_stops_when_no_free_sectors(self):
         planner = LocalPlanner()

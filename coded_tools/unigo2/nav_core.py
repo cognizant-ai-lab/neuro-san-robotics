@@ -497,10 +497,13 @@ class LocalPlanner:
         Returns:
             VelocityCommand with speed modulated by obstacle proximity and goal distance.
         """
+        path_nearest = obstacle_grid.path_obstacle_m
+
+        if path_nearest > self.avoidance_distance:
+            return self._compute_direct_velocity(goal_direction, goal_distance, path_nearest)
+
         histogram = self._build_histogram(obstacle_grid)
         free_sectors = self._find_free_sectors(histogram)
-
-        path_nearest = obstacle_grid.path_obstacle_m
 
         if not free_sectors:
             if path_nearest > self.safety_distance:
@@ -550,6 +553,31 @@ class LocalPlanner:
 
         return VelocityCommand(vx=vx, vy=0.0, vyaw=float(vyaw))
 
+    def _compute_direct_velocity(
+        self,
+        goal_direction: float,
+        goal_distance: float,
+        path_nearest: float,
+    ) -> VelocityCommand:
+        """Drive the mapped path directly when the path corridor is clear."""
+        if (
+            goal_distance > 0.5
+            and abs(goal_direction) >= self.PIVOT_HEADING_ERROR_RAD
+        ):
+            vyaw = self._pivot_yaw_rate(goal_direction)
+            self._prev_heading = float(vyaw)
+            return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
+
+        base_speed = self._modulate_speed(self.max_linear_speed, path_nearest)
+        if goal_distance < 0.5:
+            base_speed = min(base_speed, 0.1)
+
+        vyaw = float(np.clip(goal_direction, -self.max_yaw_rate, self.max_yaw_rate))
+        turn_factor = 1.0 - min(abs(vyaw) / max(self.max_yaw_rate, 1e-6), 1.0) * 0.5
+        vx = base_speed * turn_factor
+        self._prev_heading = vyaw
+        return VelocityCommand(vx=vx, vy=0.0, vyaw=vyaw)
+
     def compute_avoidance(self, obstacle_grid: ObstacleGrid) -> VelocityCommand:
         """Reactive avoidance: turn away from nearest obstacle."""
         bearing = obstacle_grid.nearest_obstacle_bearing
@@ -565,9 +593,10 @@ class LocalPlanner:
         """Return a decisive in-place turn rate for large heading corrections."""
         if abs(heading_error) < 1e-6:
             return 0.0
-        max_pivot_rate = max(abs(self.max_yaw_rate), self.MIN_PIVOT_YAW_RATE)
-        requested = min(abs(heading_error), max_pivot_rate)
-        magnitude = max(requested, self.MIN_PIVOT_YAW_RATE)
+        yaw_limit = abs(self.max_yaw_rate)
+        min_pivot_rate = min(self.MIN_PIVOT_YAW_RATE, yaw_limit)
+        requested = min(abs(heading_error), yaw_limit)
+        magnitude = max(requested, min_pivot_rate)
         return math.copysign(magnitude, heading_error)
 
     def _build_histogram(self, grid: ObstacleGrid) -> np.ndarray:
@@ -889,6 +918,18 @@ class NavCore:
             self._depth_processor.backend,
             "loaded" if self._topo_map.is_loaded else "none",
             self.NAV_LOOP_HZ,
+        )
+        logger.info(
+            "NavCore: config max_vx=%.2f max_vyaw=%.2f safety=%.2f "
+            "avoidance=%.2f goal_tol=%.2f odom_linear_ratio=%.2f "
+            "odom_yaw_ratio=%.2f",
+            self.MAX_LINEAR_SPEED,
+            self.MAX_YAW_RATE,
+            self.SAFETY_DISTANCE_M,
+            self.AVOIDANCE_DISTANCE_M,
+            self.GOAL_TOLERANCE_M,
+            self.ODOMETRY_LINEAR_SPEED_RATIO,
+            self.ODOMETRY_YAW_RATE_RATIO,
         )
 
     def _anchor_initial_pose(self):

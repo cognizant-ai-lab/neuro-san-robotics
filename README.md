@@ -47,6 +47,7 @@ export CONSCIOUS_ENABLE_SCENE_AGENT_INPUT=0
 export CONSCIOUS_ENABLE_SCENE_OBSERVER=1
 export GO2_USE_SDK_SPECIAL_MOTIONS=1
 export VISION_CAMERA_SOURCE=unitree:eth0
+export GO2_MOVE_LOG_INTERVAL_SECONDS=-1
 
 export GO2_NETWORK_INTERFACE=eth0
 export CYCLONEDDS_NETWORK_INTERFACE=eth0
@@ -79,6 +80,7 @@ printf 'CONSCIOUS_ENABLE_SCENE_AGENT_INPUT=%s\n' "$CONSCIOUS_ENABLE_SCENE_AGENT_
 printf 'CONSCIOUS_ENABLE_SCENE_OBSERVER=%s\n' "$CONSCIOUS_ENABLE_SCENE_OBSERVER"
 printf 'GO2_USE_SDK_SPECIAL_MOTIONS=%s\n' "$GO2_USE_SDK_SPECIAL_MOTIONS"
 printf 'VISION_CAMERA_SOURCE=%s\n' "$VISION_CAMERA_SOURCE"
+printf 'GO2_MOVE_LOG_INTERVAL_SECONDS=%s\n' "$GO2_MOVE_LOG_INTERVAL_SECONDS"
 
 printf 'GO2_NETWORK_INTERFACE=%s\n' "$GO2_NETWORK_INTERFACE"
 printf 'CYCLONEDDS_NETWORK_INTERFACE=%s\n' "$CYCLONEDDS_NETWORK_INTERFACE"
@@ -118,6 +120,7 @@ defaults before Flask starts.
 | `CONSCIOUS_ENABLE_SCENE_OBSERVER` | `1` | Keeps the camera scene observer enabled. |
 | `GO2_USE_SDK_SPECIAL_MOTIONS` | `1` | Uses SDK-backed Go2 special motions when available. |
 | `VISION_CAMERA_SOURCE` | `unitree:eth0` | Uses the Unitree front camera over `eth0` for visual observation. |
+| `GO2_MOVE_LOG_INTERVAL_SECONDS` | `-1` | Disables repeated raw `Move(vx, vy, vyaw)` command logs. Set a positive number to sample move logs every N seconds. |
 | `GO2_NETWORK_INTERFACE` | `eth0` | Network interface used for Go2 SDK communication. |
 | `CYCLONEDDS_NETWORK_INTERFACE` | `eth0` | Network interface CycloneDDS should bind to. |
 | `CYCLONEDDS_HOME` | `$PWD/cyclonedds/install` | Local CycloneDDS install path. |
