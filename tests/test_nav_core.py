@@ -42,6 +42,9 @@ def _empty_grid(rows=80, cols=80, resolution=0.05) -> ObstacleGrid:
         timestamp=time.time(),
         nearest_obstacle_m=float("inf"),
         nearest_obstacle_bearing=0.0,
+        path_obstacle_m=float("inf"),
+        path_obstacle_bearing=0.0,
+        path_obstacle_points=0,
     )
 
 
@@ -62,6 +65,9 @@ def _grid_with_wall_ahead(distance_m=1.0, rows=80, cols=80, resolution=0.05) -> 
         timestamp=time.time(),
         nearest_obstacle_m=distance_m,
         nearest_obstacle_bearing=0.0,
+        path_obstacle_m=distance_m,
+        path_obstacle_bearing=0.0,
+        path_obstacle_points=100,
     )
 
 
@@ -82,6 +88,9 @@ def _grid_with_wall_right(distance_m=0.5, rows=80, cols=80, resolution=0.05) -> 
         timestamp=time.time(),
         nearest_obstacle_m=distance_m,
         nearest_obstacle_bearing=-math.pi / 2,
+        path_obstacle_m=float("inf"),
+        path_obstacle_bearing=0.0,
+        path_obstacle_points=0,
     )
 
 
@@ -102,6 +111,9 @@ def _grid_with_side_obstacle(distance_m=0.37, rows=80, cols=80, resolution=0.05)
         timestamp=time.time(),
         nearest_obstacle_m=distance_m,
         nearest_obstacle_bearing=-math.pi / 2,
+        path_obstacle_m=float("inf"),
+        path_obstacle_bearing=0.0,
+        path_obstacle_points=0,
     )
 
 
@@ -123,6 +135,11 @@ def _grid_with_obstacle_at_bearing(
     if 0 <= row < rows and 0 <= col < cols:
         grid[row, col] = 1.0
 
+    lateral_m = distance_m * math.sin(bearing_rad)
+    path_distance = distance_m if abs(lateral_m) <= 0.12 else float("inf")
+    path_bearing = bearing_rad if path_distance < float("inf") else 0.0
+    path_points = 100 if path_distance < float("inf") else 0
+
     return ObstacleGrid(
         grid=grid,
         resolution=resolution,
@@ -131,6 +148,9 @@ def _grid_with_obstacle_at_bearing(
         timestamp=time.time(),
         nearest_obstacle_m=distance_m,
         nearest_obstacle_bearing=bearing_rad,
+        path_obstacle_m=path_distance,
+        path_obstacle_bearing=path_bearing,
+        path_obstacle_points=path_points,
     )
 
 
@@ -214,6 +234,8 @@ class TestLocalPlanner(unittest.TestCase):
         grid = _empty_grid()
         grid.grid[:, :] = 1.0  # all occupied
         grid.nearest_obstacle_m = 0.2
+        grid.path_obstacle_m = 0.2
+        grid.path_obstacle_points = 100
 
         cmd = planner.compute_velocity(grid, goal_direction=0.0, goal_distance=2.0)
         self.assertAlmostEqual(cmd.vx, 0.0,
@@ -253,6 +275,22 @@ class TestLocalPlanner(unittest.TestCase):
         cmd = planner.compute_velocity(grid, goal_direction=0.0, goal_distance=2.0)
 
         self.assertGreater(cmd.vx, 0.0, "A 30-degree side object should not block the route")
+
+    def test_drives_when_nearest_anywhere_is_false_close_reading(self):
+        planner = LocalPlanner(max_linear_speed=0.3, safety_distance=0.4, avoidance_distance=0.8)
+        grid = _empty_grid()
+        grid.nearest_obstacle_m = 0.19
+        grid.nearest_obstacle_bearing = math.radians(35.0)
+        grid.path_obstacle_m = float("inf")
+        grid.path_obstacle_points = 0
+
+        cmd = planner.compute_velocity(grid, goal_direction=0.0, goal_distance=2.0)
+
+        self.assertGreater(
+            cmd.vx,
+            0.0,
+            "A close reading outside the supported path corridor should not stop forward travel",
+        )
 
     def test_slows_near_goal(self):
         planner = LocalPlanner(max_linear_speed=0.3)
@@ -790,12 +828,12 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.E_STOP)
-            self.assertIn("E-STOP: obstacle at 0.18m", nav.get_status_summary())
+            self.assertIn("E-STOP: path obstacle at 0.18m", nav.get_status_summary())
             self.assertEqual(
                 events,
                 [
                     "I stopped before reaching the destination because my depth sensor "
-                    "reported something at 0.18 meters."
+                    "reported something in my path at 0.18 meters."
                 ],
             )
             fake_go2.stop_move.assert_called()
@@ -867,6 +905,49 @@ class TestNavCoreStatus(unittest.TestCase):
 
             fake_depth = MagicMock()
             fake_depth.get_obstacle_grid.return_value = _grid_with_side_obstacle(distance_m=0.37)
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Shrushti's desk")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            fake_go2.move.assert_called()
+            self.assertGreater(fake_go2.move.call_args.kwargs["vx"], 0.0)
+            fake_go2.stop_move.assert_not_called()
+            self.assertEqual(events, [])
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_ignores_close_nearest_when_path_corridor_is_clear(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            grid = _empty_grid()
+            grid.nearest_obstacle_m = 0.19
+            grid.nearest_obstacle_bearing = math.radians(35.0)
+            grid.path_obstacle_m = float("inf")
+            grid.path_obstacle_points = 0
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = grid
             nav._depth_processor = fake_depth
 
             goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Shrushti's desk")

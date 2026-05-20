@@ -500,17 +500,16 @@ class LocalPlanner:
         histogram = self._build_histogram(obstacle_grid)
         free_sectors = self._find_free_sectors(histogram)
 
+        path_nearest = obstacle_grid.path_obstacle_m
+
         if not free_sectors:
+            if path_nearest > self.safety_distance:
+                vx = self._modulate_speed(min(self.max_linear_speed, 0.12), path_nearest)
+                return VelocityCommand(vx=vx, vy=0.0, vyaw=0.0)
             return VelocityCommand(0.0, 0.0, 0.0)
 
-        forward_nearest = self._nearest_obstacle_in_cone(
-            obstacle_grid,
-            center_angle=0.0,
-            half_width_rad=self.FORWARD_HAZARD_CONE_RAD,
-        )
-
         if (
-            forward_nearest <= self.safety_distance
+            path_nearest <= self.safety_distance
             and abs(goal_direction) < self.PIVOT_HEADING_ERROR_RAD
         ):
             return VelocityCommand(0.0, 0.0, 0.0)
@@ -535,7 +534,7 @@ class LocalPlanner:
         self._prev_heading = target_heading
 
         # Speed modulation based on nearest obstacle
-        nearest = forward_nearest
+        nearest = path_nearest
         base_speed = self._modulate_speed(self.max_linear_speed, nearest)
 
         # Slow down when close to goal
@@ -587,31 +586,6 @@ class LocalPlanner:
             histogram[sector] += weight
 
         return histogram
-
-    def _nearest_obstacle_in_cone(
-        self,
-        grid: ObstacleGrid,
-        center_angle: float,
-        half_width_rad: float,
-    ) -> float:
-        """Return nearest occupied cell inside an angular cone, or infinity."""
-        nearest = float("inf")
-        occupied = np.argwhere(grid.grid > 0)
-
-        for row, col in occupied:
-            dx = (grid.origin_row - row) * grid.resolution
-            dy = (grid.origin_col - col) * grid.resolution
-            angle = math.atan2(dy, dx)
-            angle_error = math.atan2(
-                math.sin(angle - center_angle),
-                math.cos(angle - center_angle),
-            )
-            if abs(angle_error) > half_width_rad:
-                continue
-
-            nearest = min(nearest, math.hypot(dx, dy))
-
-        return nearest
 
     def _find_free_sectors(self, histogram: np.ndarray) -> List[int]:
         """Return sector indices with obstacle density below the threshold."""
@@ -1426,9 +1400,16 @@ class NavCore:
         grid = self._depth_processor.get_obstacle_grid()
         if grid:
             if grid.nearest_obstacle_m < float("inf"):
-                parts.append(f"Nearest obstacle: {grid.nearest_obstacle_m:.2f}m")
+                parts.append(f"Nearest obstacle anywhere: {grid.nearest_obstacle_m:.2f}m")
             else:
                 parts.append("No obstacles detected")
+            if grid.path_obstacle_m < float("inf"):
+                parts.append(
+                    f"Path obstacle: {grid.path_obstacle_m:.2f}m "
+                    f"({grid.path_obstacle_points} depth points)"
+                )
+            else:
+                parts.append("Path corridor clear")
 
         return ". ".join(parts) + "."
 
@@ -1502,8 +1483,8 @@ class NavCore:
         pose = self._odometry.get_pose()
         self._update_progress(pose)
 
-        nearest_dist = grid.nearest_obstacle_m if grid else float("inf")
-        nearest_bearing = grid.nearest_obstacle_bearing if grid else 0.0
+        path_dist = grid.path_obstacle_m if grid else float("inf")
+        path_bearing = grid.path_obstacle_bearing if grid else 0.0
 
         # 2. Check if goal reached
         dist_to_goal = math.hypot(goal.x - pose.x, goal.y - pose.y)
@@ -1576,8 +1557,8 @@ class NavCore:
         seconds_since_progress = time.monotonic() - self._last_progress_time
         cmd, event = self._safety.filter_command(
             cmd,
-            nearest_obstacle_m=nearest_dist,
-            nearest_obstacle_bearing=nearest_bearing,
+            nearest_obstacle_m=path_dist,
+            nearest_obstacle_bearing=path_bearing,
             seconds_since_progress=seconds_since_progress,
         )
 
@@ -1585,19 +1566,20 @@ class NavCore:
             if event.startswith("e_stop"):
                 if (
                     event == "e_stop:obstacle_too_close"
-                    and self._should_defer_close_obstacle_stop(nearest_dist, nearest_bearing)
+                    and self._should_defer_close_obstacle_stop(path_dist, path_bearing)
                 ):
                     return
 
                 if event == "e_stop:obstacle_too_close":
-                    reason = f"E-STOP: obstacle at {nearest_dist:.2f}m"
+                    reason = f"E-STOP: path obstacle at {path_dist:.2f}m"
                 else:
                     reason = f"E-STOP: {event.split(':', 1)[-1].replace('_', ' ')}"
                 logger.warning("NavCore: safety event: %s (%s)", event, reason)
                 if event == "e_stop:obstacle_too_close":
                     message = (
                         f"I stopped before reaching {self._goal_display_name(goal)} "
-                        f"because my depth sensor reported something at {nearest_dist:.2f} meters."
+                        f"because my depth sensor reported something in my path "
+                        f"at {path_dist:.2f} meters."
                     )
                 else:
                     message = (
@@ -1618,7 +1600,7 @@ class NavCore:
 
         self._reset_close_obstacle_confirmation()
 
-        if self._handle_obstacle_limited_motion(cmd, nearest_dist, goal, dist_to_goal):
+        if self._handle_obstacle_limited_motion(cmd, path_dist, goal, dist_to_goal):
             return
 
         if (

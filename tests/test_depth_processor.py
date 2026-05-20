@@ -21,6 +21,8 @@ def _make_config(**overrides) -> DepthProcessorConfig:
         obstacle_max_height=0.60,
         camera_mount_height=0.30,
         robot_half_width=0.15,
+        path_corridor_half_width=0.12,
+        path_obstacle_min_points=6,
         min_depth_m=0.1,
         max_depth_m=4.0,
         process_width=320,
@@ -106,6 +108,19 @@ class TestDepthProcessing(unittest.TestCase):
         occupied = int(np.sum(grid.grid > 0))
         self.assertGreater(occupied, 0, "1m wall should produce obstacles in grid")
         self.assertLess(grid.nearest_obstacle_m, 2.0)
+        self.assertLess(grid.path_obstacle_m, 2.0)
+        self.assertGreaterEqual(grid.path_obstacle_points, 6)
+
+    def test_isolated_close_depth_speck_is_not_path_obstacle(self):
+        proc = DepthProcessor(config=_make_config(simulation_mode=True))
+        depth = np.zeros((240, 320), dtype=np.float32)
+        depth[120, 160] = 0.19
+
+        grid = proc._process_depth_to_grid(depth)
+
+        self.assertLess(grid.nearest_obstacle_m, 0.25)
+        self.assertEqual(grid.path_obstacle_m, float("inf"))
+        self.assertEqual(grid.path_obstacle_points, 0)
 
     def test_center_depth_reading_uses_mid_image_band(self):
         proc = DepthProcessor(config=_make_config(simulation_mode=True))

@@ -105,6 +105,9 @@ class ObstacleGrid:
     timestamp: float = 0.0
     nearest_obstacle_m: float = float("inf")
     nearest_obstacle_bearing: float = 0.0  # radians, 0=ahead, positive=left
+    path_obstacle_m: float = float("inf")
+    path_obstacle_bearing: float = 0.0
+    path_obstacle_points: int = 0
 
 
 @dataclass
@@ -130,6 +133,8 @@ class DepthProcessorConfig:
 
     # Obstacle inflation
     robot_half_width: float = 0.15  # meters, for obstacle dilation
+    path_corridor_half_width: float = 0.12
+    path_obstacle_min_points: int = 6
 
     # Depth camera parameters
     depth_width: int = 640
@@ -195,6 +200,8 @@ class DepthProcessor:
             obstacle_max_height=_env_float("NAV_OBSTACLE_MAX_HEIGHT", 0.60),
             camera_mount_height=_env_float("NAV_CAMERA_MOUNT_HEIGHT", 0.30),
             robot_half_width=_env_float("NAV_ROBOT_HALF_WIDTH", 0.15),
+            path_corridor_half_width=_env_float("NAV_PATH_CORRIDOR_HALF_WIDTH", 0.12),
+            path_obstacle_min_points=_env_int("NAV_PATH_OBSTACLE_MIN_POINTS", 6),
             min_depth_m=_env_float("NAV_MIN_DEPTH", 0.1),
             max_depth_m=_env_float("NAV_MAX_DEPTH", 4.0),
             simulation_mode=_env_flag("NAV_SIMULATION_MODE", False),
@@ -580,11 +587,38 @@ class DepthProcessor:
         # Step 7: Compute nearest obstacle distance and bearing
         nearest_dist = float("inf")
         nearest_bearing = 0.0
+        path_dist = float("inf")
+        path_bearing = 0.0
+        path_points = 0
         if len(obs_x) > 0:
             distances = np.sqrt(obs_x ** 2 + obs_y ** 2)
             min_idx = np.argmin(distances)
             nearest_dist = float(distances[min_idx])
             nearest_bearing = float(math.atan2(obs_y[min_idx], obs_x[min_idx]))
+
+            in_path = (obs_x > 0.0) & (np.abs(obs_y) <= cfg.path_corridor_half_width)
+            if np.any(in_path):
+                path_x = obs_x[in_path]
+                path_y = obs_y[in_path]
+                path_distances = distances[in_path]
+                range_bins = np.floor(path_x / cfg.grid_resolution).astype(np.int32)
+
+                for range_bin in np.unique(range_bins):
+                    bin_mask = range_bins == range_bin
+                    support = int(np.sum(bin_mask))
+                    if support < cfg.path_obstacle_min_points:
+                        continue
+
+                    bin_distances = path_distances[bin_mask]
+                    candidate_dist = float(np.percentile(bin_distances, 25))
+                    if candidate_dist >= path_dist:
+                        continue
+
+                    candidate_y = float(np.median(path_y[bin_mask]))
+                    candidate_x = float(np.median(path_x[bin_mask]))
+                    path_dist = candidate_dist
+                    path_bearing = float(math.atan2(candidate_y, candidate_x))
+                    path_points = support
 
         # Step 8: Ground plane validity check
         # If very few depth pixels are valid in the lower half of the frame,
@@ -602,6 +636,9 @@ class DepthProcessor:
             timestamp=now,
             nearest_obstacle_m=nearest_dist,
             nearest_obstacle_bearing=nearest_bearing,
+            path_obstacle_m=path_dist,
+            path_obstacle_bearing=path_bearing,
+            path_obstacle_points=path_points,
         )
 
     def _dilate_grid_numpy(self, grid: np.ndarray) -> np.ndarray:
@@ -757,9 +794,17 @@ class DepthProcessor:
                 direction = f"{abs(bearing_deg):.0f} degrees to the left"
             else:
                 direction = f"{abs(bearing_deg):.0f} degrees to the right"
-            parts.append(f"Nearest obstacle: {grid.nearest_obstacle_m:.2f}m {direction}")
+            parts.append(f"Nearest obstacle anywhere: {grid.nearest_obstacle_m:.2f}m {direction}")
         else:
             parts.append("No obstacles within range")
+
+        if grid.path_obstacle_m < float("inf"):
+            parts.append(
+                f"Path obstacle: {grid.path_obstacle_m:.2f}m "
+                f"({grid.path_obstacle_points} depth points)"
+            )
+        else:
+            parts.append("Path corridor clear")
 
         return ". ".join(parts) + "."
 
