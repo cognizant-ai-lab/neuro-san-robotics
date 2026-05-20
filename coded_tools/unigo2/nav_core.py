@@ -735,7 +735,7 @@ class NavCore:
     FORWARD_ACTUAL_SPEED_RATIO: float = _env_float("NAV_FORWARD_ACTUAL_SPEED_RATIO", 1.40)
     ODOMETRY_LINEAR_SPEED_RATIO: float = _env_float(
         "NAV_ODOMETRY_LINEAR_SPEED_RATIO",
-        FORWARD_ACTUAL_SPEED_RATIO,
+        0.70,
     )
     ODOMETRY_YAW_RATE_RATIO: float = _env_float("NAV_ODOMETRY_YAW_RATE_RATIO", 1.0)
 

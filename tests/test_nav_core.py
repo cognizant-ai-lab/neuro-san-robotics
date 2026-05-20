@@ -449,6 +449,12 @@ class TestNavCoreStatus(unittest.TestCase):
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
+    def test_navigation_odometry_is_decoupled_from_forward_timing(self):
+        self.assertLess(
+            NavCore.ODOMETRY_LINEAR_SPEED_RATIO,
+            NavCore.FORWARD_ACTUAL_SPEED_RATIO,
+        )
+
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_set_location_anchors_pose_to_map_node(self, mock_go2):
         fake_go2 = MagicMock()
