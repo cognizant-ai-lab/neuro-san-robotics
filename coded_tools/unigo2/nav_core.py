@@ -438,6 +438,7 @@ class LocalPlanner:
     SECTOR_THRESHOLD = 3           # obstacle cell count to mark sector as blocked
     WIDE_VALLEY_MIN_SECTORS = 6    # minimum sectors for a "wide" valley
     SMOOTHING_WEIGHT = 0.3         # heading change smoothing
+    PIVOT_HEADING_ERROR_RAD = _env_float("NAV_PIVOT_HEADING_ERROR_RAD", math.radians(20.0))
 
     def __init__(
         self,
@@ -481,6 +482,14 @@ class LocalPlanner:
 
         if not free_sectors:
             return VelocityCommand(0.0, 0.0, 0.0)
+
+        if (
+            goal_distance > 0.5
+            and abs(goal_direction) >= self.PIVOT_HEADING_ERROR_RAD
+        ):
+            vyaw = np.clip(goal_direction, -self.max_yaw_rate, self.max_yaw_rate)
+            self._prev_heading = float(vyaw)
+            return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
 
         goal_sector = self._angle_to_sector(goal_direction)
         best_sector = self._select_best_sector(free_sectors, goal_sector)
@@ -735,6 +744,8 @@ class NavCore:
     FORWARD_COMMAND_PERIOD_S: float = _env_float("NAV_FORWARD_COMMAND_PERIOD", 0.20)
     FORWARD_ACTUAL_SPEED_RATIO: float = _env_float("NAV_FORWARD_ACTUAL_SPEED_RATIO", 1.40)
     DEPTH_READY_TIMEOUT_S: float = _env_float("NAV_DEPTH_READY_TIMEOUT", 2.0)
+    OBSTACLE_LIMITED_TIMEOUT_S: float = _env_float("NAV_OBSTACLE_LIMITED_TIMEOUT", 8.0)
+    OBSTACLE_LIMITED_SPEED_MPS: float = _env_float("NAV_OBSTACLE_LIMITED_SPEED", 0.12)
     ODOMETRY_LINEAR_SPEED_RATIO: float = _env_float(
         "NAV_ODOMETRY_LINEAR_SPEED_RATIO",
         0.70,
@@ -762,7 +773,7 @@ class NavCore:
         self._state = NavState.IDLE
         self._goal: Optional[NavGoal] = None
         self._last_stop_reason: Optional[str] = None
-        self._on_status_change = self._global_status_callback
+        self._on_status_change = type(self)._global_status_callback
         self._state_lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -789,6 +800,7 @@ class NavCore:
         # Progress tracking
         self._last_progress_pose = RobotPose()
         self._last_progress_time = time.monotonic()
+        self._obstacle_limited_since: Optional[float] = None
 
         # Go2 macros (lazy init)
         self._go2 = None
@@ -1361,6 +1373,9 @@ class NavCore:
                 )
                 return
 
+        if self._handle_obstacle_limited_motion(cmd, nearest_dist, goal, dist_to_goal):
+            return
+
         # 6. Execute
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
@@ -1378,10 +1393,60 @@ class NavCore:
         # 8. Update progress tracker
         self._update_progress(pose)
 
+    def _handle_obstacle_limited_motion(
+        self,
+        cmd: VelocityCommand,
+        nearest_dist: float,
+        goal: NavGoal,
+        dist_to_goal: float,
+    ) -> bool:
+        """Stop when the robot spends too long crawling near an obstacle."""
+        is_motion_blocked = (
+            nearest_dist < self.AVOIDANCE_DISTANCE_M
+            and dist_to_goal > self.GOAL_TOLERANCE_M
+            and (
+                0.0 < cmd.vx <= self.OBSTACLE_LIMITED_SPEED_MPS
+                or (abs(cmd.vx) < 1e-3 and abs(cmd.vyaw) < 1e-3)
+            )
+        )
+
+        if not is_motion_blocked:
+            self._obstacle_limited_since = None
+            return False
+
+        now = time.monotonic()
+        if self._obstacle_limited_since is None:
+            self._obstacle_limited_since = now
+            return False
+
+        if now - self._obstacle_limited_since < self.OBSTACLE_LIMITED_TIMEOUT_S:
+            return False
+
+        self._ensure_go2()
+        if self._go2 and getattr(self._go2, "available", False):
+            self._go2.stop_move()
+
+        reason = f"Blocked: nearby obstacle or wall at {nearest_dist:.2f}m"
+        with self._state_lock:
+            self._state = NavState.STUCK
+            self._goal = None
+            self._last_stop_reason = reason
+            self._global_planner.clear()
+
+        logger.warning("NavCore: %s", reason)
+        self._notify_status_change(
+            f"I stopped before reaching {self._goal_display_name(goal)} because "
+            f"my depth sensor kept seeing something nearby at {nearest_dist:.2f} meters "
+            "and I was only able to crawl."
+        )
+        self._obstacle_limited_since = None
+        return True
+
     def _reset_progress_tracker(self):
         """Reset the stuck-detection timer to now."""
         self._last_progress_pose = self._odometry.get_pose()
         self._last_progress_time = time.monotonic()
+        self._obstacle_limited_since = None
 
     def _update_progress(self, current_pose: RobotPose):
         """Update progress tracker if robot has moved more than 0.1m since last check."""

@@ -65,6 +65,8 @@ class Go2Macros:
         self.ifname = ifname
         self.cli = None
         self.available = False
+        self._move_log_interval_s = max(0.0, _env_float("GO2_MOVE_LOG_INTERVAL_SECONDS", 2.0))
+        self._last_move_log_at = 0.0
 
         if not self.use_robot or sport_client is None or ChannelFactoryInitialize is None:
             self._log("⚙️ Running in simulation/offline mode (no robot)")
@@ -140,6 +142,15 @@ class Go2Macros:
 
     def _log(self, msg: str):
         print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    def _log_move_command(self, vx: float, vy: float, vyaw: float):
+        now = time.monotonic()
+        if (
+            self._move_log_interval_s <= 0.0
+            or now - self._last_move_log_at >= self._move_log_interval_s
+        ):
+            self._last_move_log_at = now
+            self._log(f"Move (vx={vx:.3f}, vy={vy:.3f}, vyaw={vyaw:.3f})")
 
     def _call(self, label: str, fn, *args, **kwargs):
         ret = fn(*args, **kwargs)
@@ -256,7 +267,7 @@ class Go2Macros:
         """Continuous movement command. Call stop_move() to stop."""
         if self.cli:
             self._call("Move", self.cli.Move, vx=vx, vy=vy, vyaw=vyaw)
-        self._log(f"Move (vx={vx}, vy={vy}, vyaw={vyaw})")
+        self._log_move_command(vx, vy, vyaw)
 
     def step_forward(self, vx=None, t=None):
         vx = _env_float("GO2_STEP_FORWARD_SPEED", 0.45) if vx is None else vx

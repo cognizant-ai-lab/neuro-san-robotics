@@ -127,6 +127,19 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertAlmostEqual(cmd.vyaw, 0.0, places=0,
                                msg="Should not turn when goal is straight ahead")
 
+    def test_pivots_in_place_for_large_heading_error(self):
+        planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.5)
+        grid = _empty_grid()
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(90),
+            goal_distance=2.0,
+        )
+
+        self.assertAlmostEqual(cmd.vx, 0.0)
+        self.assertGreater(cmd.vyaw, 0.0)
+
     def test_stops_when_no_free_sectors(self):
         planner = LocalPlanner()
         grid = _empty_grid()
@@ -340,6 +353,8 @@ class TestTopologicalMap(unittest.TestCase):
                         "Shush desk",
                         "Shush this desk",
                         "Shushdi Fest",
+                        "Srushti desk",
+                        "Srishti desk",
                     ],
                 },
                 {
@@ -355,6 +370,8 @@ class TestTopologicalMap(unittest.TestCase):
         self.assertEqual(topo.get_node("AI Hall of Fame").name, "ai_hall_of_fame")
         self.assertEqual(topo.get_node("Shrushti's desk").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("Shushti's desk").name, "shrushtis_desk")
+        self.assertEqual(topo.get_node("Srushti's desk").name, "shrushtis_desk")
+        self.assertEqual(topo.get_node("Srishti's desk").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("shush desk").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("Shush this desk").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("Shushdi Fest").name, "shrushtis_desk")
@@ -613,7 +630,11 @@ class TestNavCoreStatus(unittest.TestCase):
         NavCore._instance = None
         os.environ["NAV_SIMULATION_MODE"] = "1"
         events = []
-        NavCore.set_status_callback(events.append)
+
+        def record_event(message):
+            events.append(message)
+
+        NavCore.set_status_callback(record_event)
         try:
             nav = NavCore.get_instance()
             nav._go2 = fake_go2
@@ -637,6 +658,61 @@ class TestNavCoreStatus(unittest.TestCase):
                 [
                     "I stopped before reaching the destination because my depth sensor "
                     "reported something at 0.23 meters."
+                ],
+            )
+            fake_go2.stop_move.assert_called()
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_reports_sustained_obstacle_limited_crawl(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+
+        def record_event(message):
+            events.append(message)
+
+        NavCore.set_status_callback(record_event)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            nav.OBSTACLE_LIMITED_TIMEOUT_S = 0.1
+            nav.OBSTACLE_LIMITED_SPEED_MPS = 0.12
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.55)
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(
+                vx=0.10,
+                vy=0.0,
+                vyaw=0.0,
+            )
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+                nav._obstacle_limited_since = time.monotonic() - 1.0
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.STUCK)
+            self.assertIn("Blocked: nearby obstacle or wall at 0.55m", nav.get_status_summary())
+            self.assertEqual(
+                events,
+                [
+                    "I stopped before reaching Kitchen because my depth sensor kept "
+                    "seeing something nearby at 0.55 meters and I was only able to crawl."
                 ],
             )
             fake_go2.stop_move.assert_called()
