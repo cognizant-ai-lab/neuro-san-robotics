@@ -173,6 +173,7 @@ class DepthProcessor:
         self._cv_capture = None        # OpenCV VideoCapture fallback
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._thread_lock = threading.Lock()
         self._backend = "none"
         self._inflation_kernel = self._build_inflation_kernel()
 
@@ -353,27 +354,48 @@ class DepthProcessor:
 
     def start(self):
         """Start the background depth capture thread."""
-        if self._running:
-            return
+        with self._thread_lock:
+            if self._running:
+                return
 
-        if not self._camera_resources_ready() and not self._config.simulation_mode:
-            self._init_camera()
+            if not self._camera_resources_ready() and not self._config.simulation_mode:
+                self._init_camera()
 
-        if self._backend == "none":
-            return
+            if self._backend == "none":
+                return
 
-        self._running = True
-        self._thread = threading.Thread(target=self._capture_loop, daemon=True, name="depth-capture")
-        self._thread.start()
+            self._running = True
+            thread = threading.Thread(
+                target=self._capture_loop,
+                daemon=True,
+                name="depth-capture",
+            )
+            self._thread = thread
+            try:
+                thread.start()
+            except Exception:
+                self._running = False
+                self._thread = None
+                raise
         logger.info("DepthProcessor: capture thread started (%s backend)", self._backend)
 
     def stop(self):
         """Stop the background capture thread and release camera resources."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=2.0)
+        with self._thread_lock:
+            self._running = False
+            thread = self._thread
             self._thread = None
-        self._release_camera()
+
+            if thread:
+                try:
+                    if thread.ident is not None and thread.is_alive():
+                        thread.join(timeout=2.0)
+                except RuntimeError as exc:
+                    logger.debug(
+                        "DepthProcessor: ignored stop/start race while joining capture thread: %s",
+                        exc,
+                    )
+            self._release_camera()
 
     def _release_camera(self):
         """Release RealSense pipeline or OpenCV capture."""

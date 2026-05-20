@@ -457,7 +457,8 @@ class LocalPlanner:
     WIDE_VALLEY_MIN_SECTORS = 6    # minimum sectors for a "wide" valley
     SMOOTHING_WEIGHT = 0.3         # heading change smoothing
     PIVOT_HEADING_ERROR_RAD = _env_float("NAV_PIVOT_HEADING_ERROR_RAD", math.radians(20.0))
-    FORWARD_HAZARD_CONE_RAD = _env_float("NAV_FORWARD_HAZARD_CONE_RAD", math.radians(35.0))
+    FORWARD_HAZARD_CONE_RAD = _env_float("NAV_FORWARD_HAZARD_CONE_RAD", math.radians(20.0))
+    MIN_PIVOT_YAW_RATE = _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.30)
 
     def __init__(
         self,
@@ -518,7 +519,7 @@ class LocalPlanner:
             goal_distance > 0.5
             and abs(goal_direction) >= self.PIVOT_HEADING_ERROR_RAD
         ):
-            vyaw = np.clip(goal_direction, -self.max_yaw_rate, self.max_yaw_rate)
+            vyaw = self._pivot_yaw_rate(goal_direction)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
 
@@ -560,6 +561,15 @@ class LocalPlanner:
         vx = self._modulate_speed(0.1, nearest)
 
         return VelocityCommand(vx=vx, vy=0.0, vyaw=vyaw)
+
+    def _pivot_yaw_rate(self, heading_error: float) -> float:
+        """Return a decisive in-place turn rate for large heading corrections."""
+        if abs(heading_error) < 1e-6:
+            return 0.0
+        max_pivot_rate = max(abs(self.max_yaw_rate), self.MIN_PIVOT_YAW_RATE)
+        requested = min(abs(heading_error), max_pivot_rate)
+        magnitude = max(requested, self.MIN_PIVOT_YAW_RATE)
+        return math.copysign(magnitude, heading_error)
 
     def _build_histogram(self, grid: ObstacleGrid) -> np.ndarray:
         """Build a polar obstacle density histogram (72 sectors, 5 degrees each)."""
@@ -661,7 +671,7 @@ class SafetyMonitor:
         avoidance_distance: float = 0.8,
         stuck_timeout: float = 10.0,
         pivot_hard_stop_distance: float = 0.2,
-        forward_hazard_cone_rad: float = math.radians(35.0),
+        forward_hazard_cone_rad: float = math.radians(20.0),
     ):
         """Configure safety thresholds.
 
@@ -812,7 +822,7 @@ class NavCore:
     PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.2)
     FORWARD_HAZARD_CONE_RAD: float = _env_float(
         "NAV_FORWARD_HAZARD_CONE_RAD",
-        math.radians(35.0),
+        math.radians(20.0),
     )
     CLOSE_OBSTACLE_CONFIRM_S: float = _env_float("NAV_CLOSE_OBSTACLE_CONFIRM_S", 0.7)
     CLOSE_OBSTACLE_CONFIRM_READINGS: int = _env_int("NAV_CLOSE_OBSTACLE_CONFIRM_READINGS", 3)
@@ -825,6 +835,10 @@ class NavCore:
     DEPTH_READY_TIMEOUT_S: float = _env_float("NAV_DEPTH_READY_TIMEOUT", 2.0)
     OBSTACLE_LIMITED_TIMEOUT_S: float = _env_float("NAV_OBSTACLE_LIMITED_TIMEOUT", 8.0)
     OBSTACLE_LIMITED_SPEED_MPS: float = _env_float("NAV_OBSTACLE_LIMITED_SPEED", 0.12)
+    YAW_PROGRESS_TOLERANCE_RAD: float = _env_float(
+        "NAV_YAW_PROGRESS_TOLERANCE_RAD",
+        math.radians(5.0),
+    )
     ODOMETRY_LINEAR_SPEED_RATIO: float = _env_float(
         "NAV_ODOMETRY_LINEAR_SPEED_RATIO",
         0.70,
@@ -985,6 +999,8 @@ class NavCore:
             self._goal = None
             self._last_stop_reason = reason
             self._global_planner.clear()
+            self._obstacle_limited_since = None
+            self._reset_close_obstacle_confirmation()
 
         logger.warning("NavCore: %s", reason)
         self._notify_status_change(message)
@@ -1459,7 +1475,10 @@ class NavCore:
                 state = self._state
                 goal = self._goal
 
-            if state == NavState.IDLE or state == NavState.E_STOP or goal is None:
+            if (
+                state in {NavState.IDLE, NavState.STUCK, NavState.E_STOP}
+                or goal is None
+            ):
                 time.sleep(0.1)
                 continue
 
@@ -1475,9 +1494,13 @@ class NavCore:
 
     def _nav_cycle(self, state: NavState, goal: NavGoal):
         """Execute one navigation cycle: sense -> plan -> safety filter -> actuate."""
+        if state in {NavState.IDLE, NavState.STUCK, NavState.E_STOP}:
+            return
+
         # 1. Read sensors
         grid = self._depth_processor.get_obstacle_grid()
         pose = self._odometry.get_pose()
+        self._update_progress(pose)
 
         nearest_dist = grid.nearest_obstacle_m if grid else float("inf")
         nearest_bearing = grid.nearest_obstacle_bearing if grid else 0.0
@@ -1525,18 +1548,13 @@ class NavCore:
             if grid:
                 cmd = self._local_planner.compute_velocity(grid, goal_dir, goal_dist)
             else:
-                self._ensure_go2()
-                if self._go2 and getattr(self._go2, "available", False):
-                    self._go2.stop_move()
-                with self._state_lock:
-                    self._state = NavState.E_STOP
-                    self._last_stop_reason = "E-STOP: depth grid unavailable"
-                logger.warning("NavCore: E-STOP triggered (no depth grid available)")
-                self._notify_status_change(
+                self._abort_active_navigation(
+                    goal,
+                    "E-STOP: depth grid unavailable",
                     f"I stopped before reaching {self._goal_display_name(goal)} "
-                    "because my depth grid became unavailable."
+                    "because my depth grid became unavailable.",
+                    state=NavState.E_STOP,
                 )
-                self._stop_depth_when_idle()
                 return
 
         elif state == NavState.AVOIDING:
@@ -1575,12 +1593,6 @@ class NavCore:
                     reason = f"E-STOP: obstacle at {nearest_dist:.2f}m"
                 else:
                     reason = f"E-STOP: {event.split(':', 1)[-1].replace('_', ' ')}"
-                with self._state_lock:
-                    self._state = NavState.E_STOP
-                    self._last_stop_reason = reason
-                self._ensure_go2()
-                if self._go2 and getattr(self._go2, "available", False):
-                    self._go2.stop_move()
                 logger.warning("NavCore: safety event: %s (%s)", event, reason)
                 if event == "e_stop:obstacle_too_close":
                     message = (
@@ -1592,20 +1604,16 @@ class NavCore:
                         f"I stopped before reaching {self._goal_display_name(goal)} "
                         f"because {reason.lower()}."
                     )
-                self._notify_status_change(message)
-                self._stop_depth_when_idle()
+                self._abort_active_navigation(goal, reason, message, state=NavState.E_STOP)
                 return
             elif event.startswith("stuck"):
                 reason = "Stuck: no progress toward the goal"
-                with self._state_lock:
-                    self._state = NavState.STUCK
-                    self._last_stop_reason = reason
-                logger.warning("NavCore: stuck detected")
-                self._notify_status_change(
+                self._abort_active_navigation(
+                    goal,
+                    reason,
                     f"I stopped before reaching {self._goal_display_name(goal)} "
-                    "because I was not making progress."
+                    "because I was not making progress.",
                 )
-                self._stop_depth_when_idle()
                 return
 
         self._reset_close_obstacle_confirmation()
@@ -1643,7 +1651,7 @@ class NavCore:
         self._odometry.update_from_velocity(odometry_cmd, dt)
 
         # 7. Update progress tracker
-        self._update_progress(pose)
+        self._update_progress(self._odometry.get_pose())
 
     def _should_defer_close_obstacle_stop(
         self,
@@ -1721,25 +1729,14 @@ class NavCore:
         if now - self._obstacle_limited_since < self.OBSTACLE_LIMITED_TIMEOUT_S:
             return False
 
-        self._ensure_go2()
-        if self._go2 and getattr(self._go2, "available", False):
-            self._go2.stop_move()
-
         reason = f"Blocked: nearby obstacle or wall at {nearest_dist:.2f}m"
-        with self._state_lock:
-            self._state = NavState.STUCK
-            self._goal = None
-            self._last_stop_reason = reason
-            self._global_planner.clear()
-
-        logger.warning("NavCore: %s", reason)
-        self._notify_status_change(
+        self._abort_active_navigation(
+            goal,
+            reason,
             f"I stopped before reaching {self._goal_display_name(goal)} because "
             f"my depth sensor kept seeing something nearby at {nearest_dist:.2f} meters "
-            "and I was only able to crawl."
+            "and I was only able to crawl.",
         )
-        self._stop_depth_when_idle()
-        self._obstacle_limited_since = None
         return True
 
     def _reset_progress_tracker(self):
@@ -1749,13 +1746,19 @@ class NavCore:
         self._obstacle_limited_since = None
         self._reset_close_obstacle_confirmation()
 
+    @staticmethod
+    def _angular_delta(a: float, b: float) -> float:
+        """Return the shortest absolute angular difference between two headings."""
+        return abs(math.atan2(math.sin(a - b), math.cos(a - b)))
+
     def _update_progress(self, current_pose: RobotPose):
-        """Update progress tracker if robot has moved more than 0.1m since last check."""
+        """Update stuck detection when position or heading has meaningfully changed."""
         dist_moved = math.hypot(
             current_pose.x - self._last_progress_pose.x,
             current_pose.y - self._last_progress_pose.y,
         )
-        if dist_moved > 0.1:
+        yaw_moved = self._angular_delta(current_pose.yaw, self._last_progress_pose.yaw)
+        if dist_moved > 0.1 or yaw_moved > self.YAW_PROGRESS_TOLERANCE_RAD:
             self._last_progress_pose = current_pose
             self._last_progress_time = time.monotonic()
 

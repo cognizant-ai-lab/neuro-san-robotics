@@ -1,12 +1,18 @@
 import math
 import os
+import threading
 import time
 import unittest
 from unittest.mock import patch, MagicMock
 
 import numpy as np
 
-from coded_tools.unigo2.depth_processor import CenterDepthReading, ObstacleGrid
+from coded_tools.unigo2.depth_processor import (
+    CenterDepthReading,
+    DepthProcessor,
+    DepthProcessorConfig,
+    ObstacleGrid,
+)
 from coded_tools.unigo2.nav_core import (
     GlobalPlanner,
     LocalPlanner,
@@ -99,6 +105,35 @@ def _grid_with_side_obstacle(distance_m=0.37, rows=80, cols=80, resolution=0.05)
     )
 
 
+def _grid_with_obstacle_at_bearing(
+    distance_m=0.30,
+    bearing_rad=math.radians(-30),
+    rows=80,
+    cols=80,
+    resolution=0.05,
+) -> ObstacleGrid:
+    grid = np.zeros((rows, cols), dtype=np.float32)
+    origin_row = rows - 1
+    origin_col = cols // 2
+
+    forward_cells = int(round(distance_m * math.cos(bearing_rad) / resolution))
+    lateral_cells = int(round(distance_m * math.sin(bearing_rad) / resolution))
+    row = origin_row - forward_cells
+    col = origin_col - lateral_cells
+    if 0 <= row < rows and 0 <= col < cols:
+        grid[row, col] = 1.0
+
+    return ObstacleGrid(
+        grid=grid,
+        resolution=resolution,
+        origin_row=origin_row,
+        origin_col=origin_col,
+        timestamp=time.time(),
+        nearest_obstacle_m=distance_m,
+        nearest_obstacle_bearing=bearing_rad,
+    )
+
+
 def _create_test_map() -> TopologicalMap:
     topo = TopologicalMap()
     topo.load_from_dict({
@@ -160,6 +195,20 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertAlmostEqual(cmd.vx, 0.0)
         self.assertGreater(cmd.vyaw, 0.0)
 
+    def test_pivot_uses_decisive_rate_even_when_yaw_limit_is_too_low(self):
+        planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
+        grid = _empty_grid()
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(-90),
+            goal_distance=2.0,
+        )
+
+        self.assertAlmostEqual(cmd.vx, 0.0)
+        self.assertLess(cmd.vyaw, 0.0)
+        self.assertGreaterEqual(abs(cmd.vyaw), planner.MIN_PIVOT_YAW_RATE)
+
     def test_stops_when_no_free_sectors(self):
         planner = LocalPlanner()
         grid = _empty_grid()
@@ -193,6 +242,17 @@ class TestLocalPlanner(unittest.TestCase):
         cmd = planner.compute_velocity(grid, goal_direction=0.0, goal_distance=2.0)
 
         self.assertGreater(cmd.vx, 0.0, "Side clutter should not block forward travel")
+
+    def test_drives_when_diagonal_side_obstacle_is_close(self):
+        planner = LocalPlanner(max_linear_speed=0.3, safety_distance=0.4, avoidance_distance=0.8)
+        grid = _grid_with_obstacle_at_bearing(
+            distance_m=0.30,
+            bearing_rad=math.radians(-30.0),
+        )
+
+        cmd = planner.compute_velocity(grid, goal_direction=0.0, goal_distance=2.0)
+
+        self.assertGreater(cmd.vx, 0.0, "A 30-degree side object should not block the route")
 
     def test_slows_near_goal(self):
         planner = LocalPlanner(max_linear_speed=0.3)
@@ -245,6 +305,19 @@ class TestSafetyMonitor(unittest.TestCase):
             cmd,
             nearest_obstacle_m=0.37,
             nearest_obstacle_bearing=-math.pi / 2,
+        )
+
+        self.assertIsNone(event)
+        self.assertAlmostEqual(filtered.vx, 0.3)
+
+    def test_allows_translation_past_close_diagonal_side_obstacle(self):
+        safety = SafetyMonitor(safety_distance=0.4, pivot_hard_stop_distance=0.2)
+        cmd = VelocityCommand(vx=0.3, vy=0.0, vyaw=0.0)
+
+        filtered, event = safety.filter_command(
+            cmd,
+            nearest_obstacle_m=0.30,
+            nearest_obstacle_bearing=math.radians(-30.0),
         )
 
         self.assertIsNone(event)
@@ -897,6 +970,95 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_counts_yaw_as_progress_during_planned_pivot(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._odometry.set_pose(0.0, 0.0, math.radians(10.0))
+
+            goal = NavGoal(goal_type="relative", x=0.0, y=2.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._last_progress_pose = RobotPose(0.0, 0.0, 0.0)
+                nav._last_progress_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            fake_go2.move.assert_called()
+            self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
+            self.assertGreater(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
+            self.assertEqual(events, [])
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_stuck_is_terminal_and_clears_goal(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._last_progress_pose = nav._odometry.get_pose()
+                nav._last_progress_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.STUCK)
+            self.assertIsNone(nav._goal)
+            self.assertEqual(
+                events,
+                ["I stopped before reaching Kitchen because I was not making progress."],
+            )
+            fake_go2.stop_move.assert_called()
+            fake_go2.move.assert_not_called()
+            fake_depth.stop.assert_called()
+
+            nav._nav_cycle(NavState.STUCK, goal)
+            self.assertEqual(
+                events,
+                ["I stopped before reaching Kitchen because I was not making progress."],
+            )
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_nav_cycle_reports_no_safe_motion_command(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
@@ -1310,6 +1472,23 @@ class TestNavCoreStatus(unittest.TestCase):
         finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
+
+
+# ---------------------------------------------------------------------------
+# DepthProcessor lifecycle tests
+# ---------------------------------------------------------------------------
+
+class TestDepthProcessorLifecycle(unittest.TestCase):
+
+    def test_stop_ignores_unstarted_capture_thread(self):
+        processor = DepthProcessor(DepthProcessorConfig(simulation_mode=True))
+        processor._running = True
+        processor._thread = threading.Thread(target=lambda: None)
+
+        processor.stop()
+
+        self.assertFalse(processor.is_running)
+        self.assertIsNone(processor._thread)
 
 
 if __name__ == "__main__":

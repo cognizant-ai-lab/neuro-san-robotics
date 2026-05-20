@@ -75,22 +75,13 @@ class NavPlannerTool(CodedTool):
             if success:
                 status = nav.get_status_summary()
                 if nav.state == NavState.IDLE and "Already at " in status:
-                    return (
-                        f"No movement was needed for '{target}'. "
-                        "I already reported that I am there."
-                    )
-                return (
-                    f"Navigation command accepted for '{target}'. "
-                    "Arrival or failure will be reported separately."
-                )
+                    return f"No movement needed for '{target}'."
+                return f"Started toward '{target}'."
 
             status = nav.get_status_summary()
             if nav.state == NavState.E_STOP:
                 return f"I could not start navigating to '{target}'. {status}"
-            return (
-                f"Navigation to '{target}' was not started. "
-                "I already reported the reason to the user. " + nav.list_destinations()
-            )
+            return f"Navigation to '{target}' was not started. " + nav.list_destinations()
 
         elif command in {"set_location", "reset_location", "localize"}:
             target = args.get("target", "").strip()
