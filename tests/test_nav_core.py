@@ -320,6 +320,30 @@ class TestTopologicalMap(unittest.TestCase):
         self.assertIsNotNone(topo.get_node("A"))
         self.assertIsNone(topo.get_node("Z"))
 
+    def test_get_node_accepts_natural_language_aliases(self):
+        topo = TopologicalMap()
+        topo.load_from_dict({
+            "name": "suite21",
+            "nodes": [
+                {
+                    "name": "ai_hall_of_fame",
+                    "x": 0,
+                    "y": 0,
+                    "description": "AI hall of fame, red marker 3",
+                },
+                {
+                    "name": "shrushtis_desk",
+                    "x": 1,
+                    "y": 0,
+                    "description": "Shrushti's desk, red marker 2",
+                },
+            ],
+            "edges": [],
+        })
+
+        self.assertEqual(topo.get_node("AI Hall of Fame").name, "ai_hall_of_fame")
+        self.assertEqual(topo.get_node("Shrushti's desk").name, "shrushtis_desk")
+
     def test_load_from_file(self):
         import tempfile
         import json

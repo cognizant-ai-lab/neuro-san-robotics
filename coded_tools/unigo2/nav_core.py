@@ -147,6 +147,7 @@ class TopologicalMap:
         self.nodes: Dict[str, MapNode] = {}
         self.edges: List[MapEdge] = []
         self._adjacency: Dict[str, List[Tuple[str, float]]] = {}
+        self._node_aliases: Dict[str, str] = {}
 
     def load_from_file(self, path: str) -> bool:
         """Load map from a JSON file. Returns True if at least one node was loaded."""
@@ -168,17 +169,20 @@ class TopologicalMap:
         self.nodes.clear()
         self.edges.clear()
         self._adjacency.clear()
+        self._node_aliases.clear()
 
         for node_data in data.get("nodes", []):
             name = node_data["name"]
-            self.nodes[name] = MapNode(
+            node = MapNode(
                 name=name,
                 x=float(node_data.get("x", 0)),
                 y=float(node_data.get("y", 0)),
                 description=node_data.get("description", ""),
                 tags=node_data.get("tags", []),
             )
+            self.nodes[name] = node
             self._adjacency.setdefault(name, [])
+            self._register_node_aliases(node)
 
         for edge_data in data.get("edges", []):
             edge = MapEdge(
@@ -231,7 +235,14 @@ class TopologicalMap:
 
     def get_node(self, name: str) -> Optional[MapNode]:
         """Look up a node by name. Returns None if not found."""
-        return self.nodes.get(name)
+        node = self.nodes.get(name)
+        if node is not None:
+            return node
+
+        canonical_name = self._node_aliases.get(self._normalize_node_name(name))
+        if canonical_name:
+            return self.nodes.get(canonical_name)
+        return None
 
     def find_nearest_node(self, x: float, y: float) -> Optional[MapNode]:
         """Find the map node closest to the given (x, y) position."""
@@ -252,6 +263,23 @@ class TopologicalMap:
     def is_loaded(self) -> bool:
         """True if the map has at least one node."""
         return len(self.nodes) > 0
+
+    @staticmethod
+    def _normalize_node_name(name: str) -> str:
+        """Normalize map/node names for natural language destination matching."""
+        return "".join(ch.lower() for ch in name if ch.isalnum())
+
+    def _register_node_aliases(self, node: MapNode):
+        """Register common natural-language aliases for a map node."""
+        aliases = {
+            node.name,
+            node.name.replace("_", " "),
+            node.description.split(",", 1)[0],
+        }
+        for alias in aliases:
+            normalized = self._normalize_node_name(alias)
+            if normalized:
+                self._node_aliases.setdefault(normalized, node.name)
 
 
 # ---------------------------------------------------------------------------

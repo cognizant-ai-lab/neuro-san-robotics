@@ -1,74 +1,295 @@
 {
-  "name": "CAIL Lab - San Francisco",
+  "name": "535 Mission - Suite 21 Red Marker Graph",
   "version": "1.0",
+  "coordinate_system": {
+    "origin": "SW corner of marked floor-plan content bbox",
+    "x_axis": "East (up on source image/PDF)",
+    "y_axis": "North (left on source image/PDF)",
+    "units": "meters",
+    "floor_dimensions_m": {
+      "east_west": 22.0,
+      "north_south": 36.22
+    },
+    "source_image_size_px": {
+      "width": 3804,
+      "height": 2479
+    },
+    "source_floor_bbox_px": {
+      "left": 119,
+      "top": 100,
+      "right": 3713,
+      "bottom": 2283
+    },
+    "scale_m_per_px": 0.01007787,
+    "notes": "Coordinates derived from red dot centers on the annotated PNG. Source image/PDF orientation matches the sample note: Up=East, Left=North. A uniform scale is used; east_west is anchored to 22.0m from the sample map, giving north_south=36.22m for this wider floor-plan crop."
+  },
+  "floor_boundary": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      22.0,
+      0.0
+    ],
+    [
+      22.0,
+      36.22
+    ],
+    [
+      0.0,
+      36.22
+    ]
+  ],
   "nodes": [
     {
-      "name": "charging_station",
-      "x": 0.0,
-      "y": 0.0,
-      "description": "Home base and charging dock",
-      "tags": ["home", "charging"]
-    },
-    {
-      "name": "main_desk_area",
-      "x": 3.0,
-      "y": 0.0,
-      "description": "Open desk area with workstations",
-      "tags": ["room", "work"]
-    },
-    {
       "name": "kitchen",
-      "x": 3.0,
-      "y": 4.0,
-      "description": "Kitchen and break area",
-      "tags": ["room", "kitchen"]
+      "x": 5.62,
+      "y": 4.11,
+      "description": "Kitchen, red marker 0 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 3305.0,
+        "y": 1725.0
+      }
+    },
+    {
+      "name": "charging_station",
+      "x": 1.3,
+      "y": 15.7,
+      "description": "Charging station, red marker 1 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 2155.5,
+        "y": 2154.5
+      }
+    },
+    {
+      "name": "shrushtis_desk",
+      "x": 5.62,
+      "y": 15.7,
+      "description": "Shrushti's desk, red marker 2 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 2155.5,
+        "y": 1725.0
+      }
+    },
+    {
+      "name": "ai_hall_of_fame",
+      "x": 7.79,
+      "y": 15.7,
+      "description": "AI hall of fame, red marker 3 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 2155.5,
+        "y": 1510.0
+      }
     },
     {
       "name": "entrance",
-      "x": -2.0,
-      "y": 0.0,
-      "description": "Lab main entrance",
-      "tags": ["door", "entrance"]
+      "x": 7.79,
+      "y": 22.57,
+      "description": "Entrance, red marker 4 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 1473.0,
+        "y": 1510.0
+      }
     },
     {
-      "name": "demo_area",
-      "x": 5.0,
-      "y": 2.0,
-      "description": "Demo and presentation area",
-      "tags": ["room", "demo"]
+      "name": "robertos_desk",
+      "x": 5.68,
+      "y": 22.57,
+      "description": "Roberto's desk, red marker 5 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 1473.0,
+        "y": 1719.5
+      }
+    },
+    {
+      "name": "wellness_room",
+      "x": 5.62,
+      "y": 11.59,
+      "description": "Wellness Room, red marker 6 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 2562.5,
+        "y": 1725.0
+      }
+    },
+    {
+      "name": "ristos_desk",
+      "x": 2.36,
+      "y": 11.23,
+      "description": "Risto's desk, red marker 7 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 2599.0,
+        "y": 2049.0
+      }
+    },
+    {
+      "name": "jamies_desk",
+      "x": 5.62,
+      "y": 6.53,
+      "description": "Jamie's desk, red marker 8 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 3065.0,
+        "y": 1725.0
+      }
+    },
+    {
+      "name": "oliviers_desk",
+      "x": 2.38,
+      "y": 6.53,
+      "description": "Olivier's desk, red marker 9 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 3065.0,
+        "y": 2046.5
+      }
     }
   ],
   "edges": [
     {
       "from": "charging_station",
-      "to": "main_desk_area",
-      "distance": 3.0,
-      "description": "straight path through open floor"
+      "to": "shrushtis_desk",
+      "distance": 4.32,
+      "traversable": true,
+      "description": "annotated edge from charging station to Shrushti's desk"
     },
     {
-      "from": "main_desk_area",
-      "to": "kitchen",
-      "distance": 4.0,
-      "description": "through hallway past conference room"
+      "from": "shrushtis_desk",
+      "to": "ai_hall_of_fame",
+      "distance": 2.17,
+      "traversable": true,
+      "description": "annotated edge from Shrushti's desk to AI hall of fame"
     },
     {
-      "from": "charging_station",
+      "from": "ai_hall_of_fame",
       "to": "entrance",
-      "distance": 2.0,
-      "description": "turn left toward entrance"
+      "distance": 6.87,
+      "traversable": true,
+      "description": "annotated edge from AI hall of fame to entrance"
     },
     {
-      "from": "main_desk_area",
-      "to": "demo_area",
-      "distance": 2.8,
-      "description": "past the whiteboard"
+      "from": "entrance",
+      "to": "robertos_desk",
+      "distance": 2.11,
+      "traversable": true,
+      "description": "annotated edge from entrance to Roberto's desk"
     },
     {
-      "from": "demo_area",
+      "from": "shrushtis_desk",
+      "to": "wellness_room",
+      "distance": 4.11,
+      "traversable": true,
+      "description": "annotated edge from Shrushti's desk to Wellness Room"
+    },
+    {
+      "from": "wellness_room",
+      "to": "ristos_desk",
+      "distance": 3.28,
+      "traversable": true,
+      "description": "annotated edge from Wellness Room to Risto's desk"
+    },
+    {
+      "from": "wellness_room",
+      "to": "jamies_desk",
+      "distance": 5.06,
+      "traversable": true,
+      "description": "annotated edge from Wellness Room to Jamie's desk"
+    },
+    {
+      "from": "jamies_desk",
+      "to": "oliviers_desk",
+      "distance": 3.24,
+      "traversable": true,
+      "description": "annotated edge from Jamie's desk to Olivier's desk"
+    },
+    {
+      "from": "jamies_desk",
       "to": "kitchen",
-      "distance": 2.8,
-      "description": "through side corridor"
+      "distance": 2.42,
+      "traversable": true,
+      "description": "annotated edge from Jamie's desk to kitchen"
     }
   ],
-  "exclusion_zones": []
+  "exclusion_zones": [
+    {
+      "name": "glass_enclosure_21_002_21_018",
+      "type": "polygon",
+      "reason": "Glass enclosure around 21-002 and 21-018 - robot cannot detect transparent barriers",
+      "points": [
+        [
+          6.33,
+          19.87
+        ],
+        [
+          6.6,
+          17.4
+        ],
+        [
+          1.89,
+          16.72
+        ],
+        [
+          1.54,
+          19.02
+        ]
+      ],
+      "source_pixels": [
+        {
+          "x": 1741,
+          "y": 1655
+        },
+        {
+          "x": 1986,
+          "y": 1628
+        },
+        {
+          "x": 2054,
+          "y": 2095
+        },
+        {
+          "x": 1826,
+          "y": 2130
+        }
+      ],
+      "buffer_m": 0.0
+    }
+  ]
 }
