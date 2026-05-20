@@ -221,7 +221,7 @@ class TestLocalPlanner(unittest.TestCase):
         planner = LocalPlanner(
             max_linear_speed=0.3,
             max_yaw_rate=0.08,
-            pivot_yaw_rate=0.30,
+            pivot_yaw_rate=0.50,
         )
         grid = _empty_grid()
 
@@ -233,7 +233,7 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertAlmostEqual(cmd.vx, 0.0)
         self.assertLess(cmd.vyaw, 0.0)
-        self.assertAlmostEqual(abs(cmd.vyaw), 0.30)
+        self.assertAlmostEqual(abs(cmd.vyaw), 0.50)
 
     def test_clear_path_uses_direct_heading_without_vfh_wobble(self):
         planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
@@ -649,6 +649,22 @@ class TestOdometryProvider(unittest.TestCase):
         self.assertAlmostEqual(pose.x, 5.62, places=2)
         self.assertAlmostEqual(pose.y, 15.70, places=2)
         self.assertAlmostEqual(pose.yaw, math.radians(-90.0), places=2)
+
+    def test_static_fresh_sdk_sample_does_not_overwrite_fallback_motion(self):
+        odom = SdkSportModeOdometryProvider(start_subscriber=False)
+        odom.set_pose(0.0, 0.0, 0.0)
+        sample = SimpleNamespace(
+            position=[0.0, 0.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0]),
+        )
+        odom._handle_sample(sample)
+
+        odom.update_from_velocity(VelocityCommand(vx=1.0), dt=1.0)
+        odom._handle_sample(sample)
+
+        pose = odom.get_pose()
+        self.assertAlmostEqual(pose.x, 1.0, places=2)
+        self.assertFalse(odom._sdk_motion_confirmed)
 
     def test_sdk_odometry_falls_back_when_sample_is_stale(self):
         odom = SdkSportModeOdometryProvider(start_subscriber=False)
@@ -1118,7 +1134,7 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._local_planner = LocalPlanner(
                 max_linear_speed=0.40,
                 max_yaw_rate=0.08,
-                pivot_yaw_rate=0.30,
+                pivot_yaw_rate=0.50,
                 safety_distance=0.20,
                 avoidance_distance=0.60,
             )
@@ -1152,7 +1168,7 @@ class TestNavCoreStatus(unittest.TestCase):
             fake_go2.move.assert_called_once()
             self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
             self.assertLess(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
-            self.assertAlmostEqual(abs(fake_go2.move.call_args.kwargs["vyaw"]), 0.30)
+            self.assertAlmostEqual(abs(fake_go2.move.call_args.kwargs["vyaw"]), 0.50)
             nav.shutdown()
         finally:
             NavCore._instance = None

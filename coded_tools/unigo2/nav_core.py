@@ -461,7 +461,7 @@ class LocalPlanner:
     FORWARD_HAZARD_CONE_RAD = _env_float("NAV_FORWARD_HAZARD_CONE_RAD", math.radians(20.0))
     DEFAULT_PIVOT_YAW_RATE = _env_float(
         "NAV_PIVOT_YAW_RATE",
-        _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.30),
+        _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.50),
     )
 
     def __init__(
@@ -820,6 +820,8 @@ class SdkSportModeOdometryProvider(OdometryProvider):
     """
 
     MAX_SAMPLE_AGE_S = _env_float("NAV_SDK_ODOMETRY_MAX_AGE", 0.75)
+    MIN_MOTION_DELTA_M = _env_float("NAV_SDK_ODOMETRY_MIN_DELTA_M", 0.02)
+    MIN_MOTION_DELTA_YAW_RAD = _env_float("NAV_SDK_ODOMETRY_MIN_DELTA_YAW_RAD", 0.03)
 
     def __init__(
         self,
@@ -834,6 +836,8 @@ class SdkSportModeOdometryProvider(OdometryProvider):
         self._sdk_anchor: Optional[Tuple[float, float, float]] = None
         self._map_anchor = RobotPose()
         self._subscriber_error: Optional[str] = None
+        self._sdk_motion_confirmed = False
+        self._reported_static_fallback = False
 
         if start_subscriber:
             self._start_subscriber(network_interface)
@@ -842,7 +846,9 @@ class SdkSportModeOdometryProvider(OdometryProvider):
     def source_name(self) -> str:
         """Human-readable pose source name for diagnostics."""
         if self._subscriber is not None:
-            return f"sdk_sportmodestate:{self._topic}"
+            if self._sdk_motion_confirmed:
+                return f"sdk_sportmodestate:{self._topic}"
+            return f"sdk_sportmodestate_pending_motion:{self._topic}"
         if self._subscriber_error:
             return "dead_reckoning_after_sdk_error"
         return "sdk_sportmodestate:manual"
@@ -943,13 +949,43 @@ class SdkSportModeOdometryProvider(OdometryProvider):
                     yaw=self._pose.yaw,
                     timestamp=self._pose.timestamp,
                 )
-            self._pose = self._aligned_pose_from_sdk_locked(sdk_pose)
+
+            if (
+                not self._sdk_motion_confirmed
+                and self._sdk_pose_has_moved_from_anchor_locked(sdk_pose)
+            ):
+                self._sdk_motion_confirmed = True
+                logger.info(
+                    "SdkSportModeOdometryProvider: SDK odometry motion confirmed"
+                )
+
+            if self._sdk_motion_confirmed:
+                self._pose = self._aligned_pose_from_sdk_locked(sdk_pose)
 
     def _has_fresh_sdk_pose_locked(self) -> bool:
         """True if the last SDK sample is recent enough to trust."""
         if self._latest_sdk_pose is None:
             return False
         return time.monotonic() - self._latest_sdk_pose[3] <= self.MAX_SAMPLE_AGE_S
+
+    def _sdk_pose_has_moved_from_anchor_locked(
+        self,
+        sdk_pose: Tuple[float, float, float, float],
+    ) -> bool:
+        """True once SDK pose has changed enough to trust for navigation."""
+        if self._sdk_anchor is None:
+            return False
+
+        dx = sdk_pose[0] - self._sdk_anchor[0]
+        dy = sdk_pose[1] - self._sdk_anchor[1]
+        linear_delta = math.hypot(dx, dy)
+        yaw_delta = abs(
+            self._normalize_angle(sdk_pose[2] - self._sdk_anchor[2])
+        )
+        return (
+            linear_delta >= self.MIN_MOTION_DELTA_M
+            or yaw_delta >= self.MIN_MOTION_DELTA_YAW_RAD
+        )
 
     def _aligned_pose_from_sdk_locked(
         self,
@@ -979,11 +1015,28 @@ class SdkSportModeOdometryProvider(OdometryProvider):
         )
 
     def update_from_velocity(self, cmd: VelocityCommand, dt: float):
-        """Use SDK pose when fresh; otherwise fall back to dead-reckoning."""
+        """Use proven SDK pose when fresh; otherwise fall back to dead-reckoning."""
         with self._lock:
-            if self._has_fresh_sdk_pose_locked():
+            if self._has_fresh_sdk_pose_locked() and self._sdk_motion_confirmed:
                 self._pose = self._aligned_pose_from_sdk_locked(self._latest_sdk_pose)
                 return
+
+            command_active = (
+                abs(cmd.vx) > 1e-3
+                or abs(cmd.vy) > 1e-3
+                or abs(cmd.vyaw) > 1e-3
+            )
+            if (
+                command_active
+                and self._has_fresh_sdk_pose_locked()
+                and not self._sdk_motion_confirmed
+                and not self._reported_static_fallback
+            ):
+                self._reported_static_fallback = True
+                logger.info(
+                    "SdkSportModeOdometryProvider: SDK samples are fresh but have "
+                    "not shown motion yet; using command-integrated fallback pose"
+                )
 
             self._pose.x += cmd.vx * math.cos(self._pose.yaw) * dt
             self._pose.y += cmd.vx * math.sin(self._pose.yaw) * dt
@@ -1002,12 +1055,14 @@ class SdkSportModeOdometryProvider(OdometryProvider):
                 self._sdk_anchor = (sdk_pose[0], sdk_pose[1], sdk_pose[2])
             else:
                 self._sdk_anchor = None
+            self._sdk_motion_confirmed = False
+            self._reported_static_fallback = False
             self._last_update = time.monotonic()
 
     def get_pose(self) -> RobotPose:
         """Return measured pose when fresh, otherwise the fallback pose."""
         with self._lock:
-            if self._has_fresh_sdk_pose_locked():
+            if self._has_fresh_sdk_pose_locked() and self._sdk_motion_confirmed:
                 self._pose = self._aligned_pose_from_sdk_locked(self._latest_sdk_pose)
             return RobotPose(
                 x=self._pose.x,
@@ -1023,6 +1078,8 @@ class SdkSportModeOdometryProvider(OdometryProvider):
             self._map_anchor = RobotPose()
             self._sdk_anchor = None
             self._latest_sdk_pose = None
+            self._sdk_motion_confirmed = False
+            self._reported_static_fallback = False
             self._last_update = time.monotonic()
 
     def shutdown(self):
@@ -1088,7 +1145,7 @@ class NavCore:
     MAX_YAW_RATE: float = _env_float("NAV_MAX_YAW_RATE", 0.5)
     PIVOT_YAW_RATE: float = _env_float(
         "NAV_PIVOT_YAW_RATE",
-        _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.30),
+        _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.50),
     )
     GOAL_TOLERANCE_M: float = _env_float("NAV_GOAL_TOLERANCE", 0.3)
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 10.0)
