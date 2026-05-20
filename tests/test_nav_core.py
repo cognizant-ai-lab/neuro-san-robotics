@@ -689,6 +689,17 @@ class TestOdometryProvider(unittest.TestCase):
 
 class TestNavCoreStatus(unittest.TestCase):
 
+    def test_robot_navigation_defaults_are_in_code(self):
+        self.assertAlmostEqual(NavCore.MAX_LINEAR_SPEED, 0.40)
+        self.assertAlmostEqual(NavCore.MAX_YAW_RATE, 0.08)
+        self.assertAlmostEqual(NavCore.PIVOT_YAW_RATE, 0.50)
+        self.assertAlmostEqual(NavCore.SAFETY_DISTANCE_M, 0.20)
+        self.assertAlmostEqual(NavCore.AVOIDANCE_DISTANCE_M, 0.60)
+        self.assertAlmostEqual(NavCore.PIVOT_HARD_STOP_DISTANCE_M, 0.00)
+        self.assertAlmostEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_S, 0.7)
+        self.assertEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS, 6)
+        self.assertAlmostEqual(NavCore.GOAL_TOLERANCE_M, 0.15)
+
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_get_status_summary(self, mock_go2):
         mock_go2.return_value = MagicMock()
@@ -875,6 +886,8 @@ class TestNavCoreStatus(unittest.TestCase):
 
         NavCore._instance = None
         os.environ["NAV_SIMULATION_MODE"] = "1"
+        original_confirm_s = NavCore.CLOSE_OBSTACLE_CONFIRM_S
+        NavCore.CLOSE_OBSTACLE_CONFIRM_S = 0.0
         events = []
 
         def record_event(message):
@@ -895,7 +908,8 @@ class TestNavCoreStatus(unittest.TestCase):
                 nav._goal = goal
                 nav._reset_progress_tracker()
 
-            nav._nav_cycle(NavState.NAVIGATING, goal)
+            for _ in range(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS):
+                nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.E_STOP)
             self.assertIn("E-STOP: path obstacle at 0.18m", nav.get_status_summary())
@@ -910,6 +924,7 @@ class TestNavCoreStatus(unittest.TestCase):
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
+            NavCore.CLOSE_OBSTACLE_CONFIRM_S = original_confirm_s
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
@@ -929,7 +944,7 @@ class TestNavCoreStatus(unittest.TestCase):
 
             fake_depth = MagicMock()
             fake_depth.get_obstacle_grid.side_effect = [
-                _grid_with_wall_ahead(distance_m=0.37),
+                _grid_with_wall_ahead(distance_m=0.18),
                 _empty_grid(),
             ]
             nav._depth_processor = fake_depth

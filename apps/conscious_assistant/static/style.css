@@ -166,7 +166,7 @@ body::before {
     display: flex;
     flex-direction: column;
     min-height: 0;
-    flex: 0 1 42%;
+    flex: 0 0 auto;
 }
 
 .observation-meta {
@@ -205,12 +205,10 @@ body::before {
 }
 
 .observation-history {
-    max-height: 320px;
     min-height: 0;
-    overflow-y: auto;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
-    gap: 12px;
 }
 
 .observation-entry {
@@ -244,6 +242,7 @@ body::before {
 
 .observation-entry-image {
     width: 100%;
+    aspect-ratio: 16 / 9;
     display: block;
     border-radius: 12px;
     border: 1px solid rgba(255, 215, 0, 0.2);

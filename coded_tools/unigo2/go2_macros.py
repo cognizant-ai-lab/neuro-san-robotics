@@ -59,13 +59,20 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class Go2Macros:
     def __init__(self, use_robot=USE_REAL_ROBOT, ifname=IFNAME):
         self.use_robot = use_robot
         self.ifname = ifname
         self.cli = None
         self.available = False
-        self._move_log_interval_s = _env_float("GO2_MOVE_LOG_INTERVAL_SECONDS", 2.0)
+        self._move_log_interval_s = _env_float("GO2_MOVE_LOG_INTERVAL_SECONDS", -1.0)
         self._last_move_log_at = 0.0
 
         if not self.use_robot or sport_client is None or ChannelFactoryInitialize is None:
@@ -325,7 +332,7 @@ class Go2Macros:
         self._log("Content motion")
 
     def dance(self):
-        if self.cli and os.environ.get("GO2_USE_SDK_SPECIAL_MOTIONS", "").lower() in {"1", "true", "yes"}:
+        if self.cli and _env_flag("GO2_USE_SDK_SPECIAL_MOTIONS", default=True):
             self.cli.Dance1()
             self._log("Dance 1 motion")
             return
@@ -341,7 +348,7 @@ class Go2Macros:
         self.dance()
 
     def dance2(self):
-        if self.cli and os.environ.get("GO2_USE_SDK_SPECIAL_MOTIONS", "").lower() in {"1", "true", "yes"}:
+        if self.cli and _env_flag("GO2_USE_SDK_SPECIAL_MOTIONS", default=True):
             self.cli.Dance2()
             self._log("Dance 2 motion")
             return

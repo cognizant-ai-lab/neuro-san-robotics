@@ -83,6 +83,7 @@ class Go2MacrosInitializationTests(unittest.TestCase):
         self.assertEqual(len(FakeSportClient.instances), 1)
         self.assertEqual(first.cli.timeout, 10.0)
         self.assertTrue(first.cli.initialized)
+        self.assertEqual(first._move_log_interval_s, -1.0)
 
     def test_channel_init_failure_does_not_build_client_with_none_participant(self):
         channel_init = MagicMock(side_effect=Exception("channel factory init error."))
@@ -137,8 +138,22 @@ class Go2MacrosInitializationTests(unittest.TestCase):
         self.assertIn(("BalanceStand",), client.calls)
         self.assertEqual(client.calls[-1], ("StopMove",))
 
-    def test_dance_uses_locomotion_fallback_by_default(self):
+    def test_dance_uses_sdk_special_motion_by_default(self):
         with (
+            patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
+            patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros.time, "sleep"),
+        ):
+            bot = go2_macros.Go2Macros()
+            bot.dance1()
+
+        client = FakeSportClient.instances[0]
+        self.assertIn(("Dance1",), client.calls)
+        self.assertFalse([call for call in client.calls if call[0] == "Move"])
+
+    def test_dance_can_disable_sdk_special_motion_with_env_override(self):
+        with (
+            patch.dict(go2_macros.os.environ, {"GO2_USE_SDK_SPECIAL_MOTIONS": "0"}),
             patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
             patch.object(go2_macros, "sport_client", FakeSportClientModule),
             patch.object(go2_macros.time, "sleep"),

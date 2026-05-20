@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -146,7 +147,7 @@ class SceneObserver:
         enabled: Optional[bool] = None,
     ):
         self.enabled = (
-            _env_flag("CONSCIOUS_ENABLE_SCENE_OBSERVER", default=False)
+            _env_flag("CONSCIOUS_ENABLE_SCENE_OBSERVER", default=sys.platform.startswith("linux"))
             if enabled is None
             else enabled
         )

@@ -57,7 +57,7 @@ NavCore runs a **background thread at 10 Hz**. Each cycle:
 
 1. Read obstacle grid from depth camera
 2. Get robot pose from odometry
-3. Safety pre-check (e-stop if obstacle < 0.4m)
+3. Safety pre-check (confirmed stop if a path-corridor obstacle is <= 0.20 m)
 4. Local planner computes velocity (VFH+ algorithm)
 5. Safety monitor filters the command
 6. Send velocity to Go2Macros
@@ -198,16 +198,18 @@ Both tools are registered in `registries/conscious_agent.hocon`.
 | `NAV_SIMULATION_MODE` | `false` | Use synthetic depth data (no hardware) |
 | `NAV_MAP_FILE` | `""` | Path to topological map JSON |
 | `NAV_LOOP_HZ` | `10` | Navigation loop frequency |
-| `NAV_MAX_LINEAR_SPEED` | `0.3` | Max forward speed (m/s) |
-| `NAV_MAX_YAW_RATE` | `0.5` | Max rotation speed (rad/s) |
-| `NAV_SAFETY_DISTANCE` | `0.4` | E-stop distance (meters) |
-| `NAV_AVOIDANCE_DISTANCE` | `0.8` | Start slowing down (meters) |
+| `NAV_MAX_LINEAR_SPEED` | `0.40` | Max planned forward speed (m/s) |
+| `NAV_MAX_YAW_RATE` | `0.08` | Max yaw correction while translating (rad/s) |
+| `NAV_PIVOT_YAW_RATE` | `0.50` | In-place yaw rate for planned turns (rad/s) |
+| `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed stop distance in the path corridor (meters) |
+| `NAV_AVOIDANCE_DISTANCE` | `0.60` | Start slowing down for path-corridor obstacles (meters) |
 | `NAV_FORWARD_SPEED` | `0.45` | Continuous guarded forward command speed |
-| `NAV_FORWARD_STOP_DISTANCE` | `0.75` | Center-depth watchdog stop distance |
+| `NAV_FORWARD_STOP_DISTANCE` | `0.50` | Center-depth watchdog stop distance |
 | `NAV_FORWARD_MAX_SECONDS` | `15` | Timeout for move_until_obstacle |
 | `NAV_DEPTH_CAMERA_SOURCE` | `auto` | `auto`, `realsense`, or OpenCV device index |
 | `NAV_GRID_RESOLUTION` | `0.05` | Obstacle grid cell size (meters) |
 | `NAV_CAMERA_MOUNT_HEIGHT` | `0.30` | Depth camera height from ground (meters) |
+| `NAV_GOAL_TOLERANCE` | `0.15` | Distance to consider goal reached (meters) |
 
 ---
 
@@ -217,7 +219,7 @@ Every velocity command passes through the SafetyMonitor before reaching the moto
 
 | Condition | Action |
 |-----------|--------|
-| Obstacle within 0.4m | Immediate stop (e-stop) |
+| Confirmed path-corridor obstacle within 0.20 m | Stop |
 | Ground plane missing (cliff/step) | Stop |
 | No progress for 10 seconds | Stop, report stuck |
 | All occupied (surrounded) | Stop |

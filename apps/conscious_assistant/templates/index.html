@@ -42,12 +42,12 @@
             </div>
             <div id="observation-panel" class="observation-panel">
                 <div class="observation-meta">
-                    <span class="observation-title">Recent Views</span>
-                    <span class="observation-timestamp">Client-side history</span>
+                    <span class="observation-title">Latest View</span>
+                    <span class="observation-timestamp">Live snapshot</span>
                 </div>
                 <div id="observation-history" class="observation-history">
                     <div id="observation-placeholder" class="observation-placeholder">
-                        Timestamped camera captures will appear here.
+                        The latest camera capture will appear here.
                     </div>
                 </div>
             </div>
@@ -76,7 +76,6 @@
             transports: ["polling"],
             upgrade: false,
         });
-        const MAX_OBSERVATION_HISTORY = 20;
         const MAX_CHAT_HISTORY = 120;
         const MAX_THOUGHT_HISTORY = 120;
         var thoughtsInitialized = false;
@@ -491,13 +490,6 @@
             });
         }
 
-        try {
-            sessionStorage.removeItem('caile.assistantThoughts.v1');
-            sessionStorage.removeItem('caile.chatHistory.v1');
-        } catch (err) {
-            console.debug('Could not clear previous panel history:', err);
-        }
-
         // Listen for processing state changes from server
         socket.on('processing_started', function(data) {
             if (data && data.interactive === false) {
@@ -580,15 +572,7 @@
             entry.appendChild(meta);
             entry.appendChild(image);
             entry.appendChild(caption);
-            history.appendChild(entry);
-
-            var entries = history.querySelectorAll('.observation-entry');
-            while (entries.length > MAX_OBSERVATION_HISTORY) {
-                history.removeChild(entries[0]);
-                entries = history.querySelectorAll('.observation-entry');
-            }
-
-            history.scrollTop = history.scrollHeight;
+            history.replaceChildren(entry);
         });
 
         socket.on('update_speech', function(data) {

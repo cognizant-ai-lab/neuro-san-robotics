@@ -266,18 +266,18 @@ The Unitree Go2 provides a high-level `move(vx, vy, vyaw)` interface - not joint
 ```
 Speed (m/s)
   |
-  |  MAX_SPEED (0.3) ───────────────┐
+  |  MAX_SPEED (0.40) ──────────────┐
   |                                  \
   |                                   \  (linear ramp)
   |                                    \
   |  0 ─────────────────────────────────┘
   +──────────────────────────────────────> Distance (m)
-     0     SAFETY (0.4m)  AVOIDANCE (0.8m)
+     0     SAFETY (0.20m)  AVOIDANCE (0.60m)
 ```
 
-- **Beyond 0.8m**: Full speed toward goal
-- **0.4m - 0.8m**: Linearly decreasing speed (caution zone)
-- **Below 0.4m**: Emergency stop (safety zone)
+- **Beyond 0.60m**: Full planned speed toward goal
+- **0.20m - 0.60m**: Linearly decreasing speed in the path corridor
+- **At or below 0.20m**: Stop after close-obstacle confirmation
 
 ---
 
@@ -289,7 +289,7 @@ Inspired by CMU ABS's safety-supervisor pattern. The key principle: **every velo
 
 | Priority | Condition | Action | Recovery |
 |----------|-----------|--------|----------|
-| 1 - E-STOP | Obstacle within 0.4m | Immediate `stop_move()`, state -> E_STOP | Explicit `resume()` call |
+| 1 - E-STOP | Confirmed path obstacle within 0.20m | `stop_move()`, state -> E_STOP | Explicit `resume()` call |
 | 2 - CLIFF | Ground plane missing ahead (step/stair detected by depth) | Stop, state -> E_STOP | Manual override or path replan |
 | 3 - STUCK | No progress for 10 seconds | Stop, state -> STUCK | `recovery_stand()` + replan or cancel |
 | 4 - TIMEOUT | Goal timeout exceeded | Stop, state -> IDLE | Report failure to agent |
@@ -613,13 +613,13 @@ class MapEdge:
 | From | To | Trigger |
 |------|----|---------|
 | IDLE | NAVIGATING | `navigate_to()` or `move_relative()` called |
-| NAVIGATING | IDLE | Goal reached (within 0.3m tolerance) |
-| NAVIGATING | AVOIDING | Obstacle detected in avoidance zone (0.4m - 0.8m) |
+| NAVIGATING | IDLE | Goal reached (within 0.15m tolerance) |
+| NAVIGATING | AVOIDING | Obstacle detected in avoidance zone (0.20m - 0.60m) |
 | AVOIDING | NAVIGATING | Obstacle cleared, path to goal open |
 | AVOIDING | STUCK | Unable to clear obstacle for 10 seconds |
 | STUCK | NAVIGATING | After recovery_stand() + successful replan |
 | STUCK | IDLE | Navigation cancelled |
-| Any | E_STOP | Obstacle within 0.4m safety distance |
+| Any | E_STOP | Confirmed path obstacle within 0.20m safety distance |
 | E_STOP | IDLE | Explicit `resume()` call |
 | Any | IDLE | `stop()` called |
 
@@ -784,15 +784,16 @@ Following existing patterns from `vision_core.py` (`_env_flag()`, `_env_float()`
 |----------|------|---------|---------|
 | `NAV_ENABLED` | bool | `False` | Master enable for navigation subsystem |
 | `NAV_LOOP_HZ` | int | `10` | Navigation loop frequency |
-| `NAV_SAFETY_DISTANCE` | float | `0.4` | E-stop trigger distance (meters) |
-| `NAV_AVOIDANCE_DISTANCE` | float | `0.8` | Avoidance start distance (meters) |
-| `NAV_MAX_LINEAR_SPEED` | float | `0.3` | Maximum forward speed (m/s) |
-| `NAV_MAX_YAW_RATE` | float | `0.5` | Maximum rotation speed (rad/s) |
+| `NAV_SAFETY_DISTANCE` | float | `0.20` | Confirmed stop distance in the path corridor (meters) |
+| `NAV_AVOIDANCE_DISTANCE` | float | `0.60` | Slowdown start distance for path-corridor obstacles (meters) |
+| `NAV_MAX_LINEAR_SPEED` | float | `0.40` | Maximum planned forward speed (m/s) |
+| `NAV_MAX_YAW_RATE` | float | `0.08` | Maximum yaw correction while translating (rad/s) |
+| `NAV_PIVOT_YAW_RATE` | float | `0.50` | In-place yaw rate for planned map turns (rad/s) |
 | `NAV_DEPTH_CAMERA_SOURCE` | str | `"auto"` | Depth camera device identifier |
 | `NAV_USE_LIDAR` | bool | `True` | Attempt to subscribe to LiDAR DDS topic |
 | `NAV_MAP_FILE` | str | `""` | Path to topological map JSON file |
 | `NAV_SIMULATION_MODE` | bool | `False` | Desktop testing with synthetic obstacles |
-| `NAV_GOAL_TOLERANCE` | float | `0.3` | Distance to consider goal reached (meters) |
+| `NAV_GOAL_TOLERANCE` | float | `0.15` | Distance to consider goal reached (meters) |
 | `NAV_STUCK_TIMEOUT` | float | `10.0` | Seconds without progress before STUCK state |
 
 ---

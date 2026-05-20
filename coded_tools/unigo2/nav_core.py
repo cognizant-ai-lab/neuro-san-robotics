@@ -466,11 +466,11 @@ class LocalPlanner:
 
     def __init__(
         self,
-        max_linear_speed: float = 0.3,
-        max_yaw_rate: float = 0.5,
+        max_linear_speed: float = 0.4,
+        max_yaw_rate: float = 0.08,
         pivot_yaw_rate: Optional[float] = None,
-        safety_distance: float = 0.4,
-        avoidance_distance: float = 0.8,
+        safety_distance: float = 0.2,
+        avoidance_distance: float = 0.6,
     ):
         """Configure the local planner speed and distance thresholds.
 
@@ -1139,23 +1139,23 @@ class NavCore:
 
     # Configuration (overridable via environment variables)
     NAV_LOOP_HZ: int = _env_int("NAV_LOOP_HZ", 10)
-    SAFETY_DISTANCE_M: float = _env_float("NAV_SAFETY_DISTANCE", 0.4)
-    AVOIDANCE_DISTANCE_M: float = _env_float("NAV_AVOIDANCE_DISTANCE", 0.8)
-    MAX_LINEAR_SPEED: float = _env_float("NAV_MAX_LINEAR_SPEED", 0.3)
-    MAX_YAW_RATE: float = _env_float("NAV_MAX_YAW_RATE", 0.5)
+    SAFETY_DISTANCE_M: float = _env_float("NAV_SAFETY_DISTANCE", 0.20)
+    AVOIDANCE_DISTANCE_M: float = _env_float("NAV_AVOIDANCE_DISTANCE", 0.60)
+    MAX_LINEAR_SPEED: float = _env_float("NAV_MAX_LINEAR_SPEED", 0.40)
+    MAX_YAW_RATE: float = _env_float("NAV_MAX_YAW_RATE", 0.08)
     PIVOT_YAW_RATE: float = _env_float(
         "NAV_PIVOT_YAW_RATE",
         _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.50),
     )
-    GOAL_TOLERANCE_M: float = _env_float("NAV_GOAL_TOLERANCE", 0.3)
+    GOAL_TOLERANCE_M: float = _env_float("NAV_GOAL_TOLERANCE", 0.15)
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 10.0)
-    PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.2)
+    PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.0)
     FORWARD_HAZARD_CONE_RAD: float = _env_float(
         "NAV_FORWARD_HAZARD_CONE_RAD",
         math.radians(20.0),
     )
     CLOSE_OBSTACLE_CONFIRM_S: float = _env_float("NAV_CLOSE_OBSTACLE_CONFIRM_S", 0.7)
-    CLOSE_OBSTACLE_CONFIRM_READINGS: int = _env_int("NAV_CLOSE_OBSTACLE_CONFIRM_READINGS", 3)
+    CLOSE_OBSTACLE_CONFIRM_READINGS: int = _env_int("NAV_CLOSE_OBSTACLE_CONFIRM_READINGS", 6)
     FORWARD_SPEED: float = _env_float("NAV_FORWARD_SPEED", 0.45)
     FORWARD_STOP_DISTANCE_M: float = _env_float("NAV_FORWARD_STOP_DISTANCE", 0.50)
     FORWARD_MAX_SECONDS: float = _env_float("NAV_FORWARD_MAX_SECONDS", 15.0)

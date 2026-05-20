@@ -3,7 +3,6 @@ import atexit
 import logging
 import os
 import queue
-import random
 import re
 import site
 import sys
@@ -58,7 +57,7 @@ def _should_preinitialize_robot_control() -> bool:
 
 
 def _should_enable_scene_observer() -> bool:
-    return _env_flag("CONSCIOUS_ENABLE_SCENE_OBSERVER", default=False)
+    return _env_flag("CONSCIOUS_ENABLE_SCENE_OBSERVER", default=sys.platform.startswith("linux"))
 
 
 def _should_enable_passive_agent_turns() -> bool:
@@ -201,7 +200,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CERT = BASE_DIR / "certs" / "cert.pem"
 KEY  = BASE_DIR / "certs" / "key.pem"
 
-# Import TTS function for hardwired speech
+# Import TTS function used when the agent emits a say: block.
 try:
     from coded_tools.unigo2.tts_go2 import say as tts_say
     TTS_AVAILABLE = True
@@ -209,15 +208,6 @@ except ImportError:
     logging.warning("TTS module not available - speech will be text-only")
     TTS_AVAILABLE = False
     tts_say = None
-
-# Import robot macros for motion during acknowledgment
-try:
-    from coded_tools.unigo2.go2_macros import Go2Macros
-    ROBOT_AVAILABLE = True
-except ImportError:
-    logging.warning("Go2Macros not available - robot motions disabled")
-    ROBOT_AVAILABLE = False
-    Go2Macros = None
 
 # Import deferred action executor for robot actions after speech
 try:
@@ -238,24 +228,6 @@ except ImportError:
         execute_deferred_actions = None
 
 THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
-
-# Robot motion configuration
-ROBOT_MOTION_PROBABILITY = _env_float("CONSCIOUS_ROBOT_MOTION_PROBABILITY", 0.0)
-ALLOWED_ROBOT_ACTIONS = [
-    "sit_rise",
-    "step_backward",
-    "step_forward",
-    "stretch",
-    "content"
-]
-
-# Acknowledgment phrases to speak immediately when user input is received
-ACKNOWLEDGMENT_PHRASES = [
-    "Got it",
-    "Okay",
-    "On it",
-    "Sure",
-]
 
 os.environ.setdefault("AGENT_MANIFEST_FILE", str(REPO_ROOT / "registries" / "manifest.hocon"))
 os.environ.setdefault("AGENT_TOOL_PATH", str(REPO_ROOT / "coded_tools"))
@@ -408,63 +380,11 @@ def speak_text_streaming(
 
 def speak_text(text: str) -> None:
     """
-    Speak the given text using TTS.
+    Speak an agent-authored say: payload using TTS.
 
-    This is the hardwired TTS function that gets called automatically
-    whenever a 'say:' block is detected, ensuring speech always happens
-    regardless of whether the agent's tool call worked.
-
-    Speaks full text at once for better prosody.
+    Speaks the full text at once for better prosody.
     """
     speak_text_streaming(text, on_speech_complete=None)
-
-
-def perform_random_robot_motion() -> None:
-    """
-    Perform 1 or 2 random robot motions from the allowed actions list.
-
-    This function is called during user input acknowledgment to make the robot
-    appear more engaged and responsive while the agent is processing.
-    """
-    if not ROBOT_AVAILABLE or Go2Macros is None:
-        logging.info("Robot not available, skipping motion")
-        return
-
-    if ROBOT_MOTION_PROBABILITY <= 0:
-        logging.info("Random acknowledgment robot motion disabled")
-        return
-
-    # Check probability - only perform motion when explicitly configured
-    if random.random() > ROBOT_MOTION_PROBABILITY:
-        logging.info("Skipping robot motion this time (probability check)")
-        return
-
-    try:
-        go2 = Go2Macros()
-        if not getattr(go2, "available", False):
-            logging.info("Robot motion unavailable, skipping")
-            return
-
-        # Randomly select 1 action
-        action = random.choice(ALLOWED_ROBOT_ACTIONS)
-
-        logging.info("Performing robot motion: %s", action)
-
-        if action == "content":
-            go2.content()
-        elif action == "sit_rise":
-            go2.sit_rise()
-        elif action == "step_backward":
-            go2.step_backward()
-        elif action == "step_forward":
-            go2.step_forward()
-        elif action == "stretch":
-            go2.stretch()
-
-        logging.info("Robot motion completed")
-
-    except Exception as e:
-        logging.exception("Robot motion failed")
 
 
 def emit_speech_state(active: bool) -> None:
@@ -549,8 +469,8 @@ def enqueue_speech(
     )
 
 
-def enqueue_navigation_status_update(message: str) -> None:
-    """Speak terminal navigation updates emitted by NavCore's background loop."""
+def enqueue_navigation_status_event(message: str) -> None:
+    """Route terminal NavCore updates back through the agent network."""
     global last_navigation_status_at, last_navigation_status_message  # pylint: disable=global-statement
     if not message:
         return
@@ -567,17 +487,23 @@ def enqueue_navigation_status_update(message: str) -> None:
         last_navigation_status_message = message
         last_navigation_status_at = now
 
-    logging.info("Navigation status update: %s", message)
-    enqueue_speech(message, emit_to_ui=True)
+    logging.info("Navigation status event queued for agent: %s", message)
+    user_input_queue.put(
+        {
+            "source": "navigation_status",
+            "text": message,
+            "interactive": False,
+        }
+    )
 
 
 def register_navigation_status_callback() -> None:
-    """Register the Flask speech bridge without eagerly constructing NavCore."""
+    """Register NavCore terminal status as an agent event source."""
     try:
         from coded_tools.unigo2.nav_core import NavCore
 
-        NavCore.set_status_callback(enqueue_navigation_status_update)
-        logging.info("Registered NavCore status callback for spoken navigation updates")
+        NavCore.set_status_callback(enqueue_navigation_status_event)
+        logging.info("Registered NavCore status callback for agent event routing")
     except Exception:
         logging.exception("Failed to register NavCore status callback")
 
@@ -636,30 +562,37 @@ def conscious_thinking_process():
             try:
                 timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
                 # Wait up to the configured interval for user input
-                user_input = user_input_queue.get(timeout=THINKING_INTERVAL)
-                logging.info("Received user input: %r", user_input)
-                if user_input is None or user_input == "exit":
+                agent_event = user_input_queue.get(timeout=THINKING_INTERVAL)
+                logging.info("Received agent event: %r", agent_event)
+                if agent_event is None:
                     break
-                is_interactive_turn = True
-                thoughts = f"\n{timestamp} user: " + user_input
-                socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
-                socketio.emit(
-                    "update_thoughts",
-                    {"data": f"{timestamp} command received: {user_input}"},
-                    namespace="/chat",
-                )
-                processing_started = True
 
-                # Speak acknowledgment immediately to fill the gap
-                acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
-                logging.info("Speaking acknowledgment: %s", acknowledgment)
-                enqueue_speech(acknowledgment, emit_to_ui=True)
+                if isinstance(agent_event, dict):
+                    event_source = str(agent_event.get("source", "user"))
+                    event_text = str(agent_event.get("text", "")).strip()
+                    is_interactive_turn = bool(
+                        agent_event.get("interactive", event_source == "user")
+                    )
+                else:
+                    event_source = "user"
+                    event_text = str(agent_event).strip()
+                    is_interactive_turn = True
 
-                # Perform optional robot motion during the waiting time.
-                # This happens while the speech is playing, filling the gap
-                perform_random_robot_motion()
+                if event_source == "user" and event_text == "exit":
+                    break
+                if not event_text:
+                    continue
 
-                logging.info("Acknowledgment queued, proceeding with agent")
+                if event_source == "navigation_status":
+                    thoughts = f"\n{timestamp} navigation_status: {event_text}"
+                else:
+                    thoughts = f"\n{timestamp} user: {event_text}"
+
+                if is_interactive_turn:
+                    socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
+                    processing_started = True
+
+                logging.info("Proceeding with agent for %s event", event_source)
 
             except queue.Empty:
                 if shutdown_event.is_set():
@@ -881,7 +814,13 @@ def handle_user_input(json, *_):
     """
     user_input = json["data"]
     skip_echo = json.get("skip_echo", False)
-    user_input_queue.put(user_input)
+    user_input_queue.put(
+        {
+            "source": "user",
+            "text": user_input,
+            "interactive": True,
+        }
+    )
     # Only emit update_user_input if client hasn't already displayed it
     if not skip_echo:
         socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
