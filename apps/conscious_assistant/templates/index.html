@@ -482,6 +482,9 @@
 
             pruneEntries(element, selector, maxEntries);
             element.scrollTop = element.scrollHeight;
+            requestAnimationFrame(function() {
+                element.scrollTop = element.scrollHeight;
+            });
         }
 
         // Listen for processing state changes from server

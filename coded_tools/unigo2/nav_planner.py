@@ -73,11 +73,10 @@ class NavPlannerTool(CodedTool):
                 return "Please specify a destination. " + nav.list_destinations()
             success = nav.navigate_to(target)
             if success:
-                await asyncio.sleep(0.35)
-                status = nav.get_status_summary()
-                if nav.state in {NavState.E_STOP, NavState.STUCK}:
-                    return f"I could not start navigating to '{target}'. {status}"
-                return f"Navigating to '{target}'. {status}"
+                return (
+                    f"Navigation command accepted for '{target}'. "
+                    "Arrival or failure will be reported separately."
+                )
 
             status = nav.get_status_summary()
             if nav.state == NavState.E_STOP:

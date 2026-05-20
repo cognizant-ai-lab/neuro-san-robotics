@@ -33,6 +33,23 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _quiet_memory_tool_loggers() -> None:
+    """Keep verbose memory maintenance from flooding the robot console."""
+    if _env_flag("CONSCIOUS_VERBOSE_MEMORY_LOGS", default=False):
+        return
+
+    for logger_name in (
+        "ListTopics",
+        "RecallMemory",
+        "CommitToMemory",
+        "conscious_agent.reorganize_memory",
+    ):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+_quiet_memory_tool_loggers()
+
+
 def _should_preinitialize_robot_control() -> bool:
     return _env_flag(
         "CONSCIOUS_PREINIT_ROBOT",
@@ -287,6 +304,10 @@ user_input_queue = queue.Queue()
 
 # Speech queue for TTS - allows non-blocking speech processing
 speech_queue = queue.Queue()
+navigation_status_lock = threading.Lock()
+last_navigation_status_message = ""
+last_navigation_status_at = 0.0
+NAV_STATUS_REPEAT_SUPPRESS_SECONDS = _env_float("NAV_STATUS_REPEAT_SUPPRESS_SECONDS", 30.0)
 scene_observer = SceneObserver(enabled=_should_enable_scene_observer())
 os.environ.setdefault("VISION_LATEST_IMAGE_PATH", str(scene_observer.latest_image_path()))
 os.environ.setdefault("VISION_LATEST_IMAGE_MAX_AGE_SECONDS", "0")
@@ -551,8 +572,22 @@ def enqueue_speech(
 
 def enqueue_navigation_status_update(message: str) -> None:
     """Speak terminal navigation updates emitted by NavCore's background loop."""
+    global last_navigation_status_at, last_navigation_status_message  # pylint: disable=global-statement
     if not message:
         return
+
+    now = datetime.now().timestamp()
+    with navigation_status_lock:
+        repeated = (
+            message == last_navigation_status_message
+            and now - last_navigation_status_at < NAV_STATUS_REPEAT_SUPPRESS_SECONDS
+        )
+        if repeated:
+            logging.info("Suppressing repeated navigation status update: %s", message)
+            return
+        last_navigation_status_message = message
+        last_navigation_status_at = now
+
     logging.info("Navigation status update: %s", message)
     enqueue_speech(message, emit_to_ui=True)
 

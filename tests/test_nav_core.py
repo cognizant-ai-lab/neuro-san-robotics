@@ -199,6 +199,16 @@ class TestSafetyMonitor(unittest.TestCase):
         self.assertIsNotNone(event)
         self.assertIn("e_stop", event)
 
+    def test_allows_in_place_pivot_near_obstacle(self):
+        safety = SafetyMonitor(safety_distance=0.4, pivot_hard_stop_distance=0.2)
+        cmd = VelocityCommand(vx=0.0, vy=0.0, vyaw=0.5)
+
+        filtered, event = safety.filter_command(cmd, nearest_obstacle_m=0.25)
+
+        self.assertIsNone(event)
+        self.assertAlmostEqual(filtered.vx, 0.0)
+        self.assertAlmostEqual(filtered.vyaw, 0.5)
+
     def test_no_event_when_clear(self):
         safety = SafetyMonitor(safety_distance=0.4, avoidance_distance=0.8)
         cmd = VelocityCommand(vx=0.3, vy=0.0, vyaw=0.0)
@@ -661,6 +671,44 @@ class TestNavCoreStatus(unittest.TestCase):
                 ],
             )
             fake_go2.stop_move.assert_called()
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_allows_pivot_before_translation_near_obstacle(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.25)
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(goal_type="relative", x=0.0, y=2.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            fake_go2.move.assert_called()
+            self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
+            self.assertGreater(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
+            fake_go2.stop_move.assert_not_called()
+            self.assertEqual(events, [])
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)

@@ -484,6 +484,12 @@ class LocalPlanner:
             return VelocityCommand(0.0, 0.0, 0.0)
 
         if (
+            obstacle_grid.nearest_obstacle_m <= self.safety_distance
+            and abs(goal_direction) < self.PIVOT_HEADING_ERROR_RAD
+        ):
+            return VelocityCommand(0.0, 0.0, 0.0)
+
+        if (
             goal_distance > 0.5
             and abs(goal_direction) >= self.PIVOT_HEADING_ERROR_RAD
         ):
@@ -604,6 +610,7 @@ class SafetyMonitor:
         safety_distance: float = 0.4,
         avoidance_distance: float = 0.8,
         stuck_timeout: float = 10.0,
+        pivot_hard_stop_distance: float = 0.2,
     ):
         """Configure safety thresholds.
 
@@ -611,10 +618,12 @@ class SafetyMonitor:
             safety_distance: E-stop if obstacle closer than this (meters).
             avoidance_distance: Scale speed down between safety and this (meters).
             stuck_timeout: Trigger stuck event after this many seconds without progress.
+            pivot_hard_stop_distance: Minimum distance allowed for in-place turning.
         """
         self.safety_distance = safety_distance
         self.avoidance_distance = avoidance_distance
         self.stuck_timeout = stuck_timeout
+        self.pivot_hard_stop_distance = pivot_hard_stop_distance
 
     def filter_command(
         self,
@@ -629,8 +638,14 @@ class SafetyMonitor:
             Tuple of (possibly zeroed command, optional event string).
             Event string is None when no safety condition triggered.
         """
-        # Priority 1: E-STOP
-        if nearest_obstacle_m <= self.safety_distance:
+        pivot_only = abs(cmd.vx) < 1e-3 and abs(cmd.vy) < 1e-3 and abs(cmd.vyaw) > 1e-3
+
+        # Priority 1: E-STOP. Allow in-place pivots near side clutter so the
+        # robot can turn away from a wall or desk before attempting translation.
+        if (
+            nearest_obstacle_m <= self.safety_distance
+            and not (pivot_only and nearest_obstacle_m > self.pivot_hard_stop_distance)
+        ):
             return VelocityCommand(0.0, 0.0, 0.0), "e_stop:obstacle_too_close"
 
         # Priority 2: Cliff detection
@@ -737,6 +752,7 @@ class NavCore:
     MAX_YAW_RATE: float = _env_float("NAV_MAX_YAW_RATE", 0.5)
     GOAL_TOLERANCE_M: float = _env_float("NAV_GOAL_TOLERANCE", 0.3)
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 10.0)
+    PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.2)
     FORWARD_SPEED: float = _env_float("NAV_FORWARD_SPEED", 0.45)
     FORWARD_STOP_DISTANCE_M: float = _env_float("NAV_FORWARD_STOP_DISTANCE", 0.50)
     FORWARD_MAX_SECONDS: float = _env_float("NAV_FORWARD_MAX_SECONDS", 15.0)
@@ -790,6 +806,7 @@ class NavCore:
             safety_distance=self.SAFETY_DISTANCE_M,
             avoidance_distance=self.AVOIDANCE_DISTANCE_M,
             stuck_timeout=self.STUCK_TIMEOUT_S,
+            pivot_hard_stop_distance=self.PIVOT_HARD_STOP_DISTANCE_M,
         )
         self._odometry = OdometryProvider()
 
@@ -1243,23 +1260,7 @@ class NavCore:
 
         nearest_dist = grid.nearest_obstacle_m if grid else float("inf")
 
-        # 2. Safety pre-check
-        if nearest_dist <= self.SAFETY_DISTANCE_M:
-            self._ensure_go2()
-            if self._go2 and getattr(self._go2, "available", False):
-                self._go2.stop_move()
-            reason = f"E-STOP: obstacle at {nearest_dist:.2f}m"
-            with self._state_lock:
-                self._state = NavState.E_STOP
-                self._last_stop_reason = reason
-            logger.warning("NavCore: %s", reason)
-            self._notify_status_change(
-                f"I stopped before reaching {self._goal_display_name(goal)} "
-                f"because my depth sensor reported something at {nearest_dist:.2f} meters."
-            )
-            return
-
-        # 3. Check if goal reached
+        # 2. Check if goal reached
         dist_to_goal = math.hypot(goal.x - pose.x, goal.y - pose.y)
         if dist_to_goal < self.GOAL_TOLERANCE_M:
             self._ensure_go2()
@@ -1275,7 +1276,7 @@ class NavCore:
                 self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
             return
 
-        # 4. Compute velocity command
+        # 3. Compute velocity command
         if state == NavState.NAVIGATING:
             if goal.goal_type == "semantic":
                 waypoint = self._global_planner.get_next_waypoint(pose, self.GOAL_TOLERANCE_M)
@@ -1328,7 +1329,7 @@ class NavCore:
         else:
             cmd = VelocityCommand(0.0, 0.0, 0.0)
 
-        # 5. Safety filter
+        # 4. Safety filter
         seconds_since_progress = time.monotonic() - self._last_progress_time
         cmd, event = self._safety.filter_command(
             cmd,
@@ -1376,12 +1377,12 @@ class NavCore:
         if self._handle_obstacle_limited_motion(cmd, nearest_dist, goal, dist_to_goal):
             return
 
-        # 6. Execute
+        # 5. Execute
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
             self._go2.move(vx=cmd.vx, vy=cmd.vy, vyaw=cmd.vyaw)
 
-        # 7. Update odometry (dead-reckoning)
+        # 6. Update odometry (dead-reckoning)
         dt = 1.0 / self.NAV_LOOP_HZ
         odometry_cmd = VelocityCommand(
             vx=cmd.vx * self.ODOMETRY_LINEAR_SPEED_RATIO,
@@ -1390,7 +1391,7 @@ class NavCore:
         )
         self._odometry.update_from_velocity(odometry_cmd, dt)
 
-        # 8. Update progress tracker
+        # 7. Update progress tracker
         self._update_progress(pose)
 
     def _handle_obstacle_limited_motion(
