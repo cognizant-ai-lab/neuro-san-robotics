@@ -272,9 +272,14 @@ class TopologicalMap:
         """Return sorted human-readable destination labels."""
         labels = []
         for node in self.nodes.values():
-            label = node.description.split(",", 1)[0].strip()
-            labels.append(label or node.name.replace("_", " "))
+            labels.append(self.get_node_label(node))
         return sorted(labels, key=str.lower)
+
+    @staticmethod
+    def get_node_label(node: MapNode) -> str:
+        """Return a human-readable label for a map node."""
+        label = node.description.split(",", 1)[0].strip()
+        return label or node.name.replace("_", " ")
 
     @property
     def is_loaded(self) -> bool:
@@ -296,6 +301,17 @@ class TopologicalMap:
         }
         if node.name == "charging_station":
             aliases.update({"base", "home", "charger", "charging dock", "docking station"})
+        if node.name == "shrushtis_desk":
+            aliases.update({
+                "Xuxi's desk",
+                "Xuxi desk",
+                "Xushi's desk",
+                "Xushi desk",
+                "Shushti's death",
+                "Shushti death",
+                "Shushdi death",
+                "Shush this death",
+            })
 
         for alias in aliases:
             normalized = self._normalize_node_name(alias)
@@ -350,6 +366,8 @@ class GlobalPlanner:
             return None
 
         if start_node.name == goal_node.name:
+            self._current_path = [goal_node]
+            self._waypoint_index = 0
             return [goal_node]
 
         path_names = self._dijkstra(start_node.name, goal_node.name)
@@ -889,6 +907,67 @@ class NavCore:
         """Return a friendly destination name for status updates."""
         return goal.label or "the destination"
 
+    def _describe_known_destinations(self) -> str:
+        """Return a concise destination list for spoken failure reports."""
+        labels = self._topo_map.list_destination_labels()
+        if not labels:
+            return ""
+        if len(labels) <= 4:
+            return ", ".join(labels)
+        return ", ".join(labels[:4]) + ", and others"
+
+    def _abort_active_navigation(
+        self,
+        goal: NavGoal,
+        reason: str,
+        message: str,
+        state: NavState = NavState.STUCK,
+    ) -> None:
+        """Stop motion, clear the active goal, and report a terminal nav failure."""
+        self._ensure_go2()
+        if self._go2 and getattr(self._go2, "available", False):
+            try:
+                self._go2.stop_move()
+            except Exception:
+                logger.debug("NavCore: stop_move failed while aborting navigation", exc_info=True)
+
+        with self._state_lock:
+            self._state = state
+            self._goal = None
+            self._last_stop_reason = reason
+            self._global_planner.clear()
+
+        logger.warning("NavCore: %s", reason)
+        self._notify_status_change(message)
+        self._stop_depth_when_idle()
+
+    def _send_motion_command(self, cmd: VelocityCommand, goal: NavGoal) -> bool:
+        """Send a Go2 velocity command and fail loudly if motors are unavailable."""
+        self._ensure_go2()
+        if not self._go2 or not getattr(self._go2, "available", False):
+            self._abort_active_navigation(
+                goal,
+                "Robot control unavailable",
+                f"I did not move toward {self._goal_display_name(goal)} because "
+                "robot motor control is unavailable.",
+                state=NavState.E_STOP,
+            )
+            return False
+
+        try:
+            self._go2.move(vx=cmd.vx, vy=cmd.vy, vyaw=cmd.vyaw)
+            return True
+        except Exception:
+            logger.exception("NavCore: failed to send Go2 move command")
+            self._abort_active_navigation(
+                goal,
+                "Robot control command failed",
+                f"I stopped before reaching {self._goal_display_name(goal)} because "
+                "the robot motor command failed.",
+                state=NavState.E_STOP,
+            )
+            return False
+
     # ------------------------------------------------------------------
     # Public navigation commands
     # ------------------------------------------------------------------
@@ -901,11 +980,68 @@ class NavCore:
         """
         if not self._topo_map.is_loaded:
             logger.warning("NavCore: no map loaded, cannot navigate to '%s'", destination)
+            self._notify_status_change(
+                f"I could not navigate to {destination} because no navigation map is loaded."
+            )
             return False
 
         pose = self._odometry.get_pose()
+        goal_node = self._topo_map.get_node(destination)
+        if goal_node is None:
+            known_destinations = self._describe_known_destinations()
+            with self._state_lock:
+                self._state = NavState.IDLE
+                self._goal = None
+                self._last_stop_reason = f"Unknown destination: {destination}"
+                self._global_planner.clear()
+            logger.warning("NavCore: unknown destination '%s'", destination)
+            if known_destinations:
+                self._notify_status_change(
+                    f"I did not move because I do not recognize {destination} "
+                    f"as a mapped destination. I know destinations such as {known_destinations}."
+                )
+            else:
+                self._notify_status_change(
+                    f"I did not move because I do not recognize {destination} "
+                    "as a mapped destination."
+                )
+            return False
+
+        goal_label = self._topo_map.get_node_label(goal_node)
+        dist_to_goal = math.hypot(goal_node.x - pose.x, goal_node.y - pose.y)
+        if dist_to_goal <= self.GOAL_TOLERANCE_M:
+            if self._go2 and getattr(self._go2, "available", False):
+                try:
+                    self._go2.stop_move()
+                except Exception:
+                    logger.debug(
+                        "NavCore: stop_move failed while confirming current location",
+                        exc_info=True,
+                    )
+            with self._state_lock:
+                self._state = NavState.IDLE
+                self._goal = None
+                self._last_stop_reason = f"Already at {goal_label}"
+                self._global_planner.clear()
+            logger.info(
+                "NavCore: already at '%s' (dist=%.2fm), no movement needed",
+                goal_label,
+                dist_to_goal,
+            )
+            self._notify_status_change(f"I am already at {goal_label}.")
+            self._stop_depth_when_idle()
+            return True
+
         path = self._global_planner.plan_path(pose, destination)
         if path is None:
+            with self._state_lock:
+                self._state = NavState.IDLE
+                self._goal = None
+                self._last_stop_reason = f"No route to {goal_label}"
+                self._global_planner.clear()
+            self._notify_status_change(
+                f"I did not move because I do not have a mapped route to {goal_label}."
+            )
             return False
 
         if not self._wait_for_depth_grid(self.DEPTH_READY_TIMEOUT_S):
@@ -919,6 +1055,9 @@ class NavCore:
                 self._last_stop_reason = reason
                 self._global_planner.clear()
             logger.warning("NavCore: %s before navigating to '%s'", reason, destination)
+            self._notify_status_change(
+                f"I did not move toward {goal_label} because my depth grid was not available."
+            )
             self._stop_depth_when_idle()
             return False
 
@@ -1074,6 +1213,9 @@ class NavCore:
 
         self.stop(stop_depth=False)
         self._ensure_go2()
+        if not self._go2 or not getattr(self._go2, "available", False):
+            self._stop_depth_when_idle()
+            return "Cannot move forward: robot motor control is unavailable."
 
         with self._state_lock:
             self._goal = NavGoal(
@@ -1410,10 +1552,25 @@ class NavCore:
         if self._handle_obstacle_limited_motion(cmd, nearest_dist, goal, dist_to_goal):
             return
 
+        if (
+            dist_to_goal > self.GOAL_TOLERANCE_M
+            and abs(cmd.vx) < 1e-3
+            and abs(cmd.vy) < 1e-3
+            and abs(cmd.vyaw) < 1e-3
+        ):
+            self._abort_active_navigation(
+                goal,
+                "Blocked: no safe motion command",
+                f"I did not move toward {self._goal_display_name(goal)} because "
+                "my local planner could not find a safe motion command.",
+            )
+            self._obstacle_limited_since = None
+            return
+
         # 5. Execute
-        self._ensure_go2()
-        if self._go2 and getattr(self._go2, "available", False):
-            self._go2.move(vx=cmd.vx, vy=cmd.vy, vyaw=cmd.vyaw)
+        if not self._send_motion_command(cmd, goal):
+            self._obstacle_limited_since = None
+            return
 
         # 6. Update odometry (dead-reckoning)
         dt = 1.0 / self.NAV_LOOP_HZ

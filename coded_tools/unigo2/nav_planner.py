@@ -73,6 +73,12 @@ class NavPlannerTool(CodedTool):
                 return "Please specify a destination. " + nav.list_destinations()
             success = nav.navigate_to(target)
             if success:
+                status = nav.get_status_summary()
+                if nav.state == NavState.IDLE and "Already at " in status:
+                    return (
+                        f"No movement was needed for '{target}'. "
+                        "I already reported that I am there."
+                    )
                 return (
                     f"Navigation command accepted for '{target}'. "
                     "Arrival or failure will be reported separately."
@@ -81,7 +87,10 @@ class NavPlannerTool(CodedTool):
             status = nav.get_status_summary()
             if nav.state == NavState.E_STOP:
                 return f"I could not start navigating to '{target}'. {status}"
-            return f"Cannot navigate to '{target}'. " + nav.list_destinations()
+            return (
+                f"Navigation to '{target}' was not started. "
+                "I already reported the reason to the user. " + nav.list_destinations()
+            )
 
         elif command in {"set_location", "reset_location", "localize"}:
             target = args.get("target", "").strip()
@@ -124,7 +133,8 @@ class NavPlannerTool(CodedTool):
             else:
                 angle_rad = math.radians(angle_deg)
 
-            nav.turn(angle_rad)
+            if not nav.turn(angle_rad):
+                return f"Could not turn. {nav.get_status_summary()}"
             return f"Turning {math.degrees(angle_rad):.0f} degrees."
 
         elif command == "stop":

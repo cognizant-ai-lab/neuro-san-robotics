@@ -294,6 +294,18 @@ class TestGlobalPlanner(unittest.TestCase):
         self.assertEqual(len(path), 1)
         self.assertEqual(path[0].name, "A")
 
+    def test_single_node_path_can_still_provide_waypoint_when_offset(self):
+        topo = _create_test_map()
+        planner = GlobalPlanner(topo)
+
+        path = planner.plan_path(RobotPose(0.5, 0.0, 0.0), "A")
+        self.assertIsNotNone(path)
+        self.assertEqual(len(path), 1)
+
+        waypoint = planner.get_next_waypoint(RobotPose(0.5, 0.0, 0.0), tolerance_m=0.3)
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "A")
+
     def test_get_next_waypoint_advances(self):
         topo = _create_test_map()
         planner = GlobalPlanner(topo)
@@ -382,6 +394,8 @@ class TestTopologicalMap(unittest.TestCase):
         self.assertEqual(topo.get_node("Shushti's desk").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("Srushti's desk").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("Srishti's desk").name, "shrushtis_desk")
+        self.assertEqual(topo.get_node("Xuxi's desk").name, "shrushtis_desk")
+        self.assertEqual(topo.get_node("Shushti's death").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("shush desk").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("Shush this desk").name, "shrushtis_desk")
         self.assertEqual(topo.get_node("Shushdi Fest").name, "shrushtis_desk")
@@ -678,6 +692,49 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_reports_robot_control_unavailable(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = False
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Shrushti's desk")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.E_STOP)
+            self.assertIn("Robot control unavailable", nav.get_status_summary())
+            self.assertEqual(
+                events,
+                [
+                    "I did not move toward Shrushti's desk because robot motor "
+                    "control is unavailable."
+                ],
+            )
+            fake_go2.move.assert_not_called()
+            fake_depth.stop.assert_called()
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_nav_cycle_allows_pivot_before_translation_near_obstacle(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
@@ -709,6 +766,52 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertGreater(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
             fake_go2.stop_move.assert_not_called()
             self.assertEqual(events, [])
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_reports_no_safe_motion_command(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand()
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Shrushti's desk")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.STUCK)
+            self.assertIn("Blocked: no safe motion command", nav.get_status_summary())
+            self.assertEqual(
+                events,
+                [
+                    "I did not move toward Shrushti's desk because my local planner "
+                    "could not find a safe motion command."
+                ],
+            )
+            fake_go2.move.assert_not_called()
+            fake_go2.stop_move.assert_called()
+            fake_depth.stop.assert_called()
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
@@ -788,7 +891,12 @@ class TestNavCoreStatus(unittest.TestCase):
                 "name": "suite21",
                 "nodes": [
                     {"name": "charging_station", "x": 1.3, "y": 15.7},
-                    {"name": "shrushtis_desk", "x": 5.62, "y": 15.7},
+                    {
+                        "name": "shrushtis_desk",
+                        "x": 5.62,
+                        "y": 15.7,
+                        "description": "Shrushti's desk, red marker 2",
+                    },
                 ],
                 "edges": [
                     {"from": "charging_station", "to": "shrushtis_desk", "distance": 4.32},
@@ -831,6 +939,8 @@ class TestNavCoreStatus(unittest.TestCase):
         original_timeout = NavCore.DEPTH_READY_TIMEOUT_S
         NavCore._instance = None
         os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
         try:
             nav = NavCore.get_instance()
             nav._go2 = fake_go2
@@ -840,7 +950,12 @@ class TestNavCoreStatus(unittest.TestCase):
                 "name": "suite21",
                 "nodes": [
                     {"name": "charging_station", "x": 1.3, "y": 15.7},
-                    {"name": "shrushtis_desk", "x": 5.62, "y": 15.7},
+                    {
+                        "name": "shrushtis_desk",
+                        "x": 5.62,
+                        "y": 15.7,
+                        "description": "Shrushti's desk, red marker 2",
+                    },
                 ],
                 "edges": [
                     {"from": "charging_station", "to": "shrushtis_desk", "distance": 4.32},
@@ -859,12 +974,127 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertFalse(result)
             self.assertEqual(nav.state, NavState.E_STOP)
             self.assertIn("E-STOP: depth grid unavailable", nav.get_status_summary())
+            self.assertEqual(
+                events,
+                [
+                    "I did not move toward Shrushti's desk because my depth grid "
+                    "was not available."
+                ],
+            )
             fake_depth.start.assert_called()
             fake_depth.stop.assert_called()
             fake_go2.stop_move.assert_called()
             nav.shutdown()
         finally:
+            NavCore.set_status_callback(None)
             NavCore.DEPTH_READY_TIMEOUT_S = original_timeout
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_navigate_to_reports_unknown_destination_without_waiting_for_agent(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.is_available = True
+            fake_depth.get_obstacle_grid.return_value = None
+            nav._depth_processor = fake_depth
+
+            nav._topo_map.load_from_dict({
+                "name": "suite21",
+                "nodes": [
+                    {"name": "charging_station", "x": 1.3, "y": 15.7},
+                    {
+                        "name": "shrushtis_desk",
+                        "x": 5.62,
+                        "y": 15.7,
+                        "description": "Shrushti's desk, red marker 2",
+                    },
+                ],
+                "edges": [
+                    {"from": "charging_station", "to": "shrushtis_desk", "distance": 4.32},
+                ],
+            })
+            nav._odometry.set_pose(1.3, 15.7, 0.0)
+
+            result = nav.navigate_to("somewhere imaginary")
+
+            self.assertFalse(result)
+            self.assertEqual(nav.state, NavState.IDLE)
+            self.assertIn("Unknown destination: somewhere imaginary", nav.get_status_summary())
+            self.assertEqual(len(events), 1)
+            self.assertIn("I did not move because I do not recognize somewhere imaginary", events[0])
+            fake_depth.start.assert_not_called()
+            fake_go2.move.assert_not_called()
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_navigate_to_reports_already_at_destination_without_moving(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.is_available = True
+            fake_depth.get_obstacle_grid.return_value = None
+            nav._depth_processor = fake_depth
+
+            nav._topo_map.load_from_dict({
+                "name": "suite21",
+                "nodes": [
+                    {
+                        "name": "charging_station",
+                        "x": 1.3,
+                        "y": 15.7,
+                        "description": "Charging station, red marker 0",
+                    },
+                    {
+                        "name": "shrushtis_desk",
+                        "x": 5.62,
+                        "y": 15.7,
+                        "description": "Shrushti's desk, red marker 2",
+                    },
+                ],
+                "edges": [
+                    {"from": "charging_station", "to": "shrushtis_desk", "distance": 4.32},
+                ],
+            })
+            nav._odometry.set_pose(1.3, 15.7, 0.0)
+
+            result = nav.navigate_to("charging station")
+
+            self.assertTrue(result)
+            self.assertEqual(nav.state, NavState.IDLE)
+            self.assertIn("Already at Charging station", nav.get_status_summary())
+            self.assertEqual(events, ["I am already at Charging station."])
+            fake_depth.start.assert_not_called()
+            fake_go2.move.assert_not_called()
+            fake_go2.stop_move.assert_called()
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
