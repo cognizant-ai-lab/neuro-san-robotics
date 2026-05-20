@@ -457,6 +457,7 @@ class LocalPlanner:
     WIDE_VALLEY_MIN_SECTORS = 6    # minimum sectors for a "wide" valley
     SMOOTHING_WEIGHT = 0.3         # heading change smoothing
     PIVOT_HEADING_ERROR_RAD = _env_float("NAV_PIVOT_HEADING_ERROR_RAD", math.radians(20.0))
+    FORWARD_HAZARD_CONE_RAD = _env_float("NAV_FORWARD_HAZARD_CONE_RAD", math.radians(35.0))
 
     def __init__(
         self,
@@ -501,8 +502,14 @@ class LocalPlanner:
         if not free_sectors:
             return VelocityCommand(0.0, 0.0, 0.0)
 
+        forward_nearest = self._nearest_obstacle_in_cone(
+            obstacle_grid,
+            center_angle=0.0,
+            half_width_rad=self.FORWARD_HAZARD_CONE_RAD,
+        )
+
         if (
-            obstacle_grid.nearest_obstacle_m <= self.safety_distance
+            forward_nearest <= self.safety_distance
             and abs(goal_direction) < self.PIVOT_HEADING_ERROR_RAD
         ):
             return VelocityCommand(0.0, 0.0, 0.0)
@@ -527,7 +534,7 @@ class LocalPlanner:
         self._prev_heading = target_heading
 
         # Speed modulation based on nearest obstacle
-        nearest = obstacle_grid.nearest_obstacle_m
+        nearest = forward_nearest
         base_speed = self._modulate_speed(self.max_linear_speed, nearest)
 
         # Slow down when close to goal
@@ -570,6 +577,31 @@ class LocalPlanner:
             histogram[sector] += weight
 
         return histogram
+
+    def _nearest_obstacle_in_cone(
+        self,
+        grid: ObstacleGrid,
+        center_angle: float,
+        half_width_rad: float,
+    ) -> float:
+        """Return nearest occupied cell inside an angular cone, or infinity."""
+        nearest = float("inf")
+        occupied = np.argwhere(grid.grid > 0)
+
+        for row, col in occupied:
+            dx = (grid.origin_row - row) * grid.resolution
+            dy = (grid.origin_col - col) * grid.resolution
+            angle = math.atan2(dy, dx)
+            angle_error = math.atan2(
+                math.sin(angle - center_angle),
+                math.cos(angle - center_angle),
+            )
+            if abs(angle_error) > half_width_rad:
+                continue
+
+            nearest = min(nearest, math.hypot(dx, dy))
+
+        return nearest
 
     def _find_free_sectors(self, histogram: np.ndarray) -> List[int]:
         """Return sector indices with obstacle density below the threshold."""
@@ -629,6 +661,7 @@ class SafetyMonitor:
         avoidance_distance: float = 0.8,
         stuck_timeout: float = 10.0,
         pivot_hard_stop_distance: float = 0.2,
+        forward_hazard_cone_rad: float = math.radians(35.0),
     ):
         """Configure safety thresholds.
 
@@ -637,16 +670,19 @@ class SafetyMonitor:
             avoidance_distance: Scale speed down between safety and this (meters).
             stuck_timeout: Trigger stuck event after this many seconds without progress.
             pivot_hard_stop_distance: Minimum distance allowed for in-place turning.
+            forward_hazard_cone_rad: Bearing cone treated as forward path blockage.
         """
         self.safety_distance = safety_distance
         self.avoidance_distance = avoidance_distance
         self.stuck_timeout = stuck_timeout
         self.pivot_hard_stop_distance = pivot_hard_stop_distance
+        self.forward_hazard_cone_rad = forward_hazard_cone_rad
 
     def filter_command(
         self,
         cmd: VelocityCommand,
         nearest_obstacle_m: float,
+        nearest_obstacle_bearing: float = 0.0,
         ground_plane_valid: bool = True,
         seconds_since_progress: float = 0.0,
     ) -> Tuple[VelocityCommand, Optional[str]]:
@@ -657,11 +693,14 @@ class SafetyMonitor:
             Event string is None when no safety condition triggered.
         """
         pivot_only = abs(cmd.vx) < 1e-3 and abs(cmd.vy) < 1e-3 and abs(cmd.vyaw) > 1e-3
+        forward_hazard = abs(nearest_obstacle_bearing) <= self.forward_hazard_cone_rad
+        hard_stop = nearest_obstacle_m <= self.pivot_hard_stop_distance
 
-        # Priority 1: E-STOP. Allow in-place pivots near side clutter so the
-        # robot can turn away from a wall or desk before attempting translation.
+        # Priority 1: E-STOP. Close objects outside the forward cone are handled
+        # by VFH steering unless they are inside the hard-stop distance.
         if (
             nearest_obstacle_m <= self.safety_distance
+            and (hard_stop or forward_hazard)
             and not (pivot_only and nearest_obstacle_m > self.pivot_hard_stop_distance)
         ):
             return VelocityCommand(0.0, 0.0, 0.0), "e_stop:obstacle_too_close"
@@ -675,7 +714,7 @@ class SafetyMonitor:
             return VelocityCommand(0.0, 0.0, 0.0), "stuck:no_progress"
 
         # Priority 5: Speed modulation in avoidance zone
-        if nearest_obstacle_m < self.avoidance_distance:
+        if nearest_obstacle_m < self.avoidance_distance and (hard_stop or forward_hazard):
             ratio = (nearest_obstacle_m - self.safety_distance) / (
                 self.avoidance_distance - self.safety_distance
             )
@@ -771,6 +810,12 @@ class NavCore:
     GOAL_TOLERANCE_M: float = _env_float("NAV_GOAL_TOLERANCE", 0.3)
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 10.0)
     PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.2)
+    FORWARD_HAZARD_CONE_RAD: float = _env_float(
+        "NAV_FORWARD_HAZARD_CONE_RAD",
+        math.radians(35.0),
+    )
+    CLOSE_OBSTACLE_CONFIRM_S: float = _env_float("NAV_CLOSE_OBSTACLE_CONFIRM_S", 0.7)
+    CLOSE_OBSTACLE_CONFIRM_READINGS: int = _env_int("NAV_CLOSE_OBSTACLE_CONFIRM_READINGS", 3)
     FORWARD_SPEED: float = _env_float("NAV_FORWARD_SPEED", 0.45)
     FORWARD_STOP_DISTANCE_M: float = _env_float("NAV_FORWARD_STOP_DISTANCE", 0.50)
     FORWARD_MAX_SECONDS: float = _env_float("NAV_FORWARD_MAX_SECONDS", 15.0)
@@ -826,6 +871,7 @@ class NavCore:
             avoidance_distance=self.AVOIDANCE_DISTANCE_M,
             stuck_timeout=self.STUCK_TIMEOUT_S,
             pivot_hard_stop_distance=self.PIVOT_HARD_STOP_DISTANCE_M,
+            forward_hazard_cone_rad=self.FORWARD_HAZARD_CONE_RAD,
         )
         self._odometry = OdometryProvider()
 
@@ -837,6 +883,9 @@ class NavCore:
         self._last_progress_pose = RobotPose()
         self._last_progress_time = time.monotonic()
         self._obstacle_limited_since: Optional[float] = None
+        self._close_obstacle_first_seen_at: Optional[float] = None
+        self._close_obstacle_count = 0
+        self._close_obstacle_min_distance = float("inf")
 
         # Go2 macros (lazy init)
         self._go2 = None
@@ -1105,6 +1154,7 @@ class NavCore:
             self._goal = None
             self._last_stop_reason = None
             self._global_planner.clear()
+            self._reset_close_obstacle_confirmation()
 
         self._odometry.set_pose(node.x, node.y, heading_rad)
         self._reset_progress_tracker()
@@ -1320,6 +1370,7 @@ class NavCore:
             if self._state == NavState.E_STOP:
                 self._state = NavState.IDLE
                 self._last_stop_reason = None
+                self._reset_close_obstacle_confirmation()
                 logger.info("NavCore: resumed from E-STOP")
 
     # ------------------------------------------------------------------
@@ -1429,6 +1480,7 @@ class NavCore:
         pose = self._odometry.get_pose()
 
         nearest_dist = grid.nearest_obstacle_m if grid else float("inf")
+        nearest_bearing = grid.nearest_obstacle_bearing if grid else 0.0
 
         # 2. Check if goal reached
         dist_to_goal = math.hypot(goal.x - pose.x, goal.y - pose.y)
@@ -1507,11 +1559,18 @@ class NavCore:
         cmd, event = self._safety.filter_command(
             cmd,
             nearest_obstacle_m=nearest_dist,
+            nearest_obstacle_bearing=nearest_bearing,
             seconds_since_progress=seconds_since_progress,
         )
 
         if event:
             if event.startswith("e_stop"):
+                if (
+                    event == "e_stop:obstacle_too_close"
+                    and self._should_defer_close_obstacle_stop(nearest_dist, nearest_bearing)
+                ):
+                    return
+
                 if event == "e_stop:obstacle_too_close":
                     reason = f"E-STOP: obstacle at {nearest_dist:.2f}m"
                 else:
@@ -1549,6 +1608,8 @@ class NavCore:
                 self._stop_depth_when_idle()
                 return
 
+        self._reset_close_obstacle_confirmation()
+
         if self._handle_obstacle_limited_motion(cmd, nearest_dist, goal, dist_to_goal):
             return
 
@@ -1583,6 +1644,53 @@ class NavCore:
 
         # 7. Update progress tracker
         self._update_progress(pose)
+
+    def _should_defer_close_obstacle_stop(
+        self,
+        nearest_dist: float,
+        nearest_bearing: float,
+    ) -> bool:
+        """Hold briefly on borderline close obstacles to reject transient frames."""
+        if (
+            nearest_dist <= self.PIVOT_HARD_STOP_DISTANCE_M
+            or abs(nearest_bearing) > self.FORWARD_HAZARD_CONE_RAD
+        ):
+            self._reset_close_obstacle_confirmation()
+            return False
+
+        now = time.monotonic()
+        if self._close_obstacle_first_seen_at is None:
+            self._close_obstacle_first_seen_at = now
+            self._close_obstacle_count = 0
+            self._close_obstacle_min_distance = float("inf")
+            logger.info(
+                "NavCore: holding to confirm close obstacle at %.2fm before E-STOP",
+                nearest_dist,
+            )
+
+        self._close_obstacle_count += 1
+        self._close_obstacle_min_distance = min(
+            self._close_obstacle_min_distance,
+            nearest_dist,
+        )
+
+        confirmed_long_enough = (
+            now - self._close_obstacle_first_seen_at >= self.CLOSE_OBSTACLE_CONFIRM_S
+        )
+        confirmed_readings = self._close_obstacle_count >= self.CLOSE_OBSTACLE_CONFIRM_READINGS
+        if confirmed_long_enough and confirmed_readings:
+            return False
+
+        self._ensure_go2()
+        if self._go2 and getattr(self._go2, "available", False):
+            self._go2.stop_move()
+        return True
+
+    def _reset_close_obstacle_confirmation(self) -> None:
+        """Clear transient close-obstacle confirmation state."""
+        self._close_obstacle_first_seen_at = None
+        self._close_obstacle_count = 0
+        self._close_obstacle_min_distance = float("inf")
 
     def _handle_obstacle_limited_motion(
         self,
@@ -1639,6 +1747,7 @@ class NavCore:
         self._last_progress_pose = self._odometry.get_pose()
         self._last_progress_time = time.monotonic()
         self._obstacle_limited_since = None
+        self._reset_close_obstacle_confirmation()
 
     def _update_progress(self, current_pose: RobotPose):
         """Update progress tracker if robot has moved more than 0.1m since last check."""
