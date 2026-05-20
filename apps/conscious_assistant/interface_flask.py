@@ -280,6 +280,18 @@ os.environ.setdefault("VISION_LATEST_IMAGE_PATH", str(scene_observer.latest_imag
 os.environ.setdefault("VISION_LATEST_IMAGE_MAX_AGE_SECONDS", "0")
 
 
+@app.before_request
+def log_request_start():
+    """Log incoming requests before route handlers can block."""
+    logging.info("HTTP request started: %s %s", request.method, request.path)
+
+
+@app.route("/api/health")
+def health():
+    """Lightweight readiness probe for browser/server connectivity checks."""
+    return jsonify({"ok": True})
+
+
 def emit_observation_update(observation=None, sid=None):
     """Send the latest observation image and caption data to clients."""
     payload = observation or scene_observer.latest_observation()
@@ -755,16 +767,18 @@ def conscious_thinking_process():
 def on_connect():
     """Start background task on connect."""
     global thread_started, thinking_task  # pylint: disable=global-statement
-    emit_observation_update(sid=request.sid)
+    logging.info("Socket client connected: %s", request.sid)
     if not thread_started:
         thread_started = True
         # let socketio manage the green-thread
         thinking_task = socketio.start_background_task(conscious_thinking_process)
+    socketio.start_background_task(emit_observation_update, sid=request.sid)
 
 
 @app.route("/")
 def index():
     """Return the html."""
+    logging.info("Serving conscious assistant UI")
     return render_template("index.html")
 
 
