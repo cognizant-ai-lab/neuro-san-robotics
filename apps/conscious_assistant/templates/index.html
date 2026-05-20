@@ -79,10 +79,6 @@
         const MAX_OBSERVATION_HISTORY = 20;
         const MAX_CHAT_HISTORY = 120;
         const MAX_THOUGHT_HISTORY = 120;
-        const PANEL_STORAGE_KEYS = {
-            'assistant-thoughts': 'caile.assistantThoughts.v1',
-            'chat-history': 'caile.chatHistory.v1'
-        };
         var thoughtsInitialized = false;
         var chatHistoryInitialized = false;
         var isRecording = false;
@@ -259,7 +255,6 @@
                     transcribingIndicator.id = 'transcribing-indicator';
                     chatElement.appendChild(transcribingIndicator);
                     chatElement.scrollTop = chatElement.scrollHeight;
-                    persistTextPanel('chat-history');
                     
                     // Send to server for transcription
                     try {
@@ -283,7 +278,6 @@
                         var indicator = document.getElementById('transcribing-indicator');
                         if (indicator) {
                             indicator.remove();
-                            persistTextPanel('chat-history');
                         }
                         
                         if (text) {
@@ -294,7 +288,6 @@
                             chatElement.appendChild(userMessage);
                             pruneEntries(chatElement, '.speech-msg, .user-msg', MAX_CHAT_HISTORY);
                             chatElement.scrollTop = chatElement.scrollHeight;
-                            persistTextPanel('chat-history');
                             
                             document.getElementById('user-input').value = text;
                             console.log('Transcription successful:', text);
@@ -322,7 +315,6 @@
                         var indicator = document.getElementById('transcribing-indicator');
                         if (indicator) {
                             indicator.remove();
-                            persistTextPanel('chat-history');
                         }
                         console.error('Transcription error:', err);
                         alert('Transcription failed: ' + err.message + '\n\nMake sure OPENAI_API_KEY is set on the server.');
@@ -463,44 +455,6 @@
             }
         }
 
-        function persistTextPanel(elementId) {
-            var key = PANEL_STORAGE_KEYS[elementId];
-            var element = document.getElementById(elementId);
-            if (!key || !element || !window.sessionStorage) {
-                return;
-            }
-            try {
-                sessionStorage.setItem(key, element.innerHTML);
-            } catch (err) {
-                console.debug('Could not persist panel history:', err);
-            }
-        }
-
-        function restoreTextPanels() {
-            Object.keys(PANEL_STORAGE_KEYS).forEach(function(elementId) {
-                var key = PANEL_STORAGE_KEYS[elementId];
-                var element = document.getElementById(elementId);
-                if (!element || !window.sessionStorage) {
-                    return;
-                }
-                try {
-                    var savedHtml = sessionStorage.getItem(key);
-                    if (!savedHtml) {
-                        return;
-                    }
-                    element.innerHTML = savedHtml;
-                    if (elementId === 'assistant-thoughts') {
-                        thoughtsInitialized = true;
-                    } else if (elementId === 'chat-history') {
-                        chatHistoryInitialized = true;
-                    }
-                    element.scrollTop = element.scrollHeight;
-                } catch (err) {
-                    console.debug('Could not restore panel history:', err);
-                }
-            });
-        }
-
         function pruneEntries(element, selector, maxEntries) {
             var entries = element.querySelectorAll(selector);
             while (entries.length > maxEntries) {
@@ -535,10 +489,14 @@
             requestAnimationFrame(function() {
                 element.scrollTop = element.scrollHeight;
             });
-            persistTextPanel(elementId);
         }
 
-        restoreTextPanels();
+        try {
+            sessionStorage.removeItem('caile.assistantThoughts.v1');
+            sessionStorage.removeItem('caile.chatHistory.v1');
+        } catch (err) {
+            console.debug('Could not clear previous panel history:', err);
+        }
 
         // Listen for processing state changes from server
         socket.on('processing_started', function(data) {
@@ -674,14 +632,12 @@
                 currentStreamingText += data.chunk;
                 currentStreamingMsg.innerHTML = currentStreamingText.replace(/\n/g, '<br>');
                 element.scrollTop = element.scrollHeight;
-                persistTextPanel('chat-history');
 
                 // Last chunk: remove streaming class
                 if (data.chunk_idx === data.total_chunks - 1) {
                     currentStreamingMsg.classList.remove('streaming');
                     currentStreamingMsg = null;
                     currentStreamingText = '';
-                    persistTextPanel('chat-history');
                 }
             }
         });
