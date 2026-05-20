@@ -637,6 +637,101 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_navigate_to_waits_for_first_depth_grid(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        original_timeout = NavCore.DEPTH_READY_TIMEOUT_S
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            nav._depth_processor.stop()
+
+            nav._topo_map.load_from_dict({
+                "name": "suite21",
+                "nodes": [
+                    {"name": "charging_station", "x": 1.3, "y": 15.7},
+                    {"name": "shrushtis_desk", "x": 5.62, "y": 15.7},
+                ],
+                "edges": [
+                    {"from": "charging_station", "to": "shrushtis_desk", "distance": 4.32},
+                ],
+            })
+            nav._odometry.set_pose(1.3, 15.7, 0.0)
+
+            calls = {"count": 0}
+
+            def get_obstacle_grid():
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    return None
+                return _empty_grid()
+
+            fake_depth = MagicMock()
+            fake_depth.is_available = True
+            fake_depth.get_obstacle_grid.side_effect = get_obstacle_grid
+            nav._depth_processor = fake_depth
+            NavCore.DEPTH_READY_TIMEOUT_S = 0.2
+
+            result = nav.navigate_to("Shrushti's desk")
+
+            self.assertTrue(result)
+            self.assertGreaterEqual(calls["count"], 2)
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            nav.shutdown()
+        finally:
+            NavCore.DEPTH_READY_TIMEOUT_S = original_timeout
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_navigate_to_reports_depth_grid_unavailable_before_moving(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        original_timeout = NavCore.DEPTH_READY_TIMEOUT_S
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            nav._depth_processor.stop()
+
+            nav._topo_map.load_from_dict({
+                "name": "suite21",
+                "nodes": [
+                    {"name": "charging_station", "x": 1.3, "y": 15.7},
+                    {"name": "shrushtis_desk", "x": 5.62, "y": 15.7},
+                ],
+                "edges": [
+                    {"from": "charging_station", "to": "shrushtis_desk", "distance": 4.32},
+                ],
+            })
+            nav._odometry.set_pose(1.3, 15.7, 0.0)
+
+            fake_depth = MagicMock()
+            fake_depth.is_available = True
+            fake_depth.get_obstacle_grid.return_value = None
+            nav._depth_processor = fake_depth
+            NavCore.DEPTH_READY_TIMEOUT_S = 0.0
+
+            result = nav.navigate_to("Shrushti's desk")
+
+            self.assertFalse(result)
+            self.assertEqual(nav.state, NavState.E_STOP)
+            self.assertIn("E-STOP: depth grid unavailable", nav.get_status_summary())
+            fake_go2.stop_move.assert_called()
+            nav.shutdown()
+        finally:
+            NavCore.DEPTH_READY_TIMEOUT_S = original_timeout
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_guarded_forward_moves_until_center_depth_threshold(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True

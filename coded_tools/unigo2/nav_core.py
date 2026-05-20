@@ -733,6 +733,7 @@ class NavCore:
     FORWARD_MIN_SECONDS: float = _env_float("NAV_FORWARD_MIN_SECONDS", 0.50)
     FORWARD_COMMAND_PERIOD_S: float = _env_float("NAV_FORWARD_COMMAND_PERIOD", 0.20)
     FORWARD_ACTUAL_SPEED_RATIO: float = _env_float("NAV_FORWARD_ACTUAL_SPEED_RATIO", 1.40)
+    DEPTH_READY_TIMEOUT_S: float = _env_float("NAV_DEPTH_READY_TIMEOUT", 2.0)
     ODOMETRY_LINEAR_SPEED_RATIO: float = _env_float(
         "NAV_ODOMETRY_LINEAR_SPEED_RATIO",
         0.70,
@@ -844,6 +845,19 @@ class NavCore:
         if path is None:
             return False
 
+        if not self._wait_for_depth_grid(self.DEPTH_READY_TIMEOUT_S):
+            reason = "E-STOP: depth grid unavailable"
+            self._ensure_go2()
+            if self._go2 and getattr(self._go2, "available", False):
+                self._go2.stop_move()
+            with self._state_lock:
+                self._state = NavState.E_STOP
+                self._goal = None
+                self._last_stop_reason = reason
+                self._global_planner.clear()
+            logger.warning("NavCore: %s before navigating to '%s'", reason, destination)
+            return False
+
         with self._state_lock:
             self._goal = NavGoal(
                 goal_type="semantic",
@@ -858,6 +872,19 @@ class NavCore:
         self._ensure_running()
         logger.info("NavCore: navigating to '%s' via %d waypoints", destination, len(path))
         return True
+
+    def _wait_for_depth_grid(self, timeout_s: float) -> bool:
+        """Wait briefly for the depth capture thread to publish its first grid."""
+        if not self._depth_processor.is_available:
+            return False
+
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            if self._depth_processor.get_obstacle_grid() is not None:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
 
     def set_location(self, location: str, heading_rad: float = 0.0) -> bool:
         """Anchor the dead-reckoned pose to a known map node after manual relocation."""

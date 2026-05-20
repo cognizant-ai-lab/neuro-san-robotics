@@ -56,7 +56,7 @@ class NavPlannerTool(CodedTool):
         Returns:
             Human-readable status string for the conscious agent.
         """
-        from coded_tools.unigo2.nav_core import NavCore
+        from coded_tools.unigo2.nav_core import NavCore, NavState
 
         command = args.get("command", "").lower().strip()
         if not command:
@@ -73,7 +73,15 @@ class NavPlannerTool(CodedTool):
                 return "Please specify a destination. " + nav.list_destinations()
             success = nav.navigate_to(target)
             if success:
-                return f"Navigating to '{target}'. I'll let you know when I arrive."
+                await asyncio.sleep(0.35)
+                status = nav.get_status_summary()
+                if nav.state in {NavState.E_STOP, NavState.STUCK}:
+                    return f"I could not start navigating to '{target}'. {status}"
+                return f"Navigating to '{target}'. {status}"
+
+            status = nav.get_status_summary()
+            if nav.state == NavState.E_STOP:
+                return f"I could not start navigating to '{target}'. {status}"
             return f"Cannot navigate to '{target}'. " + nav.list_destinations()
 
         elif command in {"set_location", "reset_location", "localize"}:
