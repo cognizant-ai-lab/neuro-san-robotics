@@ -27,6 +27,115 @@ on its power button.
 You can now navigate to https://10.194.17.130:5001 (check the IP address)
 to interact with CAIL-E.
 
+### Robot environment (`setmyenv.sh`)
+
+Use this as the robot-side `setmyenv.sh`. Keep secrets such as
+`OPENAI_API_KEY` outside this tracked file, for example in an untracked local
+shell file or as a manual export.
+
+```shell
+source venv/bin/activate
+
+export PYTHONPATH="$HOME/librealsense-2.54.2/build/Release:$PWD:$PWD/coded_tools:${PYTHONPATH:-}"
+export AGENT_TOOL_PATH="$PWD/coded_tools"
+export AGENT_MANIFEST_FILE="$PWD/registries/manifest.hocon"
+
+export CONSCIOUS_DIRECT_ROBOT_COMMANDS=1
+export CONSCIOUS_ROBOT_MOTION_PROBABILITY=0
+export CONSCIOUS_ENABLE_IDLE_THINKING=0
+export CONSCIOUS_ENABLE_SCENE_AGENT_INPUT=0
+export CONSCIOUS_ENABLE_SCENE_OBSERVER=1
+export GO2_USE_SDK_SPECIAL_MOTIONS=1
+export VISION_CAMERA_SOURCE=unitree:eth0
+
+export GO2_NETWORK_INTERFACE=eth0
+export CYCLONEDDS_NETWORK_INTERFACE=eth0
+export CYCLONEDDS_HOME="$PWD/cyclonedds/install"
+export CYCLONEDDS_URI="file://$HOME/cyclonedds.xml"
+
+export LD_LIBRARY_PATH="$PWD/cyclonedds/install/lib:$HOME/librealsense-2.54.2/build:${LD_LIBRARY_PATH:-}"
+
+export NAV_DEPTH_CAMERA_SOURCE=realsense
+export NAV_MAP_FILE="$PWD/maps/cail_lab.json"
+export NAV_MAX_LINEAR_SPEED=0.40
+export NAV_MAX_YAW_RATE=0.08
+export NAV_SAFETY_DISTANCE=0.20
+export NAV_AVOIDANCE_DISTANCE=0.60
+export NAV_PIVOT_HARD_STOP_DISTANCE=0.00
+export NAV_CLOSE_OBSTACLE_CONFIRM_S=0.7
+export NAV_CLOSE_OBSTACLE_CONFIRM_READINGS=6
+export NAV_GOAL_TOLERANCE=0.15
+export NAV_PATH_CORRIDOR_HALF_WIDTH=0.12
+export NAV_PATH_OBSTACLE_MIN_POINTS=6
+
+printf 'PYTHONPATH=%s\n' "$PYTHONPATH"
+printf 'AGENT_TOOL_PATH=%s\n' "$AGENT_TOOL_PATH"
+printf 'AGENT_MANIFEST_FILE=%s\n' "$AGENT_MANIFEST_FILE"
+
+printf 'CONSCIOUS_DIRECT_ROBOT_COMMANDS=%s\n' "$CONSCIOUS_DIRECT_ROBOT_COMMANDS"
+printf 'CONSCIOUS_ROBOT_MOTION_PROBABILITY=%s\n' "$CONSCIOUS_ROBOT_MOTION_PROBABILITY"
+printf 'CONSCIOUS_ENABLE_IDLE_THINKING=%s\n' "$CONSCIOUS_ENABLE_IDLE_THINKING"
+printf 'CONSCIOUS_ENABLE_SCENE_AGENT_INPUT=%s\n' "$CONSCIOUS_ENABLE_SCENE_AGENT_INPUT"
+printf 'CONSCIOUS_ENABLE_SCENE_OBSERVER=%s\n' "$CONSCIOUS_ENABLE_SCENE_OBSERVER"
+printf 'GO2_USE_SDK_SPECIAL_MOTIONS=%s\n' "$GO2_USE_SDK_SPECIAL_MOTIONS"
+printf 'VISION_CAMERA_SOURCE=%s\n' "$VISION_CAMERA_SOURCE"
+
+printf 'GO2_NETWORK_INTERFACE=%s\n' "$GO2_NETWORK_INTERFACE"
+printf 'CYCLONEDDS_NETWORK_INTERFACE=%s\n' "$CYCLONEDDS_NETWORK_INTERFACE"
+printf 'CYCLONEDDS_HOME=%s\n' "$CYCLONEDDS_HOME"
+printf 'CYCLONEDDS_URI=%s\n' "$CYCLONEDDS_URI"
+printf 'LD_LIBRARY_PATH=%s\n' "$LD_LIBRARY_PATH"
+
+printf 'NAV_DEPTH_CAMERA_SOURCE=%s\n' "$NAV_DEPTH_CAMERA_SOURCE"
+printf 'NAV_MAP_FILE=%s\n' "$NAV_MAP_FILE"
+printf 'NAV_MAX_LINEAR_SPEED=%s\n' "$NAV_MAX_LINEAR_SPEED"
+printf 'NAV_MAX_YAW_RATE=%s\n' "$NAV_MAX_YAW_RATE"
+printf 'NAV_SAFETY_DISTANCE=%s\n' "$NAV_SAFETY_DISTANCE"
+printf 'NAV_AVOIDANCE_DISTANCE=%s\n' "$NAV_AVOIDANCE_DISTANCE"
+printf 'NAV_PIVOT_HARD_STOP_DISTANCE=%s\n' "$NAV_PIVOT_HARD_STOP_DISTANCE"
+printf 'NAV_CLOSE_OBSTACLE_CONFIRM_S=%s\n' "$NAV_CLOSE_OBSTACLE_CONFIRM_S"
+printf 'NAV_CLOSE_OBSTACLE_CONFIRM_READINGS=%s\n' "$NAV_CLOSE_OBSTACLE_CONFIRM_READINGS"
+printf 'NAV_GOAL_TOLERANCE=%s\n' "$NAV_GOAL_TOLERANCE"
+printf 'NAV_PATH_CORRIDOR_HALF_WIDTH=%s\n' "$NAV_PATH_CORRIDOR_HALF_WIDTH"
+printf 'NAV_PATH_OBSTACLE_MIN_POINTS=%s\n' "$NAV_PATH_OBSTACLE_MIN_POINTS"
+```
+
+The final `printf` block is intentional: after `source setmyenv.sh`, the shell
+prints the active values with names so it is clear what will override the app
+defaults before Flask starts.
+
+#### Environment variable meanings
+
+| Variable | Value above | Meaning |
+| --- | --- | --- |
+| `PYTHONPATH` | RealSense binding, repo root, and `coded_tools` | Lets Python import the locally built `pyrealsense2`, project modules, and coded tools. |
+| `AGENT_TOOL_PATH` | `$PWD/coded_tools` | Directory where Neuro SAN finds coded tools. |
+| `AGENT_MANIFEST_FILE` | `$PWD/registries/manifest.hocon` | Tool/agent manifest used by the assistant runtime. |
+| `CONSCIOUS_DIRECT_ROBOT_COMMANDS` | `1` | Allows direct robot commands from the conscious assistant path. |
+| `CONSCIOUS_ROBOT_MOTION_PROBABILITY` | `0` | Disables random acknowledgment motions. |
+| `CONSCIOUS_ENABLE_IDLE_THINKING` | `0` | Disables passive idle agent turns. |
+| `CONSCIOUS_ENABLE_SCENE_AGENT_INPUT` | `0` | Prevents scene observations from injecting autonomous agent prompts. |
+| `CONSCIOUS_ENABLE_SCENE_OBSERVER` | `1` | Keeps the camera scene observer enabled. |
+| `GO2_USE_SDK_SPECIAL_MOTIONS` | `1` | Uses SDK-backed Go2 special motions when available. |
+| `VISION_CAMERA_SOURCE` | `unitree:eth0` | Uses the Unitree front camera over `eth0` for visual observation. |
+| `GO2_NETWORK_INTERFACE` | `eth0` | Network interface used for Go2 SDK communication. |
+| `CYCLONEDDS_NETWORK_INTERFACE` | `eth0` | Network interface CycloneDDS should bind to. |
+| `CYCLONEDDS_HOME` | `$PWD/cyclonedds/install` | Local CycloneDDS install path. |
+| `CYCLONEDDS_URI` | `file://$HOME/cyclonedds.xml` | CycloneDDS configuration file. |
+| `LD_LIBRARY_PATH` | CycloneDDS and librealsense libs | Lets the runtime loader find DDS and RealSense shared libraries. |
+| `NAV_DEPTH_CAMERA_SOURCE` | `realsense` | Uses RealSense depth for navigation safety. |
+| `NAV_MAP_FILE` | `$PWD/maps/cail_lab.json` | Topological map for named destinations. |
+| `NAV_MAX_LINEAR_SPEED` | `0.40` | Maximum planned forward speed in meters per second. |
+| `NAV_MAX_YAW_RATE` | `0.08` | Maximum planned yaw rate in radians per second. |
+| `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed safety stop threshold: path obstacles at or below 0.20 m are treated as stop conditions. |
+| `NAV_AVOIDANCE_DISTANCE` | `0.60` | Slowdown begins when a supported path obstacle is closer than 0.60 m. |
+| `NAV_PIVOT_HARD_STOP_DISTANCE` | `0.00` | Keeps the hard-stop bypass below the safety threshold so close path obstacles use the confirmation window. During confirmation, motion is still stopped. |
+| `NAV_CLOSE_OBSTACLE_CONFIRM_S` | `0.7` | A borderline close path obstacle must persist for at least 0.7 seconds before the action is aborted. |
+| `NAV_CLOSE_OBSTACLE_CONFIRM_READINGS` | `6` | The same close path obstacle must also persist for at least 6 nav-loop readings before aborting. |
+| `NAV_GOAL_TOLERANCE` | `0.15` | Destination is considered reached within 0.15 m. |
+| `NAV_PATH_CORRIDOR_HALF_WIDTH` | `0.12` | Only depth points within 0.12 m left/right of the robot centerline count as path-corridor obstacles. |
+| `NAV_PATH_OBSTACLE_MIN_POINTS` | `6` | Requires at least 6 supporting depth points before a path-corridor obstacle is considered real. |
+
 ## Setup
 
 ### Clone the repo
