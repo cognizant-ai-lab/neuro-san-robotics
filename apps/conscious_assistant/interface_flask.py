@@ -668,6 +668,11 @@ def conscious_thinking_process():
                 is_interactive_turn = True
                 thoughts = f"\n{timestamp} user: " + user_input
                 socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
+                socketio.emit(
+                    "update_thoughts",
+                    {"data": f"{timestamp} command received: {user_input}"},
+                    namespace="/chat",
+                )
                 processing_started = True
 
                 # Speak acknowledgment immediately to fill the gap
