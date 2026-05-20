@@ -36,6 +36,7 @@ class NavPlannerTool(CodedTool):
 
     Supported commands:
     - navigate_to: Go to a named location on the topological map
+    - set_location: Anchor the internal nav pose to a known map location
     - move_forward: Move forward with depth watchdog protection
     - move_until_obstacle: Move forward until an obstacle is near
     - turn: Rotate by a specified angle in degrees
@@ -47,8 +48,9 @@ class NavPlannerTool(CodedTool):
         """Dispatch a navigation command to NavCore.
 
         Args:
-            args: Must contain 'command'. Optional: 'target' (destination/direction),
-                  'distance' (meters or degrees depending on command).
+            args: Must contain 'command'. Optional: 'target' (destination, location,
+                  or direction), 'distance' (meters or degrees depending on command),
+                  and 'heading_degrees' for set_location.
             sly_data: Neuro SAN inter-agent context (unused by this tool).
 
         Returns:
@@ -58,7 +60,10 @@ class NavPlannerTool(CodedTool):
 
         command = args.get("command", "").lower().strip()
         if not command:
-            return "Please specify a navigation command: navigate_to, move_forward, turn, stop, or status."
+            return (
+                "Please specify a navigation command: navigate_to, set_location, "
+                "move_forward, turn, stop, or status."
+            )
 
         nav = NavCore.get_instance()
 
@@ -70,6 +75,17 @@ class NavPlannerTool(CodedTool):
             if success:
                 return f"Navigating to '{target}'. I'll let you know when I arrive."
             return f"Cannot navigate to '{target}'. " + nav.list_destinations()
+
+        elif command in {"set_location", "reset_location", "localize"}:
+            target = args.get("target", "").strip()
+            if not target:
+                return "Please specify the current location. " + nav.list_destinations()
+
+            heading_degrees = float(args.get("heading_degrees") or 0.0)
+            success = nav.set_location(target, heading_rad=math.radians(heading_degrees))
+            if success:
+                return f"Location set to '{target}'."
+            return f"Cannot set location to '{target}'. " + nav.list_destinations()
 
         elif command == "move_forward":
             distance = float(args.get("distance", 1.0))
@@ -111,4 +127,7 @@ class NavPlannerTool(CodedTool):
         elif command == "status":
             return nav.get_status_summary()
 
-        return f"Unknown navigation command: '{command}'. Use: navigate_to, move_forward, turn, stop, or status."
+        return (
+            f"Unknown navigation command: '{command}'. Use: navigate_to, "
+            "set_location, move_forward, turn, stop, or status."
+        )

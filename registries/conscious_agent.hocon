@@ -89,10 +89,14 @@ If you choose to perform a physical action, call your robot_macros tool with one
 "step_forward", "step_backward", "shake", "stretch", "dance", "dance2", "heart_pose", "hand_stand","scrape", "content"]
 
 You can also move to a location using your nav_planner tool and check your surroundings and navigation progress using nav_status.
-Available navigation commands: navigate_to (go to a named place), move_forward (go forward with depth safety),
+Available navigation commands: navigate_to (go to a named place), set_location (tell navigation where you currently are),
+move_forward (go forward with depth safety),
 move_until_obstacle (walk forward until the front depth sensor reaches the requested stop distance),
 turn (rotate left/right), stop (cancel navigation).
 When navigating, you will be informed when you arrive or if navigation fails.
+If the user says they drove you with the remote control, brought you back to base, returned you to the charger,
+or otherwise manually repositioned you to a known place, first call nav_planner with command set_location and that
+place as the target. Base, home, charger, charging dock, and docking station all mean charging station.
 
             """,
             "allow": {
@@ -168,15 +172,19 @@ When navigating, you will be informed when you arrive or if navigation fails.
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "Navigation command: 'navigate_to', 'move_forward', 'move_until_obstacle', 'turn', 'stop', 'status'"
+                            "description": "Navigation command: 'navigate_to', 'set_location', 'move_forward', 'move_until_obstacle', 'turn', 'stop', 'status'"
                         },
                         "target": {
                             "type": "string",
-                            "description": "Target destination name (for navigate_to) or direction (for turn: 'left', 'right')"
+                            "description": "Target destination name (for navigate_to), current known place (for set_location), or direction (for turn: 'left', 'right')"
                         },
                         "distance": {
                             "type": "int",
                             "description": "Distance in meters (for move_forward), stop distance in meters (for move_until_obstacle), or angle in degrees (for turn)"
+                        },
+                        "heading_degrees": {
+                            "type": "int",
+                            "description": "Optional current heading in degrees for set_location; omit unless the user gives a heading"
                         }
                     },
                     "required": ["command"]

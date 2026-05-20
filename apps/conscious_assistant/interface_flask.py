@@ -839,6 +839,23 @@ def handle_user_input(json, *_):
 cleaned_up = False
 
 
+def shutdown_nav_core_if_initialized():
+    """Stop NavCore resources without importing/creating NavCore during app teardown."""
+    for module_name in ("coded_tools.unigo2.nav_core", "unigo2.nav_core"):
+        nav_module = sys.modules.get(module_name)
+        nav_cls = getattr(nav_module, "NavCore", None) if nav_module else None
+        nav_instance = getattr(nav_cls, "_instance", None) if nav_cls else None
+        if nav_instance is None:
+            continue
+
+        try:
+            nav_instance.shutdown()
+        except Exception:
+            logging.exception("Failed to shut down NavCore")
+        finally:
+            nav_cls._instance = None
+
+
 def cleanup(from_request=False):
     """Tear things down on exit."""
     global cleaned_up  # pylint: disable=global-statement
@@ -861,6 +878,7 @@ def cleanup(from_request=False):
     if threading.current_thread() is not speech_thread:
         speech_thread.join(timeout=3.0)
 
+    shutdown_nav_core_if_initialized()
     scene_observer.cleanup()
     tear_down_conscious_assistant(conscious_session)
 

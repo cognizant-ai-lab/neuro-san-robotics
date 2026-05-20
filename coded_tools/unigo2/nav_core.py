@@ -27,6 +27,7 @@ Architecture:
 See docs/nav_core_design.md for full architecture documentation.
 """
 
+import difflib
 import heapq
 import json
 import math
@@ -122,6 +123,7 @@ class MapNode:
     y: float
     description: str = ""
     tags: List[str] = field(default_factory=list)
+    aliases: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -179,6 +181,7 @@ class TopologicalMap:
                 y=float(node_data.get("y", 0)),
                 description=node_data.get("description", ""),
                 tags=node_data.get("tags", []),
+                aliases=node_data.get("aliases", []),
             )
             self.nodes[name] = node
             self._adjacency.setdefault(name, [])
@@ -216,6 +219,7 @@ class TopologicalMap:
                 {
                     "name": n.name, "x": n.x, "y": n.y,
                     "description": n.description, "tags": n.tags,
+                    "aliases": n.aliases,
                 }
                 for n in self.nodes.values()
             ],
@@ -242,6 +246,11 @@ class TopologicalMap:
         canonical_name = self._node_aliases.get(self._normalize_node_name(name))
         if canonical_name:
             return self.nodes.get(canonical_name)
+
+        canonical_name = self._closest_node_alias(name)
+        if canonical_name:
+            logger.info("TopologicalMap: resolved destination '%s' to '%s'", name, canonical_name)
+            return self.nodes.get(canonical_name)
         return None
 
     def find_nearest_node(self, x: float, y: float) -> Optional[MapNode]:
@@ -259,6 +268,14 @@ class TopologicalMap:
         """Return sorted list of all node names."""
         return sorted(self.nodes.keys())
 
+    def list_destination_labels(self) -> List[str]:
+        """Return sorted human-readable destination labels."""
+        labels = []
+        for node in self.nodes.values():
+            label = node.description.split(",", 1)[0].strip()
+            labels.append(label or node.name.replace("_", " "))
+        return sorted(labels, key=str.lower)
+
     @property
     def is_loaded(self) -> bool:
         """True if the map has at least one node."""
@@ -275,11 +292,33 @@ class TopologicalMap:
             node.name,
             node.name.replace("_", " "),
             node.description.split(",", 1)[0],
+            *node.aliases,
         }
+        if node.name == "charging_station":
+            aliases.update({"base", "home", "charger", "charging dock", "docking station"})
+
         for alias in aliases:
             normalized = self._normalize_node_name(alias)
             if normalized:
                 self._node_aliases.setdefault(normalized, node.name)
+
+    def _closest_node_alias(self, name: str) -> Optional[str]:
+        """Resolve small ASR/spelling mistakes in destination names."""
+        normalized = self._normalize_node_name(name)
+        if not normalized:
+            return None
+
+        best_alias = None
+        best_score = 0.0
+        for alias in self._node_aliases:
+            score = difflib.SequenceMatcher(None, normalized, alias).ratio()
+            if score > best_score:
+                best_alias = alias
+                best_score = score
+
+        if best_alias is not None and best_score >= 0.90:
+            return self._node_aliases[best_alias]
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -635,6 +674,12 @@ class OdometryProvider:
             )
             self._pose.timestamp = time.time()
 
+    def set_pose(self, x: float, y: float, yaw: float = 0.0):
+        """Set the dead-reckoned pose from a known map/location anchor."""
+        with self._lock:
+            self._pose = RobotPose(x=x, y=y, yaw=yaw, timestamp=time.time())
+            self._last_update = time.monotonic()
+
     def get_pose(self) -> RobotPose:
         """Return a copy of the current pose (thread-safe)."""
         with self._lock:
@@ -739,7 +784,8 @@ class NavCore:
         # Load map if configured
         map_file = os.environ.get("NAV_MAP_FILE", "")
         if map_file and Path(map_file).exists():
-            self._topo_map.load_from_file(map_file)
+            if self._topo_map.load_from_file(map_file):
+                self._anchor_initial_pose()
 
         # Status callback (for agent notifications)
         self._on_status_change: Optional[Callable[[str], None]] = None
@@ -753,6 +799,24 @@ class NavCore:
             self._depth_processor.backend,
             "loaded" if self._topo_map.is_loaded else "none",
             self.NAV_LOOP_HZ,
+        )
+
+    def _anchor_initial_pose(self):
+        """Set initial odometry to the configured map start location, if present."""
+        initial_location = os.environ.get("NAV_INITIAL_LOCATION", "charging_station")
+        node = self._topo_map.get_node(initial_location)
+        if node is None:
+            return
+
+        heading_deg = _env_float("NAV_INITIAL_HEADING_DEGREES", 0.0)
+        self._odometry.set_pose(node.x, node.y, math.radians(heading_deg))
+        self._reset_progress_tracker()
+        logger.info(
+            "NavCore: initial pose anchored to '%s' at (%.2f, %.2f), heading %.0f deg",
+            node.name,
+            node.x,
+            node.y,
+            heading_deg,
         )
 
     def _ensure_go2(self):
@@ -791,6 +855,36 @@ class NavCore:
 
         self._ensure_running()
         logger.info("NavCore: navigating to '%s' via %d waypoints", destination, len(path))
+        return True
+
+    def set_location(self, location: str, heading_rad: float = 0.0) -> bool:
+        """Anchor the dead-reckoned pose to a known map node after manual relocation."""
+        if not self._topo_map.is_loaded:
+            logger.warning("NavCore: no map loaded, cannot set location to '%s'", location)
+            return False
+
+        node = self._topo_map.get_node(location)
+        if node is None:
+            logger.warning("NavCore: unknown location anchor '%s'", location)
+            return False
+
+        with self._state_lock:
+            self._state = NavState.IDLE
+            self._goal = None
+            self._global_planner.clear()
+
+        self._odometry.set_pose(node.x, node.y, heading_rad)
+        self._reset_progress_tracker()
+        self._ensure_go2()
+        if self._go2 and getattr(self._go2, "available", False):
+            self._go2.stop_move()
+        logger.info(
+            "NavCore: location anchored to '%s' at (%.2f, %.2f), heading %.0f deg",
+            node.name,
+            node.x,
+            node.y,
+            math.degrees(heading_rad),
+        )
         return True
 
     def move_relative(self, distance: float, angle: float = 0.0) -> bool:
@@ -1022,7 +1116,8 @@ class NavCore:
         if not self._topo_map.is_loaded:
             return "No map loaded. Only relative navigation (move_forward, turn) is available."
         names = self._topo_map.list_destinations()
-        return "Available destinations: " + ", ".join(names)
+        labels = self._topo_map.list_destination_labels()
+        return "Available destinations: " + ", ".join(labels or names)
 
     # ------------------------------------------------------------------
     # Background navigation loop
@@ -1199,7 +1294,17 @@ class NavCore:
 
     def shutdown(self):
         """Stop navigation, join the background thread, and release depth camera."""
-        self.stop()
+        with self._state_lock:
+            self._state = NavState.IDLE
+            self._goal = None
+            self._global_planner.clear()
+
+        if self._go2 and getattr(self._go2, "available", False):
+            try:
+                self._go2.stop_move()
+            except Exception:
+                logger.debug("NavCore: stop_move failed during shutdown", exc_info=True)
+
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)

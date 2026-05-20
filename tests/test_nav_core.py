@@ -337,12 +337,20 @@ class TestTopologicalMap(unittest.TestCase):
                     "y": 0,
                     "description": "Shrushti's desk, red marker 2",
                 },
+                {
+                    "name": "charging_station",
+                    "x": -1,
+                    "y": 0,
+                    "description": "Charging station, red marker 1",
+                },
             ],
             "edges": [],
         })
 
         self.assertEqual(topo.get_node("AI Hall of Fame").name, "ai_hall_of_fame")
         self.assertEqual(topo.get_node("Shrushti's desk").name, "shrushtis_desk")
+        self.assertEqual(topo.get_node("Shushti's desk").name, "shrushtis_desk")
+        self.assertEqual(topo.get_node("base").name, "charging_station")
 
     def test_load_from_file(self):
         import tempfile
@@ -440,6 +448,114 @@ class TestNavCoreStatus(unittest.TestCase):
         finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_set_location_anchors_pose_to_map_node(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._topo_map.load_from_dict({
+                "name": "suite21",
+                "nodes": [
+                    {
+                        "name": "charging_station",
+                        "x": 1.3,
+                        "y": 15.7,
+                        "description": "Charging station, red marker 1",
+                    },
+                    {
+                        "name": "shrushtis_desk",
+                        "x": 5.62,
+                        "y": 15.7,
+                        "description": "Shrushti's desk, red marker 2",
+                    },
+                ],
+                "edges": [
+                    {
+                        "from": "charging_station",
+                        "to": "shrushtis_desk",
+                        "distance": 4.32,
+                    },
+                ],
+            })
+
+            result = nav.set_location("base", heading_rad=0.0)
+
+            self.assertTrue(result)
+            pose = nav._odometry.get_pose()
+            self.assertAlmostEqual(pose.x, 1.3)
+            self.assertAlmostEqual(pose.y, 15.7)
+            path = nav._global_planner.plan_path(pose, "Shrushti's desk")
+            self.assertEqual(
+                [node.name for node in path],
+                ["charging_station", "shrushtis_desk"],
+            )
+            self.assertEqual(nav.state, NavState.IDLE)
+            fake_go2.stop_move.assert_called()
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_map_load_anchors_initial_pose_to_charging_station(self, mock_go2):
+        mock_go2.return_value = MagicMock()
+
+        import json
+        import tempfile
+
+        map_data = {
+            "name": "suite21",
+            "nodes": [
+                {
+                    "name": "charging_station",
+                    "x": 1.3,
+                    "y": 15.7,
+                    "description": "Charging station, red marker 1",
+                },
+                {
+                    "name": "shrushtis_desk",
+                    "x": 5.62,
+                    "y": 15.7,
+                    "description": "Shrushti's desk, red marker 2",
+                },
+            ],
+            "edges": [
+                {
+                    "from": "charging_station",
+                    "to": "shrushtis_desk",
+                    "distance": 4.32,
+                },
+            ],
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(map_data, f)
+            map_path = f.name
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        os.environ["NAV_MAP_FILE"] = map_path
+        try:
+            nav = NavCore.get_instance()
+            pose = nav._odometry.get_pose()
+            self.assertAlmostEqual(pose.x, 1.3)
+            self.assertAlmostEqual(pose.y, 15.7)
+            path = nav._global_planner.plan_path(pose, "Shrushti's desk")
+            self.assertEqual(
+                [node.name for node in path],
+                ["charging_station", "shrushtis_desk"],
+            )
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+            os.environ.pop("NAV_MAP_FILE", None)
+            os.unlink(map_path)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_nav_cycle_scales_dead_reckoning_for_calibrated_motion(self, mock_go2):
