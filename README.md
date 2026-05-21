@@ -112,6 +112,11 @@ specific robot really needs a temporary override.
 | `NAV_PIVOT_HARD_STOP_DISTANCE` | `0.00` | Lets close path obstacles use the confirmation window before aborting. |
 | `NAV_CLOSE_OBSTACLE_CONFIRM_S` | `0.7` | Close path obstacles must persist for at least 0.7 seconds before aborting. |
 | `NAV_CLOSE_OBSTACLE_CONFIRM_READINGS` | `6` | Close path obstacles must also persist for at least 6 nav-loop readings. |
+| `NAV_PATH_OBSTACLE_CONFIRM_S` | `0.3` | Avoidance-band path obstacles must persist briefly before slowing or steering. |
+| `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | `3` | Avoidance-band path obstacles must also appear in at least 3 nav-loop readings. |
+| `NAV_PATH_OBSTACLE_DISTANCE_TOLERANCE` | `0.15` | Consecutive avoidance-band readings within 0.15 m are treated as the same obstacle track. |
+| `NAV_PATH_OBSTACLE_BEARING_TOLERANCE_RAD` | `0.1745` | Consecutive avoidance-band readings within about 10 degrees are treated as the same obstacle track. |
+| `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | `0.15` | Avoidance-band projected obstacles must agree with raw center depth within the slowdown distance plus this margin. |
 | `NAV_GOAL_TOLERANCE` | `0.15` | Destination is considered reached within 0.15 m. |
 | `NAV_PATH_CORRIDOR_HALF_WIDTH` | `0.12` | Only points within 0.12 m left/right of centerline count as path-corridor obstacles. |
 | `NAV_PATH_OBSTACLE_MIN_POINTS` | `6` | Requires at least 6 supporting depth points before a path obstacle is considered real. |

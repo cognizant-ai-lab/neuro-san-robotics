@@ -203,6 +203,9 @@ Both tools are registered in `registries/conscious_agent.hocon`.
 | `NAV_PIVOT_YAW_RATE` | `0.50` | In-place yaw rate for planned turns (rad/s) |
 | `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed stop distance in the path corridor (meters) |
 | `NAV_AVOIDANCE_DISTANCE` | `0.60` | Start slowing down for path-corridor obstacles (meters) |
+| `NAV_PATH_OBSTACLE_CONFIRM_S` | `0.3` | Seconds an avoidance-band path obstacle must persist before affecting planning |
+| `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | `3` | Nav-loop readings an avoidance-band path obstacle must appear in before affecting planning |
+| `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | `0.15` | Raw center-depth agreement margin for avoidance-band path obstacles |
 | `NAV_FORWARD_SPEED` | `0.45` | Continuous guarded forward command speed |
 | `NAV_FORWARD_STOP_DISTANCE` | `0.50` | Center-depth watchdog stop distance |
 | `NAV_FORWARD_MAX_SECONDS` | `15` | Timeout for move_until_obstacle |

@@ -698,6 +698,9 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.PIVOT_HARD_STOP_DISTANCE_M, 0.00)
         self.assertAlmostEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_S, 0.7)
         self.assertEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS, 6)
+        self.assertAlmostEqual(NavCore.PATH_OBSTACLE_CONFIRM_S, 0.3)
+        self.assertEqual(NavCore.PATH_OBSTACLE_CONFIRM_READINGS, 3)
+        self.assertAlmostEqual(NavCore.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M, 0.15)
         self.assertAlmostEqual(NavCore.GOAL_TOLERANCE_M, 0.15)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
@@ -971,6 +974,151 @@ class TestNavCoreStatus(unittest.TestCase):
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_ignores_transient_avoidance_path_obstacle(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.side_effect = [
+                _grid_with_wall_ahead(distance_m=0.55),
+                _empty_grid(),
+            ]
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            fake_go2.move.assert_called()
+            self.assertGreater(fake_go2.move.call_args.kwargs["vx"], 0.0)
+            self.assertIsNone(nav._obstacle_limited_since)
+            self.assertEqual(events, [])
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            self.assertEqual(events, [])
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_requires_persistent_avoidance_path_obstacle_before_crawl(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        original_confirm_s = NavCore.PATH_OBSTACLE_CONFIRM_S
+        original_confirm_readings = NavCore.PATH_OBSTACLE_CONFIRM_READINGS
+        NavCore.PATH_OBSTACLE_CONFIRM_S = 0.0
+        NavCore.PATH_OBSTACLE_CONFIRM_READINGS = 3
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.55)
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(
+                vx=0.10,
+                vy=0.0,
+                vyaw=0.0,
+            )
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+            first_grid = nav._local_planner.compute_velocity.call_args.args[0]
+            self.assertEqual(first_grid.path_obstacle_m, float("inf"))
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+            second_grid = nav._local_planner.compute_velocity.call_args.args[0]
+            self.assertEqual(second_grid.path_obstacle_m, float("inf"))
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+            third_grid = nav._local_planner.compute_velocity.call_args.args[0]
+            self.assertAlmostEqual(third_grid.path_obstacle_m, 0.55)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            nav.shutdown()
+        finally:
+            NavCore.PATH_OBSTACLE_CONFIRM_S = original_confirm_s
+            NavCore.PATH_OBSTACLE_CONFIRM_READINGS = original_confirm_readings
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_rejects_uncorroborated_avoidance_path_obstacle(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        original_confirm_s = NavCore.PATH_OBSTACLE_CONFIRM_S
+        original_confirm_readings = NavCore.PATH_OBSTACLE_CONFIRM_READINGS
+        NavCore.PATH_OBSTACLE_CONFIRM_S = 0.0
+        NavCore.PATH_OBSTACLE_CONFIRM_READINGS = 1
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.55)
+            fake_depth.get_center_depth_reading.return_value = CenterDepthReading(
+                distance_m=2.0,
+                coverage=0.5,
+            )
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+                nav._obstacle_limited_since = time.monotonic() - 1.0
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            fake_go2.move.assert_called()
+            self.assertGreater(fake_go2.move.call_args.kwargs["vx"], 0.0)
+            self.assertIsNone(nav._obstacle_limited_since)
+            self.assertEqual(events, [])
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore.PATH_OBSTACLE_CONFIRM_S = original_confirm_s
+            NavCore.PATH_OBSTACLE_CONFIRM_READINGS = original_confirm_readings
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
@@ -1330,6 +1478,10 @@ class TestNavCoreStatus(unittest.TestCase):
         fake_go2.available = True
         mock_go2.return_value = fake_go2
 
+        original_confirm_s = NavCore.PATH_OBSTACLE_CONFIRM_S
+        original_confirm_readings = NavCore.PATH_OBSTACLE_CONFIRM_READINGS
+        NavCore.PATH_OBSTACLE_CONFIRM_S = 0.0
+        NavCore.PATH_OBSTACLE_CONFIRM_READINGS = 1
         NavCore._instance = None
         os.environ["NAV_SIMULATION_MODE"] = "1"
         events = []
@@ -1376,6 +1528,8 @@ class TestNavCoreStatus(unittest.TestCase):
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
+            NavCore.PATH_OBSTACLE_CONFIRM_S = original_confirm_s
+            NavCore.PATH_OBSTACLE_CONFIRM_READINGS = original_confirm_readings
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 

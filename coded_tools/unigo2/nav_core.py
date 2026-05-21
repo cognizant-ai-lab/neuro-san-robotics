@@ -36,7 +36,7 @@ import os
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -1156,6 +1156,20 @@ class NavCore:
     )
     CLOSE_OBSTACLE_CONFIRM_S: float = _env_float("NAV_CLOSE_OBSTACLE_CONFIRM_S", 0.7)
     CLOSE_OBSTACLE_CONFIRM_READINGS: int = _env_int("NAV_CLOSE_OBSTACLE_CONFIRM_READINGS", 6)
+    PATH_OBSTACLE_CONFIRM_S: float = _env_float("NAV_PATH_OBSTACLE_CONFIRM_S", 0.3)
+    PATH_OBSTACLE_CONFIRM_READINGS: int = _env_int("NAV_PATH_OBSTACLE_CONFIRM_READINGS", 3)
+    PATH_OBSTACLE_DISTANCE_TOLERANCE_M: float = _env_float(
+        "NAV_PATH_OBSTACLE_DISTANCE_TOLERANCE",
+        0.15,
+    )
+    PATH_OBSTACLE_BEARING_TOLERANCE_RAD: float = _env_float(
+        "NAV_PATH_OBSTACLE_BEARING_TOLERANCE_RAD",
+        math.radians(10.0),
+    )
+    PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M: float = _env_float(
+        "NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN",
+        0.15,
+    )
     FORWARD_SPEED: float = _env_float("NAV_FORWARD_SPEED", 0.45)
     FORWARD_STOP_DISTANCE_M: float = _env_float("NAV_FORWARD_STOP_DISTANCE", 0.50)
     FORWARD_MAX_SECONDS: float = _env_float("NAV_FORWARD_MAX_SECONDS", 15.0)
@@ -1231,6 +1245,10 @@ class NavCore:
         self._close_obstacle_first_seen_at: Optional[float] = None
         self._close_obstacle_count = 0
         self._close_obstacle_min_distance = float("inf")
+        self._path_obstacle_first_seen_at: Optional[float] = None
+        self._path_obstacle_count = 0
+        self._path_obstacle_distance = float("inf")
+        self._path_obstacle_bearing = 0.0
 
         # Go2 macros (lazy init)
         self._go2 = None
@@ -1346,6 +1364,7 @@ class NavCore:
             self._global_planner.clear()
             self._obstacle_limited_since = None
             self._reset_close_obstacle_confirmation()
+            self._reset_path_obstacle_confirmation()
 
         logger.warning("NavCore: %s", reason)
         self._notify_status_change(message)
@@ -1516,6 +1535,7 @@ class NavCore:
             self._last_stop_reason = None
             self._global_planner.clear()
             self._reset_close_obstacle_confirmation()
+            self._reset_path_obstacle_confirmation()
 
         self._odometry.set_pose(node.x, node.y, heading_rad)
         self._reset_progress_tracker()
@@ -1718,6 +1738,8 @@ class NavCore:
             self._goal = None
             self._last_stop_reason = None
             self._global_planner.clear()
+            self._reset_close_obstacle_confirmation()
+            self._reset_path_obstacle_confirmation()
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
             self._go2.stop_move()
@@ -1732,6 +1754,7 @@ class NavCore:
                 self._state = NavState.IDLE
                 self._last_stop_reason = None
                 self._reset_close_obstacle_confirmation()
+                self._reset_path_obstacle_confirmation()
                 logger.info("NavCore: resumed from E-STOP")
 
     # ------------------------------------------------------------------
@@ -1850,7 +1873,8 @@ class NavCore:
             return
 
         # 1. Read sensors
-        grid = self._depth_processor.get_obstacle_grid()
+        raw_grid = self._depth_processor.get_obstacle_grid()
+        grid = self._filter_transient_path_obstacle(raw_grid)
         pose = self._odometry.get_pose()
         self._update_progress(pose)
 
@@ -1868,6 +1892,8 @@ class NavCore:
                 self._goal = None
                 self._last_stop_reason = None
                 self._global_planner.clear()
+                self._reset_close_obstacle_confirmation()
+                self._reset_path_obstacle_confirmation()
             logger.info("NavCore: goal reached (dist=%.2fm)", dist_to_goal)
             self._stop_depth_when_idle()
             if goal.goal_type == "semantic":
@@ -1885,6 +1911,8 @@ class NavCore:
                         self._goal = None
                         self._last_stop_reason = None
                         self._global_planner.clear()
+                        self._reset_close_obstacle_confirmation()
+                        self._reset_path_obstacle_confirmation()
                     self._stop_depth_when_idle()
                     self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
                     return
@@ -2053,6 +2081,127 @@ class NavCore:
         self._close_obstacle_count = 0
         self._close_obstacle_min_distance = float("inf")
 
+    def _filter_transient_path_obstacle(
+        self,
+        grid: Optional[ObstacleGrid],
+    ) -> Optional[ObstacleGrid]:
+        """Require repeat support before avoidance-band path obstacles affect planning."""
+        if grid is None:
+            self._reset_path_obstacle_confirmation()
+            return None
+
+        path_dist = grid.path_obstacle_m
+        path_bearing = grid.path_obstacle_bearing
+        if path_dist >= self.AVOIDANCE_DISTANCE_M:
+            self._reset_path_obstacle_confirmation()
+            return grid
+
+        if path_dist <= self.SAFETY_DISTANCE_M:
+            self._reset_path_obstacle_confirmation()
+            return grid
+
+        if not self._path_obstacle_matches_center_depth(path_dist):
+            self._reset_path_obstacle_confirmation()
+            logger.debug(
+                "NavCore: ignoring path obstacle at %.2fm because center depth is clear",
+                path_dist,
+            )
+            return self._without_path_obstacle(grid)
+
+        now = time.monotonic()
+        if self._is_same_path_obstacle_track(path_dist, path_bearing):
+            self._path_obstacle_count += 1
+            self._path_obstacle_distance = min(
+                self._path_obstacle_distance,
+                path_dist,
+            )
+            self._path_obstacle_bearing = path_bearing
+        else:
+            self._path_obstacle_first_seen_at = now
+            self._path_obstacle_count = 1
+            self._path_obstacle_distance = path_dist
+            self._path_obstacle_bearing = path_bearing
+
+        confirmed_long_enough = (
+            now - self._path_obstacle_first_seen_at >= self.PATH_OBSTACLE_CONFIRM_S
+        )
+        confirmed_readings = (
+            self._path_obstacle_count >= self.PATH_OBSTACLE_CONFIRM_READINGS
+        )
+        if confirmed_long_enough and confirmed_readings:
+            return grid
+
+        logger.debug(
+            "NavCore: ignoring unconfirmed path obstacle at %.2fm "
+            "(%d/%d readings)",
+            path_dist,
+            self._path_obstacle_count,
+            self.PATH_OBSTACLE_CONFIRM_READINGS,
+        )
+        return self._without_path_obstacle(grid)
+
+    def _is_same_path_obstacle_track(self, distance_m: float, bearing_rad: float) -> bool:
+        """Return True when a path-obstacle reading matches the pending track."""
+        if self._path_obstacle_first_seen_at is None:
+            return False
+
+        bearing_delta = abs(
+            math.atan2(
+                math.sin(bearing_rad - self._path_obstacle_bearing),
+                math.cos(bearing_rad - self._path_obstacle_bearing),
+            )
+        )
+        return (
+            abs(distance_m - self._path_obstacle_distance)
+            <= self.PATH_OBSTACLE_DISTANCE_TOLERANCE_M
+            and bearing_delta <= self.PATH_OBSTACLE_BEARING_TOLERANCE_RAD
+        )
+
+    def _path_obstacle_matches_center_depth(self, distance_m: float) -> bool:
+        """Cross-check slowdown-zone projected obstacles against raw center depth."""
+        reader = getattr(self._depth_processor, "get_center_depth_reading", None)
+        if not callable(reader):
+            return True
+
+        max_depth = self.AVOIDANCE_DISTANCE_M + self.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M
+        try:
+            reading = reader(
+                max_depth_m=max_depth,
+                percentile=25.0,
+                min_coverage=0.02,
+            )
+        except TypeError:
+            reading = reader()
+        except Exception:
+            logger.debug("NavCore: center-depth path obstacle check failed", exc_info=True)
+            return True
+
+        if reading is None:
+            return False
+
+        center_dist = getattr(reading, "distance_m", None)
+        if not isinstance(center_dist, (int, float)) or not math.isfinite(center_dist):
+            return True
+
+        return float(center_dist) <= max(max_depth, distance_m)
+
+    @staticmethod
+    def _without_path_obstacle(grid: ObstacleGrid) -> ObstacleGrid:
+        """Return a copy of the grid with the path corridor treated as clear."""
+        return replace(
+            grid,
+            path_obstacle_m=float("inf"),
+            path_obstacle_bearing=0.0,
+            path_obstacle_points=0,
+        )
+
+    def _reset_path_obstacle_confirmation(self) -> None:
+        """Clear transient avoidance-band path-obstacle confirmation state."""
+        self._path_obstacle_first_seen_at = None
+        self._path_obstacle_count = 0
+        self._path_obstacle_distance = float("inf")
+        self._path_obstacle_bearing = 0.0
+
     def _handle_obstacle_limited_motion(
         self,
         cmd: VelocityCommand,
@@ -2098,6 +2247,7 @@ class NavCore:
         self._last_progress_time = time.monotonic()
         self._obstacle_limited_since = None
         self._reset_close_obstacle_confirmation()
+        self._reset_path_obstacle_confirmation()
 
     @staticmethod
     def _angular_delta(a: float, b: float) -> float:

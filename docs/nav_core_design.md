@@ -786,6 +786,9 @@ Following existing patterns from `vision_core.py` (`_env_flag()`, `_env_float()`
 | `NAV_LOOP_HZ` | int | `10` | Navigation loop frequency |
 | `NAV_SAFETY_DISTANCE` | float | `0.20` | Confirmed stop distance in the path corridor (meters) |
 | `NAV_AVOIDANCE_DISTANCE` | float | `0.60` | Slowdown start distance for path-corridor obstacles (meters) |
+| `NAV_PATH_OBSTACLE_CONFIRM_S` | float | `0.3` | Seconds an avoidance-band path obstacle must persist before planner/safety use it |
+| `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | int | `3` | Nav-loop readings an avoidance-band path obstacle must persist before planner/safety use it |
+| `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | float | `0.15` | Raw center-depth agreement margin for avoidance-band path obstacles |
 | `NAV_MAX_LINEAR_SPEED` | float | `0.40` | Maximum planned forward speed (m/s) |
 | `NAV_MAX_YAW_RATE` | float | `0.08` | Maximum yaw correction while translating (rad/s) |
 | `NAV_PIVOT_YAW_RATE` | float | `0.50` | In-place yaw rate for planned map turns (rad/s) |
