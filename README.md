@@ -94,7 +94,7 @@ specific robot really needs a temporary override.
 | Setting | Code default | Meaning |
 | --- | --- | --- |
 | `CONSCIOUS_ENABLE_SCENE_OBSERVER` | enabled on Linux | Keeps the latest camera scene available in the UI and face-learning tools. |
-| `CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS` | `0` | Scene changes update the UI but do not wake the agent unless explicitly enabled. |
+| `CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS` | `0` | Scene changes update the UI but do not wake the agent unless explicitly enabled. Legacy names `CONSCIOUS_ENABLE_IDLE_THINKING` and `CONSCIOUS_ENABLE_SCENE_AGENT_INPUT` are also honored if set. |
 | `GO2_MOVE_LOG_INTERVAL_SECONDS` | `-1` | Suppresses repeated raw `Move(vx, vy, vyaw)` logs. |
 | `GO2_DISABLE_FREE_AVOID_ON_INIT` | `1` | Calls `FreeAvoid(false)` after SportClient init so Unitree firmware avoidance does not override app-level navigation. |
 | `GO2_USE_SDK_SPECIAL_MOTIONS` | `1` | Uses Unitree SDK special motions when available. |
@@ -102,10 +102,11 @@ specific robot really needs a temporary override.
 | `NAV_MAX_LINEAR_SPEED` | `0.40` | Maximum planned forward speed in meters per second. |
 | `NAV_MAX_YAW_RATE` | `0.08` | Maximum yaw correction while translating. |
 | `NAV_PIVOT_YAW_RATE` | `0.50` | In-place yaw rate for planned map turns. |
-| `NAV_USE_SDK_ODOMETRY` | enabled outside simulation | Uses Unitree SportModeState as the primary pose source when available. |
+| `NAV_USE_SDK_ODOMETRY` | enabled outside simulation | Uses Unitree SportModeState yaw when available, while fallback command integration tracks map position. |
+| `NAV_USE_SDK_TRANSLATION_ODOMETRY` | `0` | Opt-in only: lets SportModeState translation replace command-integrated map position on robots where SDK translation is known to align with the map. |
 | `NAV_SPORT_MODE_STATE_TOPIC` | `rt/sportmodestate` | DDS topic for measured Unitree sport-mode position and yaw. |
 | `NAV_SDK_ODOMETRY_MAX_AGE` | `0.75` | SDK pose samples older than 0.75 seconds are stale. |
-| `NAV_SDK_ODOMETRY_MIN_DELTA_M` | `0.02` | SDK position must change by at least 0.02 m before it is trusted as moving odometry. |
+| `NAV_SDK_ODOMETRY_MIN_DELTA_M` | `0.02` | SDK position must change by at least 0.02 m before translation odometry is trusted, when `NAV_USE_SDK_TRANSLATION_ODOMETRY=1`. |
 | `NAV_SDK_ODOMETRY_MIN_DELTA_YAW_RAD` | `0.03` | SDK yaw must change by at least 0.03 rad before it is trusted as moving odometry. |
 | `NAV_ODOMETRY_YAW_RATE_RATIO` | `1.00` | Fallback yaw scale used while SDK odometry is stale or unconfirmed. |
 | `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed safety stop threshold inside the path corridor. |

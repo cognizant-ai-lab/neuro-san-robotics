@@ -837,6 +837,10 @@ class SdkSportModeOdometryProvider(OdometryProvider):
         self._sdk_anchor: Optional[Tuple[float, float, float]] = None
         self._map_anchor = RobotPose()
         self._subscriber_error: Optional[str] = None
+        self._use_translation_odometry = _env_flag(
+            "NAV_USE_SDK_TRANSLATION_ODOMETRY",
+            False,
+        )
         self._sdk_translation_confirmed = False
         self._sdk_yaw_confirmed = False
         self._reported_static_fallback = False
@@ -956,7 +960,8 @@ class SdkSportModeOdometryProvider(OdometryProvider):
 
             linear_delta, yaw_delta = self._sdk_pose_delta_from_anchor_locked(sdk_pose)
             if (
-                not self._sdk_translation_confirmed
+                self._use_translation_odometry
+                and not self._sdk_translation_confirmed
                 and linear_delta >= self.MIN_MOTION_DELTA_M
             ):
                 self._sdk_translation_confirmed = True
@@ -1236,7 +1241,6 @@ class NavCore:
         self._state_lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._active_route_start_pose: Optional[RobotPose] = None
 
         # Sub-components
         self._depth_processor = DepthProcessor()
@@ -1369,7 +1373,6 @@ class NavCore:
     def _clear_planner_and_obstacle_state(self) -> None:
         """Clear the active route plus transient local-navigation state."""
         self._global_planner.clear()
-        self._active_route_start_pose = None
         self._reset_close_obstacle_confirmation()
         self._reset_path_obstacle_confirmation()
 
@@ -1387,17 +1390,6 @@ class NavCore:
                 self._go2.stop_move()
             except Exception:
                 logger.debug("NavCore: stop_move failed while aborting navigation", exc_info=True)
-
-        if reason.startswith("Stuck") and self._active_route_start_pose is not None:
-            start = self._active_route_start_pose
-            self._odometry.set_pose(start.x, start.y, start.yaw)
-            logger.info(
-                "NavCore: restored pose to route start after no-progress abort "
-                "(%.2f, %.2f, %.0f deg)",
-                start.x,
-                start.y,
-                math.degrees(start.yaw),
-            )
 
         with self._state_lock:
             self._state = state
@@ -1538,12 +1530,6 @@ class NavCore:
             )
             self._state = NavState.NAVIGATING
             self._last_stop_reason = None
-            self._active_route_start_pose = RobotPose(
-                x=pose.x,
-                y=pose.y,
-                yaw=pose.yaw,
-                timestamp=pose.timestamp,
-            )
             self._reset_progress_tracker()
 
         self._ensure_running()
@@ -1989,6 +1975,11 @@ class NavCore:
             cmd = VelocityCommand(0.0, 0.0, 0.0)
 
         # 4. Safety filter
+        path_dist, path_bearing = self._forward_clearance_for_safety(
+            cmd,
+            path_dist,
+            path_bearing,
+        )
         seconds_since_progress = time.monotonic() - self._last_progress_time
         cmd, event = self._safety.filter_command(
             cmd,
@@ -2033,8 +2024,6 @@ class NavCore:
                 )
                 return
 
-        self._reset_close_obstacle_confirmation()
-
         if (
             dist_to_goal > self.GOAL_TOLERANCE_M
             and abs(cmd.vx) < 1e-3
@@ -2053,6 +2042,8 @@ class NavCore:
         if not self._send_motion_command(cmd, goal):
             return
 
+        self._reset_close_obstacle_confirmation()
+
         # 6. Update odometry (dead-reckoning)
         dt = 1.0 / self.NAV_LOOP_HZ
         odometry_cmd = VelocityCommand(
@@ -2064,6 +2055,54 @@ class NavCore:
 
         # 7. Update progress tracker
         self._update_progress(self._odometry.get_pose())
+
+    def _forward_clearance_for_safety(
+        self,
+        cmd: VelocityCommand,
+        path_dist: float,
+        path_bearing: float,
+    ) -> Tuple[float, float]:
+        """Merge projected path clearance with raw center depth for one safety gate."""
+        if cmd.vx <= 1e-3:
+            return path_dist, path_bearing
+
+        reading, supported = self._read_center_depth(
+            max_depth_m=self.AVOIDANCE_DISTANCE_M,
+            percentile=25.0,
+        )
+        if not supported or reading is None:
+            return path_dist, path_bearing
+
+        center_dist = reading.distance_m
+        if not isinstance(center_dist, (int, float)) or not math.isfinite(center_dist):
+            return path_dist, path_bearing
+        center_dist = float(center_dist)
+
+        if center_dist < path_dist:
+            return center_dist, 0.0
+        return path_dist, path_bearing
+
+    def _read_center_depth(
+        self,
+        max_depth_m: float,
+        percentile: float = 25.0,
+    ) -> Tuple[Optional[CenterDepthReading], bool]:
+        """Read the raw center depth band when the depth backend supports it."""
+        reader = getattr(self._depth_processor, "get_center_depth_reading", None)
+        if not callable(reader):
+            return None, False
+        try:
+            reading = reader(
+                max_depth_m=max_depth_m,
+                percentile=percentile,
+                min_coverage=0.02,
+            )
+        except TypeError:
+            reading = reader()
+        except Exception:
+            logger.debug("NavCore: center-depth read failed", exc_info=True)
+            return None, False
+        return reading, True
 
     def _should_defer_close_obstacle_stop(
         self,
@@ -2141,21 +2180,12 @@ class NavCore:
 
     def _path_obstacle_matches_center_depth(self, distance_m: float) -> bool:
         """Cross-check slowdown-zone projected obstacles against raw center depth."""
-        reader = getattr(self._depth_processor, "get_center_depth_reading", None)
-        if not callable(reader):
-            return True
-
         max_depth = self.AVOIDANCE_DISTANCE_M + self.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M
-        try:
-            reading = reader(
-                max_depth_m=max_depth,
-                percentile=25.0,
-                min_coverage=0.02,
-            )
-        except TypeError:
-            reading = reader()
-        except Exception:
-            logger.debug("NavCore: center-depth path obstacle check failed", exc_info=True)
+        reading, supported = self._read_center_depth(
+            max_depth_m=max_depth,
+            percentile=25.0,
+        )
+        if not supported:
             return True
 
         if reading is None:
