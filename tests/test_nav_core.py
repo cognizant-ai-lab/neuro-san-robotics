@@ -22,7 +22,6 @@ from coded_tools.unigo2.nav_core import (
     NavCore,
     NavGoal,
     NavState,
-    ObstacleConfirmationTracker,
     OdometryProvider,
     RobotPose,
     SafetyMonitor,
@@ -30,6 +29,7 @@ from coded_tools.unigo2.nav_core import (
     TopologicalMap,
     VelocityCommand,
 )
+from coded_tools.unigo2.obstacle_confirmation import ObstacleConfirmationTracker
 
 
 # ---------------------------------------------------------------------------
@@ -199,9 +199,12 @@ class TestObstacleConfirmationTracker(unittest.TestCase):
     def test_confirms_after_required_readings_and_time(self):
         tracker = ObstacleConfirmationTracker(min_seconds=0.5, min_readings=3)
 
-        self.assertFalse(tracker.update(0.4, 0.0, now=10.0).confirmed)
-        self.assertFalse(tracker.update(0.4, 0.0, now=10.2).confirmed)
-        self.assertTrue(tracker.update(0.4, 0.0, now=10.6).confirmed)
+        confirmed, _ = tracker.update(0.4, 0.0, now=10.0)
+        self.assertFalse(confirmed)
+        confirmed, _ = tracker.update(0.4, 0.0, now=10.2)
+        self.assertFalse(confirmed)
+        confirmed, _ = tracker.update(0.4, 0.0, now=10.6)
+        self.assertTrue(confirmed)
 
     def test_resets_when_reading_leaves_track_tolerance(self):
         tracker = ObstacleConfirmationTracker(
@@ -211,12 +214,13 @@ class TestObstacleConfirmationTracker(unittest.TestCase):
             bearing_tolerance_rad=math.radians(5),
         )
 
-        self.assertFalse(tracker.update(0.4, 0.0, now=10.0).confirmed)
-        result = tracker.update(0.7, 0.0, now=10.1)
+        confirmed, _ = tracker.update(0.4, 0.0, now=10.0)
+        self.assertFalse(confirmed)
+        confirmed, started_new_track = tracker.update(0.7, 0.0, now=10.1)
 
-        self.assertTrue(result.started_new_track)
-        self.assertFalse(result.confirmed)
-        self.assertEqual(result.count, 1)
+        self.assertTrue(started_new_track)
+        self.assertFalse(confirmed)
+        self.assertEqual(tracker.count, 1)
 
 
 # ---------------------------------------------------------------------------

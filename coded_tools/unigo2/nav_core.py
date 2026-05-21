@@ -52,6 +52,7 @@ from coded_tools.unigo2.depth_processor import (
     _env_float,
     _env_int,
 )
+from coded_tools.unigo2.obstacle_confirmation import ObstacleConfirmationTracker
 
 logger = logging.getLogger(__name__)
 
@@ -100,87 +101,6 @@ class VelocityCommand:
     vx: float = 0.0
     vy: float = 0.0
     vyaw: float = 0.0
-
-
-@dataclass
-class ObstacleConfirmationResult:
-    """Result of updating a transient obstacle confirmation tracker."""
-    confirmed: bool
-    started_new_track: bool
-    count: int
-
-
-@dataclass
-class ObstacleConfirmationTracker:
-    """Confirm repeated obstacle readings before they affect navigation state."""
-    min_seconds: float
-    min_readings: int
-    distance_tolerance_m: Optional[float] = None
-    bearing_tolerance_rad: Optional[float] = None
-    first_seen_at: Optional[float] = None
-    count: int = 0
-    distance_m: float = float("inf")
-    bearing_rad: float = 0.0
-
-    def update(
-        self,
-        distance_m: float,
-        bearing_rad: float,
-        now: Optional[float] = None,
-    ) -> ObstacleConfirmationResult:
-        """Record one obstacle reading and return whether the track is confirmed."""
-        now = time.monotonic() if now is None else now
-        started_new_track = not self._matches_track(distance_m, bearing_rad)
-
-        if started_new_track:
-            self.first_seen_at = now
-            self.count = 1
-            self.distance_m = distance_m
-            self.bearing_rad = bearing_rad
-        else:
-            self.count += 1
-            self.distance_m = min(self.distance_m, distance_m)
-            self.bearing_rad = bearing_rad
-
-        confirmed_long_enough = (
-            now - self.first_seen_at >= self.min_seconds
-        )
-        confirmed_readings = self.count >= self.min_readings
-        return ObstacleConfirmationResult(
-            confirmed=confirmed_long_enough and confirmed_readings,
-            started_new_track=started_new_track,
-            count=self.count,
-        )
-
-    def reset(self) -> None:
-        """Forget the pending obstacle track."""
-        self.first_seen_at = None
-        self.count = 0
-        self.distance_m = float("inf")
-        self.bearing_rad = 0.0
-
-    def _matches_track(self, distance_m: float, bearing_rad: float) -> bool:
-        """Return True when a reading belongs to the current pending track."""
-        if self.first_seen_at is None:
-            return False
-
-        if (
-            self.distance_tolerance_m is not None
-            and abs(distance_m - self.distance_m) > self.distance_tolerance_m
-        ):
-            return False
-
-        if self.bearing_tolerance_rad is not None:
-            bearing_delta = abs(
-                math.atan2(
-                    math.sin(bearing_rad - self.bearing_rad),
-                    math.cos(bearing_rad - self.bearing_rad),
-                )
-            )
-            if bearing_delta > self.bearing_tolerance_rad:
-                return False
-
-        return True
 
 
 @dataclass
@@ -2126,16 +2046,16 @@ class NavCore:
             self._reset_close_obstacle_confirmation()
             return False
 
-        result = self._close_obstacle_confirmation.update(
+        confirmed, started_new_track = self._close_obstacle_confirmation.update(
             nearest_dist,
             nearest_bearing,
         )
-        if result.started_new_track:
+        if started_new_track:
             logger.info(
                 "NavCore: holding to confirm close obstacle at %.2fm before E-STOP",
                 nearest_dist,
             )
-        if result.confirmed:
+        if confirmed:
             return False
 
         self._ensure_go2()
@@ -2174,15 +2094,15 @@ class NavCore:
             )
             return self._without_path_obstacle(grid)
 
-        result = self._path_obstacle_confirmation.update(path_dist, path_bearing)
-        if result.confirmed:
+        confirmed, _ = self._path_obstacle_confirmation.update(path_dist, path_bearing)
+        if confirmed:
             return grid
 
         logger.debug(
             "NavCore: ignoring unconfirmed path obstacle at %.2fm "
             "(%d/%d readings)",
             path_dist,
-            result.count,
+            self._path_obstacle_confirmation.count,
             self.PATH_OBSTACLE_CONFIRM_READINGS,
         )
         return self._without_path_obstacle(grid)
