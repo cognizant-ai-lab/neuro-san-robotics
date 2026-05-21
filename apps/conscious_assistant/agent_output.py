@@ -5,8 +5,8 @@ from typing import Tuple
 
 
 _AGENT_OUTPUT_BLOCK_PATTERN = re.compile(
-    r"(?m)^(thought|say):[ \t]*(.*?)(?=^\s*(?:thought|say):|\Z)",
-    re.S,
+    r"^\s*(thought|say):[ \t]*(.*?)(?=^\s*(?:thought|say):|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
 )
 
 
@@ -25,7 +25,7 @@ def parse_agent_output_blocks(text: str) -> Tuple[List[str], List[str]]:
         content = raw.lstrip()
         if not content:
             continue
-        if kind == "thought":
+        if kind.lower() == "thought":
             thoughts.append(content)
         else:
             speeches.append(content)

@@ -96,6 +96,7 @@ specific robot really needs a temporary override.
 | `CONSCIOUS_ENABLE_SCENE_OBSERVER` | enabled on Linux | Keeps the latest camera scene available in the UI and face-learning tools. |
 | `CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS` | `0` | Scene changes update the UI but do not wake the agent unless explicitly enabled. |
 | `GO2_MOVE_LOG_INTERVAL_SECONDS` | `-1` | Suppresses repeated raw `Move(vx, vy, vyaw)` logs. |
+| `GO2_DISABLE_FREE_AVOID_ON_INIT` | `1` | Calls `FreeAvoid(false)` after SportClient init so Unitree firmware avoidance does not override app-level navigation. |
 | `GO2_USE_SDK_SPECIAL_MOTIONS` | `1` | Uses Unitree SDK special motions when available. |
 | `NAV_DEPTH_CAMERA_SOURCE` | `auto` | Tries RealSense first, then OpenCV depth sources. |
 | `NAV_MAX_LINEAR_SPEED` | `0.40` | Maximum planned forward speed in meters per second. |

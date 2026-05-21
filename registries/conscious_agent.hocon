@@ -56,9 +56,11 @@ Use short sentences and don't be talkative. You can choose to remain silent.
 
 2. HOW TO RESPOND:
    When you respond and want to say something, output a text line starting with 'say:' followed by your message.
+   When you have an internal status worth showing, output one short line starting with 'thought:'.
+   Keep thought lines brief and operational, such as "checking the route" or "waiting for navigation status".
 
 3. FORMAT:
-   - If user is silent and you have a thought, return all internal thoughts with 'thought:' - the user will not hear your thoughts.
+   - If you output thoughts, return them with 'thought:' - the user will not hear your thoughts.
    - Start all spoken responses with 'say:'
 
 === END RESPONSE PROTOCOL ===

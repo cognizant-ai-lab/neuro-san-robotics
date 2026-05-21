@@ -837,7 +837,8 @@ class SdkSportModeOdometryProvider(OdometryProvider):
         self._sdk_anchor: Optional[Tuple[float, float, float]] = None
         self._map_anchor = RobotPose()
         self._subscriber_error: Optional[str] = None
-        self._sdk_motion_confirmed = False
+        self._sdk_translation_confirmed = False
+        self._sdk_yaw_confirmed = False
         self._reported_static_fallback = False
 
         if start_subscriber:
@@ -847,8 +848,10 @@ class SdkSportModeOdometryProvider(OdometryProvider):
     def source_name(self) -> str:
         """Human-readable pose source name for diagnostics."""
         if self._subscriber is not None:
-            if self._sdk_motion_confirmed:
+            if self._sdk_translation_confirmed:
                 return f"sdk_sportmodestate:{self._topic}"
+            if self._sdk_yaw_confirmed:
+                return f"sdk_sportmodestate_yaw_only:{self._topic}"
             return f"sdk_sportmodestate_pending_motion:{self._topic}"
         if self._subscriber_error:
             return "dead_reckoning_after_sdk_error"
@@ -951,17 +954,25 @@ class SdkSportModeOdometryProvider(OdometryProvider):
                     timestamp=self._pose.timestamp,
                 )
 
+            linear_delta, yaw_delta = self._sdk_pose_delta_from_anchor_locked(sdk_pose)
             if (
-                not self._sdk_motion_confirmed
-                and self._sdk_pose_has_moved_from_anchor_locked(sdk_pose)
+                not self._sdk_translation_confirmed
+                and linear_delta >= self.MIN_MOTION_DELTA_M
             ):
-                self._sdk_motion_confirmed = True
+                self._sdk_translation_confirmed = True
                 logger.info(
-                    "SdkSportModeOdometryProvider: SDK odometry motion confirmed"
+                    "SdkSportModeOdometryProvider: SDK translation odometry confirmed"
                 )
+            if not self._sdk_yaw_confirmed and yaw_delta >= self.MIN_MOTION_DELTA_YAW_RAD:
+                self._sdk_yaw_confirmed = True
+                logger.info("SdkSportModeOdometryProvider: SDK yaw odometry confirmed")
 
-            if self._sdk_motion_confirmed:
+            if self._sdk_translation_confirmed:
                 self._pose = self._aligned_pose_from_sdk_locked(sdk_pose)
+            elif self._sdk_yaw_confirmed:
+                aligned_pose = self._aligned_pose_from_sdk_locked(sdk_pose)
+                self._pose.yaw = aligned_pose.yaw
+                self._pose.timestamp = aligned_pose.timestamp
 
     def _has_fresh_sdk_pose_locked(self) -> bool:
         """True if the last SDK sample is recent enough to trust."""
@@ -969,13 +980,13 @@ class SdkSportModeOdometryProvider(OdometryProvider):
             return False
         return time.monotonic() - self._latest_sdk_pose[3] <= self.MAX_SAMPLE_AGE_S
 
-    def _sdk_pose_has_moved_from_anchor_locked(
+    def _sdk_pose_delta_from_anchor_locked(
         self,
         sdk_pose: Tuple[float, float, float, float],
-    ) -> bool:
-        """True once SDK pose has changed enough to trust for navigation."""
+    ) -> Tuple[float, float]:
+        """Return linear and yaw deltas from the SDK anchor."""
         if self._sdk_anchor is None:
-            return False
+            return 0.0, 0.0
 
         dx = sdk_pose[0] - self._sdk_anchor[0]
         dy = sdk_pose[1] - self._sdk_anchor[1]
@@ -983,10 +994,7 @@ class SdkSportModeOdometryProvider(OdometryProvider):
         yaw_delta = abs(
             self._normalize_angle(sdk_pose[2] - self._sdk_anchor[2])
         )
-        return (
-            linear_delta >= self.MIN_MOTION_DELTA_M
-            or yaw_delta >= self.MIN_MOTION_DELTA_YAW_RAD
-        )
+        return linear_delta, yaw_delta
 
     def _aligned_pose_from_sdk_locked(
         self,
@@ -1018,9 +1026,15 @@ class SdkSportModeOdometryProvider(OdometryProvider):
     def update_from_velocity(self, cmd: VelocityCommand, dt: float):
         """Use proven SDK pose when fresh; otherwise fall back to dead-reckoning."""
         with self._lock:
-            if self._has_fresh_sdk_pose_locked() and self._sdk_motion_confirmed:
-                self._pose = self._aligned_pose_from_sdk_locked(self._latest_sdk_pose)
-                return
+            has_fresh_sdk_pose = self._has_fresh_sdk_pose_locked()
+            if has_fresh_sdk_pose:
+                aligned_pose = self._aligned_pose_from_sdk_locked(self._latest_sdk_pose)
+                if self._sdk_translation_confirmed:
+                    self._pose = aligned_pose
+                    return
+                if self._sdk_yaw_confirmed:
+                    self._pose.yaw = aligned_pose.yaw
+                    self._pose.timestamp = aligned_pose.timestamp
 
             command_active = (
                 abs(cmd.vx) > 1e-3
@@ -1029,19 +1043,20 @@ class SdkSportModeOdometryProvider(OdometryProvider):
             )
             if (
                 command_active
-                and self._has_fresh_sdk_pose_locked()
-                and not self._sdk_motion_confirmed
+                and has_fresh_sdk_pose
+                and not self._sdk_translation_confirmed
                 and not self._reported_static_fallback
             ):
                 self._reported_static_fallback = True
                 logger.info(
-                    "SdkSportModeOdometryProvider: SDK samples are fresh but have "
-                    "not shown motion yet; using command-integrated fallback pose"
+                    "SdkSportModeOdometryProvider: SDK translation is not confirmed; "
+                    "using command-integrated fallback position"
                 )
 
             self._pose.x += cmd.vx * math.cos(self._pose.yaw) * dt
             self._pose.y += cmd.vx * math.sin(self._pose.yaw) * dt
-            self._pose.yaw = self._normalize_angle(self._pose.yaw + cmd.vyaw * dt)
+            if not (has_fresh_sdk_pose and self._sdk_yaw_confirmed):
+                self._pose.yaw = self._normalize_angle(self._pose.yaw + cmd.vyaw * dt)
             self._pose.timestamp = time.time()
 
     def set_pose(self, x: float, y: float, yaw: float = 0.0):
@@ -1056,15 +1071,21 @@ class SdkSportModeOdometryProvider(OdometryProvider):
                 self._sdk_anchor = (sdk_pose[0], sdk_pose[1], sdk_pose[2])
             else:
                 self._sdk_anchor = None
-            self._sdk_motion_confirmed = False
+            self._sdk_translation_confirmed = False
+            self._sdk_yaw_confirmed = False
             self._reported_static_fallback = False
             self._last_update = time.monotonic()
 
     def get_pose(self) -> RobotPose:
         """Return measured pose when fresh, otherwise the fallback pose."""
         with self._lock:
-            if self._has_fresh_sdk_pose_locked() and self._sdk_motion_confirmed:
-                self._pose = self._aligned_pose_from_sdk_locked(self._latest_sdk_pose)
+            if self._has_fresh_sdk_pose_locked():
+                aligned_pose = self._aligned_pose_from_sdk_locked(self._latest_sdk_pose)
+                if self._sdk_translation_confirmed:
+                    self._pose = aligned_pose
+                elif self._sdk_yaw_confirmed:
+                    self._pose.yaw = aligned_pose.yaw
+                    self._pose.timestamp = aligned_pose.timestamp
             return RobotPose(
                 x=self._pose.x,
                 y=self._pose.y,
@@ -1079,7 +1100,8 @@ class SdkSportModeOdometryProvider(OdometryProvider):
             self._map_anchor = RobotPose()
             self._sdk_anchor = None
             self._latest_sdk_pose = None
-            self._sdk_motion_confirmed = False
+            self._sdk_translation_confirmed = False
+            self._sdk_yaw_confirmed = False
             self._reported_static_fallback = False
             self._last_update = time.monotonic()
 
@@ -1178,8 +1200,6 @@ class NavCore:
     FORWARD_COMMAND_PERIOD_S: float = _env_float("NAV_FORWARD_COMMAND_PERIOD", 0.20)
     FORWARD_ACTUAL_SPEED_RATIO: float = _env_float("NAV_FORWARD_ACTUAL_SPEED_RATIO", 1.40)
     DEPTH_READY_TIMEOUT_S: float = _env_float("NAV_DEPTH_READY_TIMEOUT", 2.0)
-    OBSTACLE_LIMITED_TIMEOUT_S: float = _env_float("NAV_OBSTACLE_LIMITED_TIMEOUT", 8.0)
-    OBSTACLE_LIMITED_SPEED_MPS: float = _env_float("NAV_OBSTACLE_LIMITED_SPEED", 0.12)
     YAW_PROGRESS_TOLERANCE_RAD: float = _env_float(
         "NAV_YAW_PROGRESS_TOLERANCE_RAD",
         math.radians(5.0),
@@ -1216,6 +1236,7 @@ class NavCore:
         self._state_lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._active_route_start_pose: Optional[RobotPose] = None
 
         # Sub-components
         self._depth_processor = DepthProcessor()
@@ -1242,7 +1263,6 @@ class NavCore:
         # Progress tracking
         self._last_progress_pose = RobotPose()
         self._last_progress_time = time.monotonic()
-        self._obstacle_limited_since: Optional[float] = None
         self._close_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
             min_readings=self.CLOSE_OBSTACLE_CONFIRM_READINGS,
@@ -1349,7 +1369,7 @@ class NavCore:
     def _clear_planner_and_obstacle_state(self) -> None:
         """Clear the active route plus transient local-navigation state."""
         self._global_planner.clear()
-        self._obstacle_limited_since = None
+        self._active_route_start_pose = None
         self._reset_close_obstacle_confirmation()
         self._reset_path_obstacle_confirmation()
 
@@ -1367,6 +1387,17 @@ class NavCore:
                 self._go2.stop_move()
             except Exception:
                 logger.debug("NavCore: stop_move failed while aborting navigation", exc_info=True)
+
+        if reason.startswith("Stuck") and self._active_route_start_pose is not None:
+            start = self._active_route_start_pose
+            self._odometry.set_pose(start.x, start.y, start.yaw)
+            logger.info(
+                "NavCore: restored pose to route start after no-progress abort "
+                "(%.2f, %.2f, %.0f deg)",
+                start.x,
+                start.y,
+                math.degrees(start.yaw),
+            )
 
         with self._state_lock:
             self._state = state
@@ -1507,6 +1538,12 @@ class NavCore:
             )
             self._state = NavState.NAVIGATING
             self._last_stop_reason = None
+            self._active_route_start_pose = RobotPose(
+                x=pose.x,
+                y=pose.y,
+                yaw=pose.yaw,
+                timestamp=pose.timestamp,
+            )
             self._reset_progress_tracker()
 
         self._ensure_running()
@@ -1998,9 +2035,6 @@ class NavCore:
 
         self._reset_close_obstacle_confirmation()
 
-        if self._handle_obstacle_limited_motion(cmd, path_dist, goal, dist_to_goal):
-            return
-
         if (
             dist_to_goal > self.GOAL_TOLERANCE_M
             and abs(cmd.vx) < 1e-3
@@ -2013,12 +2047,10 @@ class NavCore:
                 f"I did not move toward {self._goal_display_name(goal)} because "
                 "my local planner could not find a safe motion command.",
             )
-            self._obstacle_limited_since = None
             return
 
         # 5. Execute
         if not self._send_motion_command(cmd, goal):
-            self._obstacle_limited_since = None
             return
 
         # 6. Update odometry (dead-reckoning)
@@ -2149,50 +2181,10 @@ class NavCore:
         """Clear transient avoidance-band path-obstacle confirmation state."""
         self._path_obstacle_confirmation.reset()
 
-    def _handle_obstacle_limited_motion(
-        self,
-        cmd: VelocityCommand,
-        nearest_dist: float,
-        goal: NavGoal,
-        dist_to_goal: float,
-    ) -> bool:
-        """Stop when the robot spends too long crawling near an obstacle."""
-        is_motion_blocked = (
-            nearest_dist < self.AVOIDANCE_DISTANCE_M
-            and dist_to_goal > self.GOAL_TOLERANCE_M
-            and (
-                0.0 < cmd.vx <= self.OBSTACLE_LIMITED_SPEED_MPS
-                or (abs(cmd.vx) < 1e-3 and abs(cmd.vyaw) < 1e-3)
-            )
-        )
-
-        if not is_motion_blocked:
-            self._obstacle_limited_since = None
-            return False
-
-        now = time.monotonic()
-        if self._obstacle_limited_since is None:
-            self._obstacle_limited_since = now
-            return False
-
-        if now - self._obstacle_limited_since < self.OBSTACLE_LIMITED_TIMEOUT_S:
-            return False
-
-        reason = f"Blocked: nearby obstacle or wall at {nearest_dist:.2f}m"
-        self._abort_active_navigation(
-            goal,
-            reason,
-            f"I stopped before reaching {self._goal_display_name(goal)} because "
-            f"my depth sensor kept seeing something nearby at {nearest_dist:.2f} meters "
-            "and I was only able to crawl.",
-        )
-        return True
-
     def _reset_progress_tracker(self):
         """Reset the stuck-detection timer to now."""
         self._last_progress_pose = self._odometry.get_pose()
         self._last_progress_time = time.monotonic()
-        self._obstacle_limited_since = None
         self._reset_close_obstacle_confirmation()
         self._reset_path_obstacle_confirmation()
 

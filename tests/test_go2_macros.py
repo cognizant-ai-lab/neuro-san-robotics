@@ -35,6 +35,10 @@ class FakeSportClient:
         self.calls.append(("StopMove",))
         return 0
 
+    def FreeAvoid(self, flag):
+        self.calls.append(("FreeAvoid", flag))
+        return 0
+
     def Dance1(self):
         self.calls.append(("Dance1",))
         return 0
@@ -83,7 +87,20 @@ class Go2MacrosInitializationTests(unittest.TestCase):
         self.assertEqual(len(FakeSportClient.instances), 1)
         self.assertEqual(first.cli.timeout, 10.0)
         self.assertTrue(first.cli.initialized)
+        self.assertIn(("FreeAvoid", False), first.cli.calls)
         self.assertEqual(first._move_log_interval_s, -1.0)
+
+    def test_can_skip_startup_free_avoid_configuration(self):
+        with (
+            patch.dict(go2_macros.os.environ, {"GO2_DISABLE_FREE_AVOID_ON_INIT": "0"}),
+            patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
+            patch.object(go2_macros, "sport_client", FakeSportClientModule),
+        ):
+            bot = go2_macros.Go2Macros()
+
+        self.assertTrue(bot.available)
+        client = FakeSportClient.instances[0]
+        self.assertNotIn(("FreeAvoid", False), client.calls)
 
     def test_channel_init_failure_does_not_build_client_with_none_participant(self):
         channel_init = MagicMock(side_effect=Exception("channel factory init error."))

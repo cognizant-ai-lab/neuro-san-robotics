@@ -698,7 +698,27 @@ class TestOdometryProvider(unittest.TestCase):
 
         pose = odom.get_pose()
         self.assertAlmostEqual(pose.x, 1.0, places=2)
-        self.assertFalse(odom._sdk_motion_confirmed)
+        self.assertFalse(odom._sdk_translation_confirmed)
+
+    def test_yaw_only_sdk_motion_keeps_command_integrated_translation(self):
+        odom = SdkSportModeOdometryProvider(start_subscriber=False)
+        odom.set_pose(0.0, 0.0, 0.0)
+        odom._handle_sample(SimpleNamespace(
+            position=[0.0, 0.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0]),
+        ))
+        odom._handle_sample(SimpleNamespace(
+            position=[0.0, 0.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.1]),
+        ))
+
+        odom.update_from_velocity(VelocityCommand(vx=1.0), dt=1.0)
+
+        pose = odom.get_pose()
+        self.assertFalse(odom._sdk_translation_confirmed)
+        self.assertTrue(odom._sdk_yaw_confirmed)
+        self.assertAlmostEqual(math.hypot(pose.x, pose.y), 1.0, places=2)
+        self.assertAlmostEqual(pose.yaw, 0.1, places=2)
 
     def test_sdk_odometry_falls_back_when_sample_is_stale(self):
         odom = SdkSportModeOdometryProvider(start_subscriber=False)
@@ -1043,7 +1063,6 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertEqual(nav.state, NavState.NAVIGATING)
             fake_go2.move.assert_called()
             self.assertGreater(fake_go2.move.call_args.kwargs["vx"], 0.0)
-            self.assertIsNone(nav._obstacle_limited_since)
             self.assertEqual(events, [])
 
             nav._nav_cycle(NavState.NAVIGATING, goal)
@@ -1139,14 +1158,12 @@ class TestNavCoreStatus(unittest.TestCase):
                 nav._state = NavState.NAVIGATING
                 nav._goal = goal
                 nav._reset_progress_tracker()
-                nav._obstacle_limited_since = time.monotonic() - 1.0
 
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.NAVIGATING)
             fake_go2.move.assert_called()
             self.assertGreater(fake_go2.move.call_args.kwargs["vx"], 0.0)
-            self.assertIsNone(nav._obstacle_limited_since)
             self.assertEqual(events, [])
             nav.shutdown()
         finally:
@@ -1461,6 +1478,36 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_stuck_abort_restores_route_start_pose(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            nav._odometry.set_pose(5.0, 15.7, 0.0)
+            nav._active_route_start_pose = RobotPose(1.3, 15.7, 0.0)
+            goal = NavGoal(goal_type="semantic", x=5.62, y=15.7, label="Shrushti's desk")
+
+            nav._abort_active_navigation(
+                goal,
+                "Stuck: no progress toward the goal",
+                "navigation_status: code=stuck_no_progress",
+            )
+
+            pose = nav._odometry.get_pose()
+            self.assertAlmostEqual(pose.x, 1.3)
+            self.assertAlmostEqual(pose.y, 15.7)
+            self.assertIsNone(nav._active_route_start_pose)
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_nav_cycle_reports_no_safe_motion_command(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
@@ -1507,7 +1554,7 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
-    def test_nav_cycle_reports_sustained_obstacle_limited_crawl(self, mock_go2):
+    def test_nav_cycle_does_not_abort_for_slowdown_band_obstacle(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
         mock_go2.return_value = fake_go2
@@ -1527,8 +1574,6 @@ class TestNavCoreStatus(unittest.TestCase):
         try:
             nav = NavCore.get_instance()
             nav._go2 = fake_go2
-            nav.OBSTACLE_LIMITED_TIMEOUT_S = 0.1
-            nav.OBSTACLE_LIMITED_SPEED_MPS = 0.12
 
             fake_depth = MagicMock()
             fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.55)
@@ -1545,20 +1590,13 @@ class TestNavCoreStatus(unittest.TestCase):
                 nav._state = NavState.NAVIGATING
                 nav._goal = goal
                 nav._reset_progress_tracker()
-                nav._obstacle_limited_since = time.monotonic() - 1.0
 
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
-            self.assertEqual(nav.state, NavState.STUCK)
-            self.assertIn("Blocked: nearby obstacle or wall at 0.55m", nav.get_status_summary())
-            self.assertEqual(
-                events,
-                [
-                    "I stopped before reaching Kitchen because my depth sensor kept "
-                    "seeing something nearby at 0.55 meters and I was only able to crawl."
-                ],
-            )
-            fake_go2.stop_move.assert_called()
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            self.assertEqual(events, [])
+            fake_go2.move.assert_called_once()
+            fake_go2.stop_move.assert_not_called()
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)

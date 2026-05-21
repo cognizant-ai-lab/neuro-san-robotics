@@ -119,6 +119,7 @@ class Go2Macros:
                 self.cli = sport_client.SportClient()
                 self.cli.SetTimeout(10.0)
                 self.cli.Init()
+                self._configure_startup_motion_modes()
                 self.available = True
                 _ROBOT_INIT_STATE.update(
                     {
@@ -146,6 +147,19 @@ class Go2Macros:
                 )
                 self._log(f"❌ Failed to initialize: {e}")
                 traceback.print_exc()
+
+    def _configure_startup_motion_modes(self):
+        """Put SDK locomotion in the mode expected by app-level navigation."""
+        if not self.cli:
+            return
+
+        if _env_flag("GO2_DISABLE_FREE_AVOID_ON_INIT", True):
+            free_avoid = getattr(self.cli, "FreeAvoid", None)
+            if callable(free_avoid):
+                self._call("FreeAvoid", free_avoid, False)
+                self._log("Free avoid disabled on init")
+            else:
+                self._log("Free avoid startup disable skipped: SDK method unavailable")
 
     def _log(self, msg: str):
         print(f"[{time.strftime('%H:%M:%S')}] {msg}")
