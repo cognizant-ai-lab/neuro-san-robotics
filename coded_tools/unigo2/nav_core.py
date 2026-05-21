@@ -1342,6 +1342,13 @@ class NavCore:
             return ", ".join(labels)
         return ", ".join(labels[:4]) + ", and others"
 
+    def _clear_planner_and_obstacle_state(self) -> None:
+        """Clear the active route plus transient local-navigation state."""
+        self._global_planner.clear()
+        self._obstacle_limited_since = None
+        self._reset_close_obstacle_confirmation()
+        self._reset_path_obstacle_confirmation()
+
     def _abort_active_navigation(
         self,
         goal: NavGoal,
@@ -1361,10 +1368,7 @@ class NavCore:
             self._state = state
             self._goal = None
             self._last_stop_reason = reason
-            self._global_planner.clear()
-            self._obstacle_limited_since = None
-            self._reset_close_obstacle_confirmation()
-            self._reset_path_obstacle_confirmation()
+            self._clear_planner_and_obstacle_state()
 
         logger.warning("NavCore: %s", reason)
         self._notify_status_change(message)
@@ -1422,7 +1426,7 @@ class NavCore:
                 self._state = NavState.IDLE
                 self._goal = None
                 self._last_stop_reason = f"Unknown destination: {destination}"
-                self._global_planner.clear()
+                self._clear_planner_and_obstacle_state()
             logger.warning("NavCore: unknown destination '%s'", destination)
             if known_destinations:
                 self._notify_status_change(
@@ -1451,7 +1455,7 @@ class NavCore:
                 self._state = NavState.IDLE
                 self._goal = None
                 self._last_stop_reason = f"Already at {goal_label}"
-                self._global_planner.clear()
+                self._clear_planner_and_obstacle_state()
             logger.info(
                 "NavCore: already at '%s' (dist=%.2fm), no movement needed",
                 goal_label,
@@ -1467,7 +1471,7 @@ class NavCore:
                 self._state = NavState.IDLE
                 self._goal = None
                 self._last_stop_reason = f"No route to {goal_label}"
-                self._global_planner.clear()
+                self._clear_planner_and_obstacle_state()
             self._notify_status_change(
                 f"I did not move because I do not have a mapped route to {goal_label}."
             )
@@ -1482,7 +1486,7 @@ class NavCore:
                 self._state = NavState.E_STOP
                 self._goal = None
                 self._last_stop_reason = reason
-                self._global_planner.clear()
+                self._clear_planner_and_obstacle_state()
             logger.warning("NavCore: %s before navigating to '%s'", reason, destination)
             self._notify_status_change(
                 f"I did not move toward {goal_label} because my depth grid was not available."
@@ -1533,9 +1537,7 @@ class NavCore:
             self._state = NavState.IDLE
             self._goal = None
             self._last_stop_reason = None
-            self._global_planner.clear()
-            self._reset_close_obstacle_confirmation()
-            self._reset_path_obstacle_confirmation()
+            self._clear_planner_and_obstacle_state()
 
         self._odometry.set_pose(node.x, node.y, heading_rad)
         self._reset_progress_tracker()
@@ -1737,9 +1739,7 @@ class NavCore:
             self._state = NavState.IDLE
             self._goal = None
             self._last_stop_reason = None
-            self._global_planner.clear()
-            self._reset_close_obstacle_confirmation()
-            self._reset_path_obstacle_confirmation()
+            self._clear_planner_and_obstacle_state()
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
             self._go2.stop_move()
@@ -1753,8 +1753,7 @@ class NavCore:
             if self._state == NavState.E_STOP:
                 self._state = NavState.IDLE
                 self._last_stop_reason = None
-                self._reset_close_obstacle_confirmation()
-                self._reset_path_obstacle_confirmation()
+                self._clear_planner_and_obstacle_state()
                 logger.info("NavCore: resumed from E-STOP")
 
     # ------------------------------------------------------------------
@@ -1891,9 +1890,7 @@ class NavCore:
                 self._state = NavState.IDLE
                 self._goal = None
                 self._last_stop_reason = None
-                self._global_planner.clear()
-                self._reset_close_obstacle_confirmation()
-                self._reset_path_obstacle_confirmation()
+                self._clear_planner_and_obstacle_state()
             logger.info("NavCore: goal reached (dist=%.2fm)", dist_to_goal)
             self._stop_depth_when_idle()
             if goal.goal_type == "semantic":
@@ -1910,9 +1907,7 @@ class NavCore:
                         self._state = NavState.IDLE
                         self._goal = None
                         self._last_stop_reason = None
-                        self._global_planner.clear()
-                        self._reset_close_obstacle_confirmation()
-                        self._reset_path_obstacle_confirmation()
+                        self._clear_planner_and_obstacle_state()
                     self._stop_depth_when_idle()
                     self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
                     return
@@ -2275,7 +2270,7 @@ class NavCore:
             self._state = NavState.IDLE
             self._goal = None
             self._last_stop_reason = None
-            self._global_planner.clear()
+            self._clear_planner_and_obstacle_state()
 
         if self._go2 and getattr(self._go2, "available", False):
             try:
