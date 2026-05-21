@@ -103,6 +103,87 @@ class VelocityCommand:
 
 
 @dataclass
+class ObstacleConfirmationResult:
+    """Result of updating a transient obstacle confirmation tracker."""
+    confirmed: bool
+    started_new_track: bool
+    count: int
+
+
+@dataclass
+class ObstacleConfirmationTracker:
+    """Confirm repeated obstacle readings before they affect navigation state."""
+    min_seconds: float
+    min_readings: int
+    distance_tolerance_m: Optional[float] = None
+    bearing_tolerance_rad: Optional[float] = None
+    first_seen_at: Optional[float] = None
+    count: int = 0
+    distance_m: float = float("inf")
+    bearing_rad: float = 0.0
+
+    def update(
+        self,
+        distance_m: float,
+        bearing_rad: float,
+        now: Optional[float] = None,
+    ) -> ObstacleConfirmationResult:
+        """Record one obstacle reading and return whether the track is confirmed."""
+        now = time.monotonic() if now is None else now
+        started_new_track = not self._matches_track(distance_m, bearing_rad)
+
+        if started_new_track:
+            self.first_seen_at = now
+            self.count = 1
+            self.distance_m = distance_m
+            self.bearing_rad = bearing_rad
+        else:
+            self.count += 1
+            self.distance_m = min(self.distance_m, distance_m)
+            self.bearing_rad = bearing_rad
+
+        confirmed_long_enough = (
+            now - self.first_seen_at >= self.min_seconds
+        )
+        confirmed_readings = self.count >= self.min_readings
+        return ObstacleConfirmationResult(
+            confirmed=confirmed_long_enough and confirmed_readings,
+            started_new_track=started_new_track,
+            count=self.count,
+        )
+
+    def reset(self) -> None:
+        """Forget the pending obstacle track."""
+        self.first_seen_at = None
+        self.count = 0
+        self.distance_m = float("inf")
+        self.bearing_rad = 0.0
+
+    def _matches_track(self, distance_m: float, bearing_rad: float) -> bool:
+        """Return True when a reading belongs to the current pending track."""
+        if self.first_seen_at is None:
+            return False
+
+        if (
+            self.distance_tolerance_m is not None
+            and abs(distance_m - self.distance_m) > self.distance_tolerance_m
+        ):
+            return False
+
+        if self.bearing_tolerance_rad is not None:
+            bearing_delta = abs(
+                math.atan2(
+                    math.sin(bearing_rad - self.bearing_rad),
+                    math.cos(bearing_rad - self.bearing_rad),
+                )
+            )
+            if bearing_delta > self.bearing_tolerance_rad:
+                return False
+
+        return True
+
+
+@dataclass
 class NavGoal:
     """Navigation goal with type, target position, and optional label.
 
@@ -1242,13 +1323,16 @@ class NavCore:
         self._last_progress_pose = RobotPose()
         self._last_progress_time = time.monotonic()
         self._obstacle_limited_since: Optional[float] = None
-        self._close_obstacle_first_seen_at: Optional[float] = None
-        self._close_obstacle_count = 0
-        self._close_obstacle_min_distance = float("inf")
-        self._path_obstacle_first_seen_at: Optional[float] = None
-        self._path_obstacle_count = 0
-        self._path_obstacle_distance = float("inf")
-        self._path_obstacle_bearing = 0.0
+        self._close_obstacle_confirmation = ObstacleConfirmationTracker(
+            min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
+            min_readings=self.CLOSE_OBSTACLE_CONFIRM_READINGS,
+        )
+        self._path_obstacle_confirmation = ObstacleConfirmationTracker(
+            min_seconds=self.PATH_OBSTACLE_CONFIRM_S,
+            min_readings=self.PATH_OBSTACLE_CONFIRM_READINGS,
+            distance_tolerance_m=self.PATH_OBSTACLE_DISTANCE_TOLERANCE_M,
+            bearing_tolerance_rad=self.PATH_OBSTACLE_BEARING_TOLERANCE_RAD,
+        )
 
         # Go2 macros (lazy init)
         self._go2 = None
@@ -2042,27 +2126,16 @@ class NavCore:
             self._reset_close_obstacle_confirmation()
             return False
 
-        now = time.monotonic()
-        if self._close_obstacle_first_seen_at is None:
-            self._close_obstacle_first_seen_at = now
-            self._close_obstacle_count = 0
-            self._close_obstacle_min_distance = float("inf")
+        result = self._close_obstacle_confirmation.update(
+            nearest_dist,
+            nearest_bearing,
+        )
+        if result.started_new_track:
             logger.info(
                 "NavCore: holding to confirm close obstacle at %.2fm before E-STOP",
                 nearest_dist,
             )
-
-        self._close_obstacle_count += 1
-        self._close_obstacle_min_distance = min(
-            self._close_obstacle_min_distance,
-            nearest_dist,
-        )
-
-        confirmed_long_enough = (
-            now - self._close_obstacle_first_seen_at >= self.CLOSE_OBSTACLE_CONFIRM_S
-        )
-        confirmed_readings = self._close_obstacle_count >= self.CLOSE_OBSTACLE_CONFIRM_READINGS
-        if confirmed_long_enough and confirmed_readings:
+        if result.confirmed:
             return False
 
         self._ensure_go2()
@@ -2072,9 +2145,7 @@ class NavCore:
 
     def _reset_close_obstacle_confirmation(self) -> None:
         """Clear transient close-obstacle confirmation state."""
-        self._close_obstacle_first_seen_at = None
-        self._close_obstacle_count = 0
-        self._close_obstacle_min_distance = float("inf")
+        self._close_obstacle_confirmation.reset()
 
     def _filter_transient_path_obstacle(
         self,
@@ -2103,54 +2174,18 @@ class NavCore:
             )
             return self._without_path_obstacle(grid)
 
-        now = time.monotonic()
-        if self._is_same_path_obstacle_track(path_dist, path_bearing):
-            self._path_obstacle_count += 1
-            self._path_obstacle_distance = min(
-                self._path_obstacle_distance,
-                path_dist,
-            )
-            self._path_obstacle_bearing = path_bearing
-        else:
-            self._path_obstacle_first_seen_at = now
-            self._path_obstacle_count = 1
-            self._path_obstacle_distance = path_dist
-            self._path_obstacle_bearing = path_bearing
-
-        confirmed_long_enough = (
-            now - self._path_obstacle_first_seen_at >= self.PATH_OBSTACLE_CONFIRM_S
-        )
-        confirmed_readings = (
-            self._path_obstacle_count >= self.PATH_OBSTACLE_CONFIRM_READINGS
-        )
-        if confirmed_long_enough and confirmed_readings:
+        result = self._path_obstacle_confirmation.update(path_dist, path_bearing)
+        if result.confirmed:
             return grid
 
         logger.debug(
             "NavCore: ignoring unconfirmed path obstacle at %.2fm "
             "(%d/%d readings)",
             path_dist,
-            self._path_obstacle_count,
+            result.count,
             self.PATH_OBSTACLE_CONFIRM_READINGS,
         )
         return self._without_path_obstacle(grid)
-
-    def _is_same_path_obstacle_track(self, distance_m: float, bearing_rad: float) -> bool:
-        """Return True when a path-obstacle reading matches the pending track."""
-        if self._path_obstacle_first_seen_at is None:
-            return False
-
-        bearing_delta = abs(
-            math.atan2(
-                math.sin(bearing_rad - self._path_obstacle_bearing),
-                math.cos(bearing_rad - self._path_obstacle_bearing),
-            )
-        )
-        return (
-            abs(distance_m - self._path_obstacle_distance)
-            <= self.PATH_OBSTACLE_DISTANCE_TOLERANCE_M
-            and bearing_delta <= self.PATH_OBSTACLE_BEARING_TOLERANCE_RAD
-        )
 
     def _path_obstacle_matches_center_depth(self, distance_m: float) -> bool:
         """Cross-check slowdown-zone projected obstacles against raw center depth."""
@@ -2192,10 +2227,7 @@ class NavCore:
 
     def _reset_path_obstacle_confirmation(self) -> None:
         """Clear transient avoidance-band path-obstacle confirmation state."""
-        self._path_obstacle_first_seen_at = None
-        self._path_obstacle_count = 0
-        self._path_obstacle_distance = float("inf")
-        self._path_obstacle_bearing = 0.0
+        self._path_obstacle_confirmation.reset()
 
     def _handle_obstacle_limited_motion(
         self,
