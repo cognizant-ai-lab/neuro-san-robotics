@@ -3,6 +3,7 @@ import atexit
 import logging
 import os
 import queue
+import random
 import re
 import site
 import sys
@@ -61,14 +62,7 @@ def _should_enable_scene_observer() -> bool:
 
 
 def _should_enable_passive_agent_turns() -> bool:
-    for name in (
-        "CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS",
-        "CONSCIOUS_ENABLE_IDLE_THINKING",
-        "CONSCIOUS_ENABLE_SCENE_AGENT_INPUT",
-    ):
-        if os.environ.get(name) is not None:
-            return _env_flag(name, default=False)
-    return False
+    return _env_flag("CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS", default=True)
 
 
 def _should_enable_vision_runtime_prime() -> bool:
@@ -235,6 +229,21 @@ except ImportError:
         execute_deferred_actions = None
 
 THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
+
+ACKNOWLEDGMENT_PHRASES = [
+    "Got it",
+    "Okay",
+    "On it",
+    "Sure",
+    "Right away",
+    "Coming right up",
+    "Let me check",
+    "One moment",
+    "Give me a second",
+    "Let me think",
+    "Hold on",
+    "Beep boop beep",
+]
 
 os.environ.setdefault("AGENT_MANIFEST_FILE", str(REPO_ROOT / "registries" / "manifest.hocon"))
 os.environ.setdefault("AGENT_TOOL_PATH", str(REPO_ROOT / "coded_tools"))
@@ -598,6 +607,10 @@ def conscious_thinking_process():
                 if is_interactive_turn:
                     socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
                     processing_started = True
+                    if event_source == "user":
+                        acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
+                        logging.info("Speaking acknowledgment: %s", acknowledgment)
+                        enqueue_speech(acknowledgment, emit_to_ui=True)
 
                 logging.info("Proceeding with agent for %s event", event_source)
 
@@ -609,39 +622,34 @@ def conscious_thinking_process():
                 if observation is not None:
                     emit_observation_update(observation)
 
+                if not _should_enable_passive_agent_turns():
+                    continue
+
+                if not user_input_queue.empty():
+                    logging.info("User input arrived during passive observation; prioritizing it")
+                    continue
+
                 scene_signature = observation_signature(observation)
                 if not scene_signature:
                     last_scene_signature = ()
-                    continue
+                    thoughts = f"\n{timestamp} user: [Silence]"
+                    logging.debug("Passive idle thinking turn")
 
-                if scene_signature == last_scene_signature:
+                elif scene_signature == last_scene_signature:
                     logging.debug(
                         "Scene observer saw unchanged entities; skipping agent turn: %s",
                         ", ".join(scene_signature),
                     )
-                    continue
+                    thoughts = f"\n{timestamp} user: [Silence]"
 
-                # If a user speaks while we're observing the scene, let the next
-                # loop iteration handle the user turn immediately instead.
-                if not user_input_queue.empty():
-                    logging.info("User input arrived during scene observation; prioritizing it")
-                    continue
+                else:
+                    thoughts = build_scene_input(timestamp, list(scene_signature))
+                    if thoughts is None:
+                        last_scene_signature = ()
+                        continue
 
-                if not _should_enable_passive_agent_turns():
                     last_scene_signature = scene_signature
-                    logging.info(
-                        "Scene observer detected updated entities without passive agent turn: %s",
-                        ", ".join(scene_signature),
-                    )
-                    continue
-
-                thoughts = build_scene_input(timestamp, list(scene_signature))
-                if thoughts is None:
-                    last_scene_signature = ()
-                    continue
-
-                last_scene_signature = scene_signature
-                logging.info("Scene observer detected updated entities: %s", ", ".join(scene_signature))
+                    logging.info("Scene observer detected updated entities: %s", ", ".join(scene_signature))
 
             try:
                 raw_output, conscious_thread = conscious_thinker(
