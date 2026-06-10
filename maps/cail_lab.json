@@ -58,16 +58,16 @@
     },
     {
       "name": "charging_station",
-      "x": 1.3,
-      "y": 15.7,
-      "description": "Charging station, red marker 1 from annotated 535 Mission map",
+      "x": 2.36,
+      "y": 11.23,
+      "description": "Charging station now located at Risto's desk, red marker 7 from annotated 535 Mission map",
       "tags": [
         "waypoint",
         "red_marker"
       ],
       "source_pixel": {
-        "x": 2155.5,
-        "y": 2154.5
+        "x": 2599.0,
+        "y": 2049.0
       }
     },
     {
@@ -199,10 +199,10 @@
   "edges": [
     {
       "from": "charging_station",
-      "to": "shrushtis_desk",
-      "distance": 4.32,
+      "to": "ristos_desk",
+      "distance": 0.0,
       "traversable": true,
-      "description": "annotated edge from charging station to Shrushti's desk"
+      "description": "charging station is colocated with Risto's desk"
     },
     {
       "from": "shrushtis_desk",
