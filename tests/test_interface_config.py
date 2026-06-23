@@ -32,8 +32,6 @@ class InterfaceConfigTests(unittest.TestCase):
     def setUp(self):
         self._env_names = [
             "CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS",
-            "CONSCIOUS_ENABLE_IDLE_THINKING",
-            "CONSCIOUS_ENABLE_SCENE_AGENT_INPUT",
         ]
         self._old_env = {name: os.environ.get(name) for name in self._env_names}
         for name in self._env_names:
@@ -47,24 +45,18 @@ class InterfaceConfigTests(unittest.TestCase):
             else:
                 os.environ[name] = value
 
-    def test_passive_agent_turns_default_off(self):
-        self.assertFalse(self._should_enable_passive_agent_turns())
-
-    def test_legacy_idle_thinking_env_disables_passive_agent_turns(self):
-        os.environ["CONSCIOUS_ENABLE_IDLE_THINKING"] = "0"
-
-        self.assertFalse(self._should_enable_passive_agent_turns())
-
-    def test_legacy_scene_agent_input_env_can_enable_passive_agent_turns(self):
-        os.environ["CONSCIOUS_ENABLE_SCENE_AGENT_INPUT"] = "1"
-
+    def test_passive_agent_turns_default_on(self):
         self.assertTrue(self._should_enable_passive_agent_turns())
 
-    def test_current_env_name_takes_precedence_over_legacy_names(self):
+    def test_explicit_current_env_can_disable_passive_agent_turns(self):
         os.environ["CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS"] = "0"
-        os.environ["CONSCIOUS_ENABLE_IDLE_THINKING"] = "1"
 
         self.assertFalse(self._should_enable_passive_agent_turns())
+
+    def test_explicit_current_env_can_enable_passive_agent_turns(self):
+        os.environ["CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS"] = "1"
+
+        self.assertTrue(self._should_enable_passive_agent_turns())
 
 
 if __name__ == "__main__":
