@@ -896,6 +896,7 @@ class TestNavCoreStatus(unittest.TestCase):
                     "name": "charging_station",
                     "x": 1.3,
                     "y": 15.7,
+                    "heading_degrees": 28.3,
                     "description": "Charging station, red marker 1",
                 },
                 {
@@ -918,6 +919,7 @@ class TestNavCoreStatus(unittest.TestCase):
             map_path = f.name
 
         NavCore._instance = None
+        old_heading = os.environ.pop("NAV_INITIAL_HEADING_DEGREES", None)
         os.environ["NAV_SIMULATION_MODE"] = "1"
         os.environ["NAV_MAP_FILE"] = map_path
         try:
@@ -925,6 +927,7 @@ class TestNavCoreStatus(unittest.TestCase):
             pose = nav._odometry.get_pose()
             self.assertAlmostEqual(pose.x, 1.3)
             self.assertAlmostEqual(pose.y, 15.7)
+            self.assertAlmostEqual(pose.yaw, math.radians(28.3))
             path = nav._global_planner.plan_path(pose, "Shrushti's desk")
             self.assertEqual(
                 [node.name for node in path],
@@ -935,6 +938,8 @@ class TestNavCoreStatus(unittest.TestCase):
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
             os.environ.pop("NAV_MAP_FILE", None)
+            if old_heading is not None:
+                os.environ["NAV_INITIAL_HEADING_DEGREES"] = old_heading
             os.unlink(map_path)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")

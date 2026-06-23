@@ -7,8 +7,8 @@
     "y_axis": "North (left on source image/PDF)",
     "units": "meters",
     "floor_dimensions_m": {
-      "east_west": 22.0,
-      "north_south": 36.22
+      "east_west": 26.58,
+      "north_south": 43.76
     },
     "source_image_size_px": {
       "width": 3804,
@@ -20,8 +20,8 @@
       "right": 3713,
       "bottom": 2283
     },
-    "scale_m_per_px": 0.01007787,
-    "notes": "Coordinates derived from red dot centers on the annotated PNG. Source image/PDF orientation matches the sample note: Up=East, Left=North. A uniform scale is used; east_west is anchored to 22.0m from the sample map, giving north_south=36.22m for this wider floor-plan crop."
+    "scale_m_per_px": 0.01217524,
+    "notes": "Coordinates derived from red dot centers on the annotated PNG. Source image/PDF orientation matches the sample note: Up=East, Left=North. A uniform scale is used; east_west is anchored to 22.0m from the sample map, giving north_south=36.22m for this wider floor-plan crop. Runtime calibration: scaled map distances by 1.208116 so Risto's desk to Wellness Room is 13.0 ft; charging/Risto startup heading is 28.3 deg (route bearing 6.3 deg + measured 22.0 deg left dock offset)."
   },
   "floor_boundary": [
     [
@@ -29,23 +29,23 @@
       0.0
     ],
     [
-      22.0,
+      26.58,
       0.0
     ],
     [
-      22.0,
-      36.22
+      26.58,
+      43.76
     ],
     [
       0.0,
-      36.22
+      43.76
     ]
   ],
   "nodes": [
     {
       "name": "kitchen",
-      "x": 5.62,
-      "y": 4.11,
+      "x": 6.79,
+      "y": 4.97,
       "description": "Kitchen, red marker 0 from annotated 535 Mission map",
       "tags": [
         "waypoint",
@@ -58,8 +58,8 @@
     },
     {
       "name": "charging_station",
-      "x": 2.36,
-      "y": 11.23,
+      "x": 2.85,
+      "y": 13.57,
       "description": "Charging station now located at Risto's desk, red marker 7 from annotated 535 Mission map",
       "tags": [
         "waypoint",
@@ -68,12 +68,13 @@
       "source_pixel": {
         "x": 2599.0,
         "y": 2049.0
-      }
+      },
+      "heading_degrees": 28.3
     },
     {
       "name": "shrushtis_desk",
-      "x": 5.62,
-      "y": 15.7,
+      "x": 6.79,
+      "y": 18.97,
       "description": "Shrushti's desk, red marker 2 from annotated 535 Mission map",
       "tags": [
         "waypoint",
@@ -107,8 +108,8 @@
     },
     {
       "name": "ai_hall_of_fame",
-      "x": 7.79,
-      "y": 15.7,
+      "x": 9.41,
+      "y": 18.97,
       "description": "AI hall of fame, red marker 3 from annotated 535 Mission map",
       "tags": [
         "waypoint",
@@ -121,8 +122,8 @@
     },
     {
       "name": "entrance",
-      "x": 7.79,
-      "y": 22.57,
+      "x": 9.41,
+      "y": 27.27,
       "description": "Entrance, red marker 4 from annotated 535 Mission map",
       "tags": [
         "waypoint",
@@ -135,8 +136,8 @@
     },
     {
       "name": "robertos_desk",
-      "x": 5.68,
-      "y": 22.57,
+      "x": 6.86,
+      "y": 27.27,
       "description": "Roberto's desk, red marker 5 from annotated 535 Mission map",
       "tags": [
         "waypoint",
@@ -149,8 +150,8 @@
     },
     {
       "name": "wellness_room",
-      "x": 5.62,
-      "y": 11.59,
+      "x": 6.79,
+      "y": 14.0,
       "description": "Wellness Room, red marker 6 from annotated 535 Mission map",
       "tags": [
         "waypoint",
@@ -163,8 +164,8 @@
     },
     {
       "name": "ristos_desk",
-      "x": 2.36,
-      "y": 11.23,
+      "x": 2.85,
+      "y": 13.57,
       "description": "Risto's desk, red marker 7 from annotated 535 Mission map",
       "tags": [
         "waypoint",
@@ -173,12 +174,13 @@
       "source_pixel": {
         "x": 2599.0,
         "y": 2049.0
-      }
+      },
+      "heading_degrees": 28.3
     },
     {
       "name": "jamies_desk",
-      "x": 5.62,
-      "y": 6.53,
+      "x": 6.79,
+      "y": 7.89,
       "description": "Jamie's desk, red marker 8 from annotated 535 Mission map",
       "tags": [
         "waypoint",
@@ -191,8 +193,8 @@
     },
     {
       "name": "oliviers_desk",
-      "x": 2.38,
-      "y": 6.53,
+      "x": 2.88,
+      "y": 7.89,
       "description": "Olivier's desk, red marker 9 from annotated 535 Mission map",
       "tags": [
         "waypoint",
@@ -215,56 +217,56 @@
     {
       "from": "shrushtis_desk",
       "to": "ai_hall_of_fame",
-      "distance": 2.17,
+      "distance": 2.62,
       "traversable": true,
       "description": "annotated edge from Shrushti's desk to AI hall of fame"
     },
     {
       "from": "ai_hall_of_fame",
       "to": "entrance",
-      "distance": 6.87,
+      "distance": 8.3,
       "traversable": true,
       "description": "annotated edge from AI hall of fame to entrance"
     },
     {
       "from": "entrance",
       "to": "robertos_desk",
-      "distance": 2.11,
+      "distance": 2.55,
       "traversable": true,
       "description": "annotated edge from entrance to Roberto's desk"
     },
     {
       "from": "shrushtis_desk",
       "to": "wellness_room",
-      "distance": 4.11,
+      "distance": 4.97,
       "traversable": true,
       "description": "annotated edge from Shrushti's desk to Wellness Room"
     },
     {
       "from": "wellness_room",
       "to": "ristos_desk",
-      "distance": 3.28,
+      "distance": 3.96,
       "traversable": true,
       "description": "annotated edge from Wellness Room to Risto's desk"
     },
     {
       "from": "wellness_room",
       "to": "jamies_desk",
-      "distance": 5.06,
+      "distance": 6.11,
       "traversable": true,
       "description": "annotated edge from Wellness Room to Jamie's desk"
     },
     {
       "from": "jamies_desk",
       "to": "oliviers_desk",
-      "distance": 3.24,
+      "distance": 3.91,
       "traversable": true,
       "description": "annotated edge from Jamie's desk to Olivier's desk"
     },
     {
       "from": "jamies_desk",
       "to": "kitchen",
-      "distance": 2.42,
+      "distance": 2.92,
       "traversable": true,
       "description": "annotated edge from Jamie's desk to kitchen"
     }
@@ -276,20 +278,20 @@
       "reason": "Glass enclosure around 21-002 and 21-018 - robot cannot detect transparent barriers",
       "points": [
         [
-          6.33,
-          19.87
+          7.65,
+          24.01
         ],
         [
-          6.6,
-          17.4
+          7.97,
+          21.02
         ],
         [
-          1.89,
-          16.72
+          2.28,
+          20.2
         ],
         [
-          1.54,
-          19.02
+          1.86,
+          22.98
         ]
       ],
       "source_pixels": [

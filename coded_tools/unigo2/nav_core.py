@@ -123,6 +123,7 @@ class MapNode:
     name: str
     x: float
     y: float
+    heading_degrees: Optional[float] = None
     description: str = ""
     tags: List[str] = field(default_factory=list)
     aliases: List[str] = field(default_factory=list)
@@ -181,6 +182,11 @@ class TopologicalMap:
                 name=name,
                 x=float(node_data.get("x", 0)),
                 y=float(node_data.get("y", 0)),
+                heading_degrees=(
+                    float(node_data["heading_degrees"])
+                    if node_data.get("heading_degrees") is not None
+                    else None
+                ),
                 description=node_data.get("description", ""),
                 tags=node_data.get("tags", []),
                 aliases=node_data.get("aliases", []),
@@ -1316,6 +1322,12 @@ class NavCore:
             return
 
         heading_deg = _env_float("NAV_INITIAL_HEADING_DEGREES", 0.0)
+        if os.environ.get("NAV_INITIAL_HEADING_DEGREES") is None:
+            heading_deg = (
+                node.heading_degrees
+                if node.heading_degrees is not None
+                else 0.0
+            )
         self._odometry.set_pose(node.x, node.y, math.radians(heading_deg))
         self._reset_progress_tracker()
         logger.info(
