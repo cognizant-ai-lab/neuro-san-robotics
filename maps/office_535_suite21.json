@@ -43,13 +43,16 @@
   ],
   "nodes": [
     {
-      "name": "kitchen",
+      "name": "kitchen_entrance",
       "x": 6.79,
-      "y": 4.97,
-      "description": "Kitchen, red marker 0 from annotated 535 Mission map",
+      "y": 5.58,
+      "description": "Kitchen entrance, red marker 0 from annotated 535 Mission map",
       "tags": [
         "waypoint",
         "red_marker"
+      ],
+      "aliases": [
+        "kitchen"
       ],
       "source_pixel": {
         "x": 3305.0,
@@ -265,10 +268,10 @@
     },
     {
       "from": "jamies_desk",
-      "to": "kitchen",
-      "distance": 2.92,
+      "to": "kitchen_entrance",
+      "distance": 2.31,
       "traversable": true,
-      "description": "annotated edge from Jamie's desk to kitchen"
+      "description": "annotated edge from Jamie's desk to kitchen entrance"
     }
   ],
   "exclusion_zones": [
