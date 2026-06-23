@@ -1,3 +1,4 @@
+import math
 import os
 import struct
 import time
@@ -47,6 +48,7 @@ class TestLidarPerimeterService(unittest.TestCase):
                 enabled=False,
                 robot_half_width=0.15,
                 path_obstacle_min_points=3,
+                pointcloud_yaw_offset_rad=0.0,
             )
         )
 
@@ -127,6 +129,28 @@ class TestLidarPerimeterService(unittest.TestCase):
 
         self.assertIsNotNone(grid)
         self.assertAlmostEqual(grid.path_obstacle_m, 0.85, places=2)
+
+    def test_go2_pointcloud_y_axis_is_rotated_to_robot_forward(self):
+        service = LidarPerimeterService(
+            LidarPerimeterConfig(
+                enabled=False,
+                robot_half_width=0.15,
+                path_obstacle_min_points=3,
+                pointcloud_yaw_offset_rad=-math.pi / 2.0,
+            )
+        )
+
+        grid = service.grid_from_points(
+            [
+                (0.00, 0.90, 0.15),
+                (0.03, 0.90, 0.15),
+                (-0.03, 0.90, 0.15),
+            ]
+        )
+
+        self.assertIsNotNone(grid)
+        self.assertAlmostEqual(grid.path_obstacle_m, 0.90, places=2)
+        self.assertAlmostEqual(grid.path_obstacle_bearing, 0.0, places=2)
 
 
 class TestObstacleGridFusion(unittest.TestCase):

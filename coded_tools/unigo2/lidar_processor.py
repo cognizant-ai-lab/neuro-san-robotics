@@ -39,6 +39,7 @@ class LidarPerimeterConfig:
     self_mask_rear_m: float = 0.35
     self_mask_half_width_m: float = 0.18
     angle_offset_rad: float = 0.0
+    pointcloud_yaw_offset_rad: float = -math.pi / 2.0
     range_scale: float = 1.0
     max_sample_age_s: float = 0.75
 
@@ -93,6 +94,10 @@ class LidarPerimeterService:
             self_mask_rear_m=_env_float("NAV_LIDAR_SELF_MASK_REAR", 0.35),
             self_mask_half_width_m=_env_float("NAV_LIDAR_SELF_MASK_HALF_WIDTH", 0.18),
             angle_offset_rad=_env_float("NAV_LIDAR_ANGLE_OFFSET_RAD", 0.0),
+            pointcloud_yaw_offset_rad=_env_float(
+                "NAV_LIDAR_POINTCLOUD_YAW_OFFSET_RAD",
+                _env_float("NAV_LIDAR_ANGLE_OFFSET_RAD", -math.pi / 2.0),
+            ),
             range_scale=_env_float("NAV_LIDAR_RANGE_SCALE", 1.0),
             max_sample_age_s=_env_float("NAV_LIDAR_MAX_SAMPLE_AGE", 0.75),
         )
@@ -215,7 +220,10 @@ class LidarPerimeterService:
             ):
                 continue
             xy_points.append((x, y))
-        return self._grid_from_xy(np.asarray(xy_points, dtype=np.float32))
+        return self._grid_from_xy(
+            np.asarray(xy_points, dtype=np.float32),
+            yaw_offset_rad=self._config.pointcloud_yaw_offset_rad,
+        )
 
     def _handle_sample(self, sample: Any) -> None:
         """DDS callback for LiDAR samples."""
@@ -293,8 +301,13 @@ class LidarPerimeterService:
 
         return self.grid_from_points(points)
 
-    def _grid_from_xy(self, xy: np.ndarray) -> ObstacleGrid:
+    def _grid_from_xy(
+        self,
+        xy: np.ndarray,
+        yaw_offset_rad: float = 0.0,
+    ) -> ObstacleGrid:
         cfg = self._config
+        xy = self._rotate_xy(xy, yaw_offset_rad)
         xy = self._filter_self_returns(xy)
         return build_obstacle_grid(
             xy,
@@ -307,6 +320,18 @@ class LidarPerimeterService:
                 inflation_radius_m=cfg.robot_half_width,
             ),
         )
+
+    @staticmethod
+    def _rotate_xy(xy: np.ndarray, yaw_offset_rad: float) -> np.ndarray:
+        if xy.size == 0 or abs(yaw_offset_rad) < 1e-9:
+            return xy
+
+        c = math.cos(yaw_offset_rad)
+        s = math.sin(yaw_offset_rad)
+        rotated = xy.copy()
+        rotated[:, 0] = xy[:, 0] * c - xy[:, 1] * s
+        rotated[:, 1] = xy[:, 0] * s + xy[:, 1] * c
+        return rotated
 
     def _filter_self_returns(self, xy: np.ndarray) -> np.ndarray:
         """Drop points inside the robot footprint around the LiDAR."""

@@ -103,6 +103,7 @@ specific robot really needs a temporary override.
 | `NAV_OBSTACLE_SOURCE` | `lidar` on robot, `depth` in simulation | Selects collision sensing source: `lidar`, `depth`, or `fused`. The robot default uses LiDAR only. |
 | `NAV_USE_LIDAR` | enabled outside simulation | Enables the onboard Unitree LiDAR perimeter service when `NAV_OBSTACLE_SOURCE` includes LiDAR. |
 | `NAV_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS `sensor_msgs/PointCloud2` topic used by the LiDAR perimeter service. Override only if the robot publishes LiDAR on a different topic. |
+| `NAV_LIDAR_POINTCLOUD_YAW_OFFSET_RAD` | `-1.5708` | Rotates Unitree PointCloud2 points into the robot frame before self-masking and path-corridor checks. |
 | `NAV_LIDAR_SELF_MASK_FORWARD` | `0.36` | Ignores LiDAR returns inside the robot footprint up to 0.36 m in front of the LiDAR frame. |
 | `NAV_LIDAR_SELF_MASK_REAR` | `0.35` | Ignores LiDAR returns inside the robot footprint up to 0.35 m behind the LiDAR frame. |
 | `NAV_LIDAR_SELF_MASK_HALF_WIDTH` | `0.18` | Ignores LiDAR returns inside the robot footprint within 0.18 m left/right of the LiDAR frame. |
