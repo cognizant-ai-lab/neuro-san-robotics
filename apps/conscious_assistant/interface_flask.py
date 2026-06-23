@@ -485,8 +485,8 @@ def enqueue_speech(
     )
 
 
-def enqueue_navigation_status_event(message: str) -> None:
-    """Route terminal NavCore updates back through the agent network."""
+def enqueue_navigation_status_update(message: str) -> None:
+    """Speak terminal NavCore updates once without starting an agent turn."""
     global last_navigation_status_at, last_navigation_status_message  # pylint: disable=global-statement
     if not message:
         return
@@ -503,23 +503,17 @@ def enqueue_navigation_status_event(message: str) -> None:
         last_navigation_status_message = message
         last_navigation_status_at = now
 
-    logging.info("Navigation status event queued for agent: %s", message)
-    user_input_queue.put(
-        {
-            "source": "navigation_status",
-            "text": message,
-            "interactive": False,
-        }
-    )
+    logging.info("Navigation status update: %s", message)
+    enqueue_speech(message, emit_to_ui=True)
 
 
 def register_navigation_status_callback() -> None:
-    """Register NavCore terminal status as an agent event source."""
+    """Register NavCore terminal status for direct speech updates."""
     try:
         from coded_tools.unigo2.nav_core import NavCore
 
-        NavCore.set_status_callback(enqueue_navigation_status_event)
-        logging.info("Registered NavCore status callback for agent event routing")
+        NavCore.set_status_callback(enqueue_navigation_status_update)
+        logging.info("Registered NavCore status callback for spoken navigation updates")
     except Exception:
         logging.exception("Failed to register NavCore status callback")
 
