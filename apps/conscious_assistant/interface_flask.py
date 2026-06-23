@@ -9,6 +9,7 @@ import site
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime
 
 from pathlib import Path
@@ -229,6 +230,10 @@ except ImportError:
         execute_deferred_actions = None
 
 THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
+PASSIVE_AGENT_TURN_INTERVAL = _env_float(
+    "CONSCIOUS_PASSIVE_AGENT_TURN_INTERVAL_SECONDS",
+    max(THINKING_INTERVAL, 10.0),
+)
 
 ACKNOWLEDGMENT_PHRASES = [
     "Got it",
@@ -565,9 +570,11 @@ def conscious_thinking_process():
     with app.app_context():  # Manually push the application context
         global conscious_thread  # pylint: disable=global-statement
         last_scene_signature = ()
+        last_passive_agent_turn_at = 0.0
         while not shutdown_event.is_set():
             processing_started = False
             is_user_turn = False
+            is_passive_turn = False
             try:
                 timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
                 try:
@@ -582,6 +589,13 @@ def conscious_thinking_process():
 
                     if not user_input_queue.empty():
                         logging.info("User input arrived during passive observation; prioritizing it")
+                        continue
+
+                    now = time.monotonic()
+                    if (
+                        PASSIVE_AGENT_TURN_INTERVAL > 0
+                        and now - last_passive_agent_turn_at < PASSIVE_AGENT_TURN_INTERVAL
+                    ):
                         continue
 
                     scene_signature = observation_signature(observation)
@@ -606,6 +620,8 @@ def conscious_thinking_process():
                             last_scene_signature = ()
                             logging.debug("Passive idle thinking turn")
                         agent_input = f"\n{timestamp} user: [Silence]"
+                    is_passive_turn = True
+                    last_passive_agent_turn_at = now
                 else:
                     logging.info("Received user input: %r", user_text)
                     if user_text is None:
@@ -634,7 +650,7 @@ def conscious_thinking_process():
                 agent_output = normalize_agent_output(raw_output)
 
                 if not agent_output:
-                    if not is_user_turn:
+                    if is_passive_turn:
                         discard_deferred_actions("passive scene turn returned no output")
                     logging.info("Conscious thinker returned no output")
                     continue

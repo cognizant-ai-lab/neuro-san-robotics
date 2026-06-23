@@ -1880,11 +1880,11 @@ class TestNavCoreStatus(unittest.TestCase):
 
             self.assertFalse(result)
             self.assertEqual(nav.state, NavState.E_STOP)
-            self.assertIn("E-STOP: depth grid unavailable", nav.get_status_summary())
+            self.assertIn("E-STOP: obstacle grid unavailable", nav.get_status_summary())
             self.assertEqual(
                 events,
                 [
-                    "I did not move toward Shrushti's desk because my depth grid "
+                    "I did not move toward Shrushti's desk because my obstacle grid "
                     "was not available."
                 ],
             )
@@ -2064,6 +2064,42 @@ class TestNavCoreStatus(unittest.TestCase):
             )
 
             self.assertIn("Stopped forward movement", result)
+            self.assertGreaterEqual(fake_go2.move.call_count, 1)
+            fake_go2.stop_move.assert_called()
+            self.assertEqual(nav.state, NavState.IDLE)
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_guarded_forward_uses_obstacle_grid_without_center_depth(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            fake_sensor = MagicMock()
+            fake_sensor.supports_center_depth = False
+            fake_sensor.get_obstacle_grid.side_effect = [
+                _empty_grid(),
+                _empty_grid(),
+                _grid_with_wall_ahead(distance_m=0.70),
+            ]
+            nav._depth_processor = fake_sensor
+
+            result = nav.move_forward_guarded(
+                stop_distance_m=0.75,
+                speed=0.45,
+                max_seconds=1.0,
+                command_period_s=0.0,
+            )
+
+            self.assertIn("Stopped forward movement", result)
+            self.assertIn("0.70m", result)
             self.assertGreaterEqual(fake_go2.move.call_count, 1)
             fake_go2.stop_move.assert_called()
             self.assertEqual(nav.state, NavState.IDLE)

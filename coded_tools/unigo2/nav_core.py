@@ -45,14 +45,13 @@ import numpy as np
 
 from coded_tools.unigo2.depth_processor import (
     CenterDepthReading,
-    DepthProcessor,
-    DepthProcessorConfig,
     ObstacleGrid,
     _env_flag,
     _env_float,
     _env_int,
 )
 from coded_tools.unigo2.obstacle_confirmation import ObstacleConfirmationTracker
+from coded_tools.unigo2.obstacle_provider import create_default_obstacle_provider
 
 logger = logging.getLogger(__name__)
 
@@ -1249,7 +1248,7 @@ class NavCore:
         self._thread: Optional[threading.Thread] = None
 
         # Sub-components
-        self._depth_processor = DepthProcessor()
+        self._depth_processor = create_default_obstacle_provider()
         self._local_planner = LocalPlanner(
             max_linear_speed=self.MAX_LINEAR_SPEED,
             max_yaw_rate=self.MAX_YAW_RATE,
@@ -1294,7 +1293,7 @@ class NavCore:
                 self._anchor_initial_pose()
 
         logger.info(
-            "NavCore: initialized (depth=%s, map=%s, loop=%d Hz)",
+            "NavCore: initialized (obstacle_sensors=%s, map=%s, loop=%d Hz)",
             self._depth_processor.backend,
             "loaded" if self._topo_map.is_loaded else "none",
             self.NAV_LOOP_HZ,
@@ -1344,14 +1343,15 @@ class NavCore:
             self._go2 = _get_go2_macros()
 
     def _ensure_depth_running(self) -> bool:
-        """Start or restart depth capture before a command that requires it."""
+        """Start or restart obstacle sensing before a command that requires it."""
         start = getattr(self._depth_processor, "start", None)
         if callable(start):
             start()
+            return True
         return bool(getattr(self._depth_processor, "is_available", False))
 
     def _stop_depth_when_idle(self) -> None:
-        """Release depth camera resources between navigation actions."""
+        """Release obstacle-sensor resources between navigation actions."""
         if not self.DEPTH_STOP_WHEN_IDLE:
             return
         stop = getattr(self._depth_processor, "stop", None)
@@ -1517,7 +1517,7 @@ class NavCore:
             return False
 
         if not self._wait_for_depth_grid(self.DEPTH_READY_TIMEOUT_S):
-            reason = "E-STOP: depth grid unavailable"
+            reason = "E-STOP: obstacle grid unavailable"
             self._ensure_go2()
             if self._go2 and getattr(self._go2, "available", False):
                 self._go2.stop_move()
@@ -1528,7 +1528,7 @@ class NavCore:
                 self._clear_planner_and_obstacle_state()
             logger.warning("NavCore: %s before navigating to '%s'", reason, destination)
             self._notify_status_change(
-                f"I did not move toward {goal_label} because my depth grid was not available."
+                f"I did not move toward {goal_label} because my obstacle grid was not available."
             )
             self._stop_depth_when_idle()
             return False
@@ -1549,7 +1549,7 @@ class NavCore:
         return True
 
     def _wait_for_depth_grid(self, timeout_s: float) -> bool:
-        """Wait briefly for the depth capture thread to publish its first grid."""
+        """Wait briefly for obstacle sensing to publish its first grid."""
         if not self._ensure_depth_running():
             return False
 
@@ -1595,7 +1595,7 @@ class NavCore:
     def move_relative(self, distance: float, angle: float = 0.0) -> bool:
         """Move a given distance (meters) at a given angle offset (radians) from current heading."""
         if not self._wait_for_depth_grid(self.DEPTH_READY_TIMEOUT_S):
-            logger.warning("NavCore: E-STOP: depth grid unavailable before relative move")
+            logger.warning("NavCore: E-STOP: obstacle grid unavailable before relative move")
             self._stop_depth_when_idle()
             return False
 
@@ -1627,12 +1627,12 @@ class NavCore:
         max_seconds: Optional[float] = None,
         command_period_s: Optional[float] = None,
     ) -> str:
-        """Move forward continuously while a raw depth watchdog stays clear.
+        """Move forward continuously while forward obstacle clearance stays clear.
 
         This is the hardware-safe forward primitive validated on CAIL-E. It does
         not declare success from dead-reckoned distance. Instead, it keeps a
-        continuous Go2 gait command active and stops immediately when the raw
-        center depth band sees an obstacle at or inside stop_distance_m.
+        continuous Go2 gait command active and stops immediately when the active
+        obstacle provider sees a path obstacle at or inside stop_distance_m.
 
         Args:
             max_distance_m: Optional requested travel distance. Until real
@@ -1648,6 +1648,7 @@ class NavCore:
             Human-readable result for the agent/tool layer.
         """
         stop_distance = stop_distance_m or self.FORWARD_STOP_DISTANCE_M
+        clearance_max_depth = max(self.AVOIDANCE_DISTANCE_M, stop_distance + 0.05)
         forward_speed = speed or self.FORWARD_SPEED
         command_period = (
             self.FORWARD_COMMAND_PERIOD_S
@@ -1669,12 +1670,12 @@ class NavCore:
                 max_seconds = self.FORWARD_MAX_SECONDS
 
         if not self._ensure_depth_running():
-            return "Cannot move forward: no depth camera is available."
+            return "Cannot move forward: no obstacle sensor is available."
 
-        initial_reading = self._depth_processor.get_center_depth_reading()
+        initial_reading = self._read_forward_clearance(max_depth_m=clearance_max_depth)
         if initial_reading is None:
             self._stop_depth_when_idle()
-            return "Cannot move forward: no reliable center depth reading is available."
+            return "Cannot move forward: no reliable forward clearance reading is available."
 
         if initial_reading.distance_m <= stop_distance:
             self._stop_depth_when_idle()
@@ -1706,12 +1707,12 @@ class NavCore:
 
         try:
             while time.monotonic() - start < max_seconds:
-                reading = self._depth_processor.get_center_depth_reading()
+                reading = self._read_forward_clearance(max_depth_m=clearance_max_depth)
                 if reading is None:
-                    stop_reason = "depth_unavailable"
+                    stop_reason = "clearance_unavailable"
                     with self._state_lock:
                         self._state = NavState.E_STOP
-                        self._last_stop_reason = "E-STOP: center depth unavailable"
+                        self._last_stop_reason = "E-STOP: forward clearance unavailable"
                     break
 
                 last_reading = reading
@@ -1743,17 +1744,17 @@ class NavCore:
                 "Stopped forward movement: obstacle is "
                 f"{last_reading.distance_m:.2f}m ahead."
             )
-        if stop_reason == "depth_unavailable":
-            return "Emergency stopped: center depth reading became unavailable."
+        if stop_reason == "clearance_unavailable":
+            return "Emergency stopped: forward clearance reading became unavailable."
         return (
-            "Stopped forward movement after the safety timeout; last center "
-            f"depth was {last_reading.distance_m:.2f}m."
+            "Stopped forward movement after the safety timeout; last forward "
+            f"clearance was {last_reading.distance_m:.2f}m."
         )
 
     def turn(self, angle_rad: float) -> bool:
         """Rotate in place by the given angle (radians, positive=left)."""
         if not self._wait_for_depth_grid(self.DEPTH_READY_TIMEOUT_S):
-            logger.warning("NavCore: E-STOP: depth grid unavailable before turn")
+            logger.warning("NavCore: E-STOP: obstacle grid unavailable before turn")
             self._stop_depth_when_idle()
             return False
 
@@ -1838,7 +1839,7 @@ class NavCore:
             if grid.path_obstacle_m < float("inf"):
                 parts.append(
                     f"Path obstacle: {grid.path_obstacle_m:.2f}m "
-                    f"({grid.path_obstacle_points} depth points)"
+                    f"({grid.path_obstacle_points} sensor points)"
                 )
             else:
                 parts.append("Path corridor clear")
@@ -1853,7 +1854,7 @@ class NavCore:
         return float("inf")
 
     def get_obstacle_summary(self) -> str:
-        """Human-readable obstacle summary from the depth processor."""
+        """Human-readable obstacle summary from the active obstacle provider."""
         return self._depth_processor.get_obstacle_summary()
 
     def list_destinations(self) -> str:
@@ -1964,9 +1965,9 @@ class NavCore:
             else:
                 self._abort_active_navigation(
                     goal,
-                    "E-STOP: depth grid unavailable",
+                    "E-STOP: obstacle grid unavailable",
                     f"I stopped before reaching {self._goal_display_name(goal)} "
-                    "because my depth grid became unavailable.",
+                    "because my obstacle grid became unavailable.",
                     state=NavState.E_STOP,
                 )
                 return
@@ -2094,12 +2095,39 @@ class NavCore:
             return center_dist, 0.0
         return path_dist, path_bearing
 
+    def _read_forward_clearance(self, max_depth_m: float) -> Optional[CenterDepthReading]:
+        """Read forward clearance from the active obstacle provider."""
+        reading, _supported = self._read_center_depth(
+            max_depth_m=max_depth_m,
+            percentile=10.0,
+        )
+        if reading is not None:
+            return reading
+
+        grid = self._depth_processor.get_obstacle_grid()
+        if grid is None:
+            return None
+
+        distance = getattr(grid, "path_obstacle_m", None)
+        if not isinstance(distance, (int, float)):
+            return None
+        if not math.isfinite(distance):
+            distance = max_depth_m
+        return CenterDepthReading(
+            distance_m=float(distance),
+            coverage=1.0,
+            timestamp=getattr(grid, "timestamp", time.time()),
+        )
+
     def _read_center_depth(
         self,
         max_depth_m: float,
         percentile: float = 25.0,
     ) -> Tuple[Optional[CenterDepthReading], bool]:
         """Read the raw center depth band when the depth backend supports it."""
+        if getattr(self._depth_processor, "supports_center_depth", True) is False:
+            return None, False
+
         reader = getattr(self._depth_processor, "get_center_depth_reading", None)
         if not callable(reader):
             return None, False
@@ -2251,7 +2279,7 @@ class NavCore:
     # ------------------------------------------------------------------
 
     def shutdown(self):
-        """Stop navigation, join the background thread, and release depth camera."""
+        """Stop navigation, join the background thread, and release sensors."""
         with self._state_lock:
             self._state = NavState.IDLE
             self._goal = None

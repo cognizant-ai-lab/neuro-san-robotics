@@ -28,6 +28,16 @@ def _load_passive_turn_helpers():
     return namespace["_should_enable_passive_agent_turns"]
 
 
+def _interface_source_text() -> str:
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / "apps"
+        / "conscious_assistant"
+        / "interface_flask.py"
+    )
+    return source_path.read_text()
+
+
 class InterfaceConfigTests(unittest.TestCase):
     def setUp(self):
         self._env_names = [
@@ -57,6 +67,12 @@ class InterfaceConfigTests(unittest.TestCase):
         os.environ["CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS"] = "1"
 
         self.assertTrue(self._should_enable_passive_agent_turns())
+
+    def test_passive_agent_turn_interval_is_configurable(self):
+        source = _interface_source_text()
+
+        self.assertIn("CONSCIOUS_PASSIVE_AGENT_TURN_INTERVAL_SECONDS", source)
+        self.assertIn("last_passive_agent_turn_at", source)
 
 
 if __name__ == "__main__":

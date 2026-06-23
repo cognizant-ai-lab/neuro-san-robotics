@@ -95,10 +95,16 @@ specific robot really needs a temporary override.
 | --- | --- | --- |
 | `CONSCIOUS_ENABLE_SCENE_OBSERVER` | enabled on Linux | Keeps the latest camera scene available in the UI and face-learning tools. |
 | `CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS` | `1` | Scene changes may wake the agent for prompt-governed passive thoughts. Set to `0` only when camera updates should never trigger an agent turn. |
+| `CONSCIOUS_PASSIVE_AGENT_TURN_INTERVAL_SECONDS` | at least `10.0` | Minimum time between passive agent/thought turns. User input is not delayed by this cooldown. |
 | `GO2_MOVE_LOG_INTERVAL_SECONDS` | `-1` | Suppresses repeated raw `Move(vx, vy, vyaw)` logs. |
 | `GO2_DISABLE_FREE_AVOID_ON_INIT` | `1` | Calls `FreeAvoid(false)` after SportClient init so Unitree firmware avoidance does not override app-level navigation. |
 | `GO2_USE_SDK_SPECIAL_MOTIONS` | `1` | Uses Unitree SDK special motions when available. |
 | `NAV_DEPTH_CAMERA_SOURCE` | `auto` | Tries RealSense first, then OpenCV depth sources. |
+| `NAV_OBSTACLE_SOURCE` | `lidar` on robot, `depth` in simulation | Selects collision sensing source: `lidar`, `depth`, or `fused`. The robot default uses LiDAR only. |
+| `NAV_USE_LIDAR` | enabled outside simulation | Enables the onboard Unitree LiDAR perimeter service when `NAV_OBSTACLE_SOURCE` includes LiDAR. |
+| `NAV_LIDAR_TOPIC` | `rt/utlidar/range_data` | DDS topic used by the LiDAR perimeter service. Override only if the robot publishes LiDAR on a different topic. |
+| `NAV_LIDAR_MAX_RANGE` | `4.0` | Maximum LiDAR range projected into the local obstacle grid. Longer-range map building should use a separate SLAM layer. |
+| `NAV_LIDAR_MAX_SAMPLE_AGE` | `0.75` | LiDAR samples older than 0.75 seconds are ignored. |
 | `NAV_MAX_LINEAR_SPEED` | `0.40` | Maximum planned forward speed in meters per second. |
 | `NAV_MAX_YAW_RATE` | `0.08` | Maximum yaw correction while translating. |
 | `NAV_PIVOT_YAW_RATE` | `0.50` | In-place yaw rate for planned map turns. |
@@ -118,10 +124,10 @@ specific robot really needs a temporary override.
 | `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | `3` | Avoidance-band path obstacles must also appear in at least 3 nav-loop readings. |
 | `NAV_PATH_OBSTACLE_DISTANCE_TOLERANCE` | `0.15` | Consecutive avoidance-band readings within 0.15 m are treated as the same obstacle track. |
 | `NAV_PATH_OBSTACLE_BEARING_TOLERANCE_RAD` | `0.1745` | Consecutive avoidance-band readings within about 10 degrees are treated as the same obstacle track. |
-| `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | `0.15` | Avoidance-band projected obstacles must agree with raw center depth within the slowdown distance plus this margin. |
+| `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | `0.15` | When a depth source is active, avoidance-band projected obstacles must agree with raw center depth within the slowdown distance plus this margin. |
 | `NAV_GOAL_TOLERANCE` | `0.15` | Destination is considered reached within 0.15 m. |
 | `NAV_PATH_CORRIDOR_HALF_WIDTH` | `0.12` | Only points within 0.12 m left/right of centerline count as path-corridor obstacles. |
-| `NAV_PATH_OBSTACLE_MIN_POINTS` | `6` | Requires at least 6 supporting depth points before a path obstacle is considered real. |
+| `NAV_PATH_OBSTACLE_MIN_POINTS` | `6` | Requires at least 6 supporting sensor points before a path obstacle is considered real. |
 
 ## Setup
 
@@ -246,13 +252,14 @@ python -m pip install -e .
 cd ..
 ```
 
-### Set up navigation and RealSense depth on the robot
+### Set up navigation sensors on the robot
 
-`nav_core` needs a forward-facing depth camera for physical movement. Do not
-run navigation movement commands until `DepthProcessor` reports
-`backend: realsense` and returns a valid grid.
+`nav_core` uses the onboard Unitree LiDAR for collision sensing on the robot by
+default. RealSense depth is optional and should only be enabled with
+`NAV_OBSTACLE_SOURCE=depth` or `NAV_OBSTACLE_SOURCE=fused` when that camera is
+calibrated for the robot.
 
-On the Jetson/Go2, install the system tools first:
+For RealSense/depth mode on the Jetson/Go2, install the system tools first:
 
 ```shell
 sudo apt-get update
@@ -314,7 +321,7 @@ export PYTHONPATH="$HOME/librealsense-${SDK_VER}/build/Release:$PWD:$PYTHONPATH"
 export LD_LIBRARY_PATH="$HOME/librealsense-${SDK_VER}/build:$LD_LIBRARY_PATH"
 ```
 
-Verify Python can see the RealSense camera:
+If you enable RealSense/depth mode, verify Python can see the camera:
 
 ```shell
 python - <<'PY'
