@@ -566,108 +566,86 @@ def conscious_thinking_process():
         global conscious_thread  # pylint: disable=global-statement
         last_scene_signature = ()
         while not shutdown_event.is_set():
-            is_interactive_turn = False
             processing_started = False
-            thoughts = None
+            is_user_turn = False
             try:
                 timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
-                # Wait up to the configured interval for user input
-                agent_event = user_input_queue.get(timeout=THINKING_INTERVAL)
-                logging.info("Received agent event: %r", agent_event)
-                if agent_event is None:
-                    break
+                try:
+                    user_text = user_input_queue.get(timeout=THINKING_INTERVAL)
+                except queue.Empty:
+                    observation = scene_observer.observe()
+                    if observation is not None:
+                        emit_observation_update(observation)
 
-                if isinstance(agent_event, dict):
-                    event_source = str(agent_event.get("source", "user"))
-                    event_text = str(agent_event.get("text", "")).strip()
-                    is_interactive_turn = bool(
-                        agent_event.get("interactive", event_source == "user")
-                    )
-                else:
-                    event_source = "user"
-                    event_text = str(agent_event).strip()
-                    is_interactive_turn = True
-
-                if event_source == "user" and event_text == "exit":
-                    break
-                if not event_text:
-                    continue
-
-                if event_source == "navigation_status":
-                    thoughts = f"\n{timestamp} navigation_status: {event_text}"
-                else:
-                    thoughts = f"\n{timestamp} user: {event_text}"
-
-                if is_interactive_turn:
-                    socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
-                    processing_started = True
-                    if event_source == "user":
-                        acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
-                        logging.info("Speaking acknowledgment: %s", acknowledgment)
-                        enqueue_speech(acknowledgment, emit_to_ui=True)
-
-                logging.info("Proceeding with agent for %s event", event_source)
-
-            except queue.Empty:
-                if shutdown_event.is_set():
-                    break
-
-                observation = scene_observer.observe()
-                if observation is not None:
-                    emit_observation_update(observation)
-
-                if not _should_enable_passive_agent_turns():
-                    continue
-
-                if not user_input_queue.empty():
-                    logging.info("User input arrived during passive observation; prioritizing it")
-                    continue
-
-                scene_signature = observation_signature(observation)
-                if not scene_signature:
-                    last_scene_signature = ()
-                    thoughts = f"\n{timestamp} user: [Silence]"
-                    logging.debug("Passive idle thinking turn")
-
-                elif scene_signature == last_scene_signature:
-                    logging.debug(
-                        "Scene observer saw unchanged entities; skipping agent turn: %s",
-                        ", ".join(scene_signature),
-                    )
-                    thoughts = f"\n{timestamp} user: [Silence]"
-
-                else:
-                    thoughts = build_scene_input(timestamp, list(scene_signature))
-                    if thoughts is None:
-                        last_scene_signature = ()
+                    if not _should_enable_passive_agent_turns():
                         continue
 
-                    last_scene_signature = scene_signature
-                    logging.info("Scene observer detected updated entities: %s", ", ".join(scene_signature))
+                    if not user_input_queue.empty():
+                        logging.info("User input arrived during passive observation; prioritizing it")
+                        continue
 
-            try:
+                    scene_signature = observation_signature(observation)
+                    if scene_signature and scene_signature != last_scene_signature:
+                        agent_input = build_scene_input(timestamp, list(scene_signature))
+                        if agent_input is None:
+                            last_scene_signature = ()
+                            continue
+
+                        last_scene_signature = scene_signature
+                        logging.info(
+                            "Scene observer detected updated entities: %s",
+                            ", ".join(scene_signature),
+                        )
+                    else:
+                        if scene_signature:
+                            logging.debug(
+                                "Scene observer saw unchanged entities; continuing passive thought turn: %s",
+                                ", ".join(scene_signature),
+                            )
+                        else:
+                            last_scene_signature = ()
+                            logging.debug("Passive idle thinking turn")
+                        agent_input = f"\n{timestamp} user: [Silence]"
+                else:
+                    logging.info("Received user input: %r", user_text)
+                    if user_text is None:
+                        break
+
+                    user_text = str(user_text).strip()
+                    if user_text == "exit":
+                        break
+                    if not user_text:
+                        continue
+
+                    is_user_turn = True
+                    agent_input = f"\n{timestamp} user: {user_text}"
+                    socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
+                    processing_started = True
+                    acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
+                    logging.info("Speaking acknowledgment: %s", acknowledgment)
+                    enqueue_speech(acknowledgment, emit_to_ui=True)
+
+                logging.info("Proceeding with agent turn")
                 raw_output, conscious_thread = conscious_thinker(
                     conscious_session,
                     conscious_thread,
-                    thoughts,
+                    agent_input,
                 )
-                thoughts = normalize_agent_output(raw_output)
+                agent_output = normalize_agent_output(raw_output)
 
-                if not thoughts:
-                    if not is_interactive_turn:
+                if not agent_output:
+                    if not is_user_turn:
                         discard_deferred_actions("passive scene turn returned no output")
                     logging.info("Conscious thinker returned no output")
                     continue
 
-                # Separating thoughts and speeches
                 thoughts_to_emit = []
-                thought_blocks, speech_blocks = parse_agent_output_blocks(thoughts)
+                thought_blocks, speech_blocks = parse_agent_output_blocks(agent_output)
 
                 for content in thought_blocks:
                     timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
                     thoughts_to_emit.append(f"{timestamp} thought: {content}")
 
-                # --- 2.  Emit the blocks ------------------------------------------------
                 if thoughts_to_emit:
                     socketio.emit(
                         "update_thoughts",
@@ -691,7 +669,7 @@ def conscious_thinking_process():
                 # Execute deferred robot actions after queued speech drains,
                 # but do not block the interaction loop waiting for them.
                 if DEFERRED_ACTIONS_AVAILABLE and execute_deferred_actions is not None:
-                    if is_interactive_turn:
+                    if is_user_turn:
                         threading.Thread(
                             target=execute_deferred_actions_after_speech,
                             daemon=True,
@@ -823,13 +801,7 @@ def handle_user_input(json, *_):
     """
     user_input = json["data"]
     skip_echo = json.get("skip_echo", False)
-    user_input_queue.put(
-        {
-            "source": "user",
-            "text": user_input,
-            "interactive": True,
-        }
-    )
+    user_input_queue.put(user_input)
     # Only emit update_user_input if client hasn't already displayed it
     if not skip_echo:
         socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
