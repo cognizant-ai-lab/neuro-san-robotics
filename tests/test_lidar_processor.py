@@ -112,6 +112,22 @@ class TestLidarPerimeterService(unittest.TestCase):
         self.assertIsNotNone(grid)
         self.assertAlmostEqual(grid.path_obstacle_m, 0.55, places=2)
 
+    def test_self_returns_inside_body_mask_do_not_block_path(self):
+        service = self._service()
+        grid = service.grid_from_points(
+            [
+                (0.30, 0.00, 0.15),
+                (0.30, 0.03, 0.15),
+                (0.30, -0.03, 0.15),
+                (0.85, 0.00, 0.15),
+                (0.85, 0.03, 0.15),
+                (0.85, -0.03, 0.15),
+            ]
+        )
+
+        self.assertIsNotNone(grid)
+        self.assertAlmostEqual(grid.path_obstacle_m, 0.85, places=2)
+
 
 class TestObstacleGridFusion(unittest.TestCase):
     def test_merge_preserves_sensor_distance_metadata(self):

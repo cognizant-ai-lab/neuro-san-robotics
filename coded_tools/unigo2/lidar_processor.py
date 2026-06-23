@@ -35,6 +35,9 @@ class LidarPerimeterConfig:
     robot_half_width: float = 0.15
     path_corridor_half_width: float = 0.12
     path_obstacle_min_points: int = 6
+    self_mask_forward_m: float = 0.36
+    self_mask_rear_m: float = 0.35
+    self_mask_half_width_m: float = 0.18
     angle_offset_rad: float = 0.0
     range_scale: float = 1.0
     max_sample_age_s: float = 0.75
@@ -86,6 +89,9 @@ class LidarPerimeterService:
             robot_half_width=_env_float("NAV_ROBOT_HALF_WIDTH", 0.15),
             path_corridor_half_width=_env_float("NAV_PATH_CORRIDOR_HALF_WIDTH", 0.12),
             path_obstacle_min_points=_env_int("NAV_PATH_OBSTACLE_MIN_POINTS", 6),
+            self_mask_forward_m=_env_float("NAV_LIDAR_SELF_MASK_FORWARD", 0.36),
+            self_mask_rear_m=_env_float("NAV_LIDAR_SELF_MASK_REAR", 0.35),
+            self_mask_half_width_m=_env_float("NAV_LIDAR_SELF_MASK_HALF_WIDTH", 0.18),
             angle_offset_rad=_env_float("NAV_LIDAR_ANGLE_OFFSET_RAD", 0.0),
             range_scale=_env_float("NAV_LIDAR_RANGE_SCALE", 1.0),
             max_sample_age_s=_env_float("NAV_LIDAR_MAX_SAMPLE_AGE", 0.75),
@@ -289,6 +295,7 @@ class LidarPerimeterService:
 
     def _grid_from_xy(self, xy: np.ndarray) -> ObstacleGrid:
         cfg = self._config
+        xy = self._filter_self_returns(xy)
         return build_obstacle_grid(
             xy,
             ObstacleGridSpec(
@@ -300,6 +307,28 @@ class LidarPerimeterService:
                 inflation_radius_m=cfg.robot_half_width,
             ),
         )
+
+    def _filter_self_returns(self, xy: np.ndarray) -> np.ndarray:
+        """Drop points inside the robot footprint around the LiDAR."""
+        if xy.size == 0:
+            return xy
+
+        cfg = self._config
+        if (
+            cfg.self_mask_forward_m <= 0
+            and cfg.self_mask_rear_m <= 0
+            and cfg.self_mask_half_width_m <= 0
+        ):
+            return xy
+
+        x = xy[:, 0]
+        y = xy[:, 1]
+        inside_body = (
+            (x >= -cfg.self_mask_rear_m)
+            & (x <= cfg.self_mask_forward_m)
+            & (np.abs(y) <= cfg.self_mask_half_width_m)
+        )
+        return xy[~inside_body]
 
     @classmethod
     def _import_channel(cls):
