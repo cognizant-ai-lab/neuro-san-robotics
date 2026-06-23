@@ -62,7 +62,14 @@ def _should_enable_scene_observer() -> bool:
 
 
 def _should_enable_passive_agent_turns() -> bool:
-    return _env_flag("CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS", default=True)
+    for name in (
+        "CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS",
+        "CONSCIOUS_ENABLE_IDLE_THINKING",
+        "CONSCIOUS_ENABLE_SCENE_AGENT_INPUT",
+    ):
+        if os.environ.get(name) is not None:
+            return _env_flag(name, default=False)
+    return False
 
 
 def _should_enable_vision_runtime_prime() -> bool:

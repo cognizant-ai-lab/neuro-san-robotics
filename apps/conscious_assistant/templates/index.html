@@ -147,7 +147,7 @@
 
         // Start recording with MediaRecorder (OpenAI Whisper)
         async function startWhisperRecording() {
-            if (isInputLocked()) {
+            if (isVoiceInputLocked()) {
                 console.log('Cannot record while robot is processing or speaking');
                 return;
             }
@@ -358,7 +358,7 @@
                 spacebarPressed = true;
                 spacebarStartTime = Date.now();
                 
-                if (isInputLocked()) {
+                if (isVoiceInputLocked()) {
                     console.log('Cannot record while robot is processing or speaking');
                     return;
                 }
@@ -403,26 +403,35 @@
         });
 
         // Functions to enable/disable input controls during robot processing/speech
-        function isInputLocked() {
+        function isTextInputLocked() {
+            return isProcessing;
+        }
+
+        function isVoiceInputLocked() {
             return isProcessing || isSpeaking;
         }
 
         function refreshInputControls() {
-            var disabled = isInputLocked();
+            var textDisabled = isTextInputLocked();
+            var voiceDisabled = isVoiceInputLocked();
             var textarea = document.getElementById('user-input');
             var sendButton = document.getElementById('send-button');
             var floatingMicButton = document.getElementById('floating-mic-button');
 
-            textarea.disabled = disabled;
-            sendButton.disabled = disabled;
+            textarea.disabled = textDisabled;
+            sendButton.disabled = textDisabled;
 
-            if (disabled) {
+            if (textDisabled) {
                 textarea.classList.add('disabled');
                 sendButton.classList.add('disabled');
-                floatingMicButton.classList.add('disabled');
             } else {
                 textarea.classList.remove('disabled');
                 sendButton.classList.remove('disabled');
+            }
+
+            if (voiceDisabled) {
+                floatingMicButton.classList.add('disabled');
+            } else {
                 floatingMicButton.classList.remove('disabled');
             }
         }
@@ -637,8 +646,8 @@
         });
 
         function sendUserInput() {
-            if (isInputLocked()) {
-                console.log('Cannot send input while robot is processing or speaking');
+            if (isTextInputLocked()) {
+                console.log('Cannot send input while robot is processing');
                 return;
             }
             var userInput = document.getElementById('user-input').value.trim();
@@ -678,7 +687,7 @@
 
         document.getElementById('floating-mic-button').addEventListener('mousedown', async function(e) {
             e.preventDefault();
-            if (isInputLocked()) {
+            if (isVoiceInputLocked()) {
                 console.log('Cannot record while robot is processing or speaking');
                 return;
             }
@@ -708,7 +717,7 @@
 
         document.getElementById('floating-mic-button').addEventListener('touchstart', async function(e) {
             e.preventDefault();
-            if (isInputLocked()) {
+            if (isVoiceInputLocked()) {
                 console.log('Cannot record while robot is processing or speaking');
                 return;
             }

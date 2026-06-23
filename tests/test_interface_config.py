@@ -1,0 +1,71 @@
+import ast
+import os
+import unittest
+from pathlib import Path
+
+
+def _load_passive_turn_helpers():
+    """Load only the passive-turn config helpers without importing Flask runtime."""
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / "apps"
+        / "conscious_assistant"
+        / "interface_flask.py"
+    )
+    parsed = ast.parse(source_path.read_text(), filename=str(source_path))
+    helper_names = {"_env_flag", "_should_enable_passive_agent_turns"}
+    helper_defs = [
+        node
+        for node in parsed.body
+        if isinstance(node, ast.FunctionDef) and node.name in helper_names
+    ]
+    module = ast.Module(
+        body=[ast.Import(names=[ast.alias(name="os")])] + helper_defs,
+        type_ignores=[],
+    )
+    namespace = {}
+    exec(compile(ast.fix_missing_locations(module), str(source_path), "exec"), namespace)
+    return namespace["_should_enable_passive_agent_turns"]
+
+
+class InterfaceConfigTests(unittest.TestCase):
+    def setUp(self):
+        self._env_names = [
+            "CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS",
+            "CONSCIOUS_ENABLE_IDLE_THINKING",
+            "CONSCIOUS_ENABLE_SCENE_AGENT_INPUT",
+        ]
+        self._old_env = {name: os.environ.get(name) for name in self._env_names}
+        for name in self._env_names:
+            os.environ.pop(name, None)
+        self._should_enable_passive_agent_turns = _load_passive_turn_helpers()
+
+    def tearDown(self):
+        for name, value in self._old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def test_passive_agent_turns_default_off(self):
+        self.assertFalse(self._should_enable_passive_agent_turns())
+
+    def test_legacy_idle_thinking_env_disables_passive_agent_turns(self):
+        os.environ["CONSCIOUS_ENABLE_IDLE_THINKING"] = "0"
+
+        self.assertFalse(self._should_enable_passive_agent_turns())
+
+    def test_legacy_scene_agent_input_env_can_enable_passive_agent_turns(self):
+        os.environ["CONSCIOUS_ENABLE_SCENE_AGENT_INPUT"] = "1"
+
+        self.assertTrue(self._should_enable_passive_agent_turns())
+
+    def test_current_env_name_takes_precedence_over_legacy_names(self):
+        os.environ["CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS"] = "0"
+        os.environ["CONSCIOUS_ENABLE_IDLE_THINKING"] = "1"
+
+        self.assertFalse(self._should_enable_passive_agent_turns())
+
+
+if __name__ == "__main__":
+    unittest.main()
