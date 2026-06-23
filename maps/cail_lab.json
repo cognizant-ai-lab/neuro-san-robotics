@@ -21,7 +21,7 @@
       "bottom": 2283
     },
     "scale_m_per_px": 0.01217524,
-    "notes": "Coordinates derived from red dot centers on the annotated PNG. Source image/PDF orientation matches the sample note: Up=East, Left=North. A uniform scale is used; east_west is anchored to 22.0m from the sample map, giving north_south=36.22m for this wider floor-plan crop. Runtime calibration: scaled map distances by 1.208116 so Risto's desk to Wellness Room is 13.0 ft; charging/Risto startup heading is 28.3 deg (route bearing 6.3 deg + measured 22.0 deg left dock offset)."
+    "notes": "Coordinates derived from red dot centers on the annotated PNG. Source image/PDF orientation matches the sample note: Up=East, Left=North. A uniform scale is used; east_west is anchored to 22.0m from the sample map, giving north_south=36.22m for this wider floor-plan crop. Runtime calibration: scaled map distances by 1.208116 so Risto's desk to Wellness Room is 13.0 ft; charging/Risto startup heading is 27.0 deg."
   },
   "floor_boundary": [
     [
@@ -69,7 +69,7 @@
         "x": 2599.0,
         "y": 2049.0
       },
-      "heading_degrees": 28.3
+      "heading_degrees": 27.0
     },
     {
       "name": "shrushtis_desk",
@@ -167,7 +167,7 @@
         "x": 2599.0,
         "y": 2049.0
       },
-      "heading_degrees": 28.3
+      "heading_degrees": 27.0
     },
     {
       "name": "jamies_desk",
