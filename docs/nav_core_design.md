@@ -387,7 +387,7 @@ The Go2 EDU has a built-in **Unitree L1 4D LiDAR** that is not yet accessed in t
 | Range | ~25 meters |
 | Update rate | ~20 Hz |
 | Points per scan | ~21,600 |
-| Access | DDS topic `rt/utlidar/range_data` or `ObstaclesClient` |
+| Access | DDS topic `rt/utlidar/cloud` as `sensor_msgs/PointCloud2` |
 
 ### Integration Plan (Phase 4)
 

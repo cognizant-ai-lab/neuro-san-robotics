@@ -102,7 +102,7 @@ specific robot really needs a temporary override.
 | `NAV_DEPTH_CAMERA_SOURCE` | `auto` | Tries RealSense first, then OpenCV depth sources. |
 | `NAV_OBSTACLE_SOURCE` | `lidar` on robot, `depth` in simulation | Selects collision sensing source: `lidar`, `depth`, or `fused`. The robot default uses LiDAR only. |
 | `NAV_USE_LIDAR` | enabled outside simulation | Enables the onboard Unitree LiDAR perimeter service when `NAV_OBSTACLE_SOURCE` includes LiDAR. |
-| `NAV_LIDAR_TOPIC` | `rt/utlidar/range_data` | DDS topic used by the LiDAR perimeter service. Override only if the robot publishes LiDAR on a different topic. |
+| `NAV_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS `sensor_msgs/PointCloud2` topic used by the LiDAR perimeter service. Override only if the robot publishes LiDAR on a different topic. |
 | `NAV_LIDAR_MAX_RANGE` | `4.0` | Maximum LiDAR range projected into the local obstacle grid. Longer-range map building should use a separate SLAM layer. |
 | `NAV_LIDAR_MAX_SAMPLE_AGE` | `0.75` | LiDAR samples older than 0.75 seconds are ignored. |
 | `NAV_MAX_LINEAR_SPEED` | `0.40` | Maximum planned forward speed in meters per second. |

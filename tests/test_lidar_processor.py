@@ -1,4 +1,5 @@
 import os
+import struct
 import time
 import unittest
 from types import SimpleNamespace
@@ -82,6 +83,34 @@ class TestLidarPerimeterService(unittest.TestCase):
 
         self.assertIsNotNone(grid)
         self.assertAlmostEqual(grid.path_obstacle_m, 0.60, places=2)
+
+    def test_sensor_msgs_pointcloud2_sample_is_projected(self):
+        service = self._service()
+        fields = [
+            SimpleNamespace(name="x", offset=0, datatype=7, count=1),
+            SimpleNamespace(name="y", offset=4, datatype=7, count=1),
+            SimpleNamespace(name="z", offset=8, datatype=7, count=1),
+        ]
+        points = [
+            (0.55, 0.0, 0.15),
+            (0.55, 0.03, 0.15),
+            (0.55, -0.03, 0.15),
+        ]
+        data = b"".join(struct.pack("<ffff", x, y, z, 0.0) for x, y, z in points)
+
+        grid = service._grid_from_sample(
+            SimpleNamespace(
+                width=len(points),
+                height=1,
+                fields=fields,
+                is_bigendian=False,
+                point_step=16,
+                data=data,
+            )
+        )
+
+        self.assertIsNotNone(grid)
+        self.assertAlmostEqual(grid.path_obstacle_m, 0.55, places=2)
 
 
 class TestObstacleGridFusion(unittest.TestCase):
