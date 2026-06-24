@@ -35,11 +35,11 @@ class LidarPerimeterConfig:
     robot_half_width: float = 0.15
     path_corridor_half_width: float = 0.12
     path_obstacle_min_points: int = 6
-    self_mask_forward_m: float = 0.36
+    self_mask_forward_m: float = 0.45
     self_mask_rear_m: float = 0.35
-    self_mask_half_width_m: float = 0.18
+    self_mask_half_width_m: float = 0.25
     angle_offset_rad: float = 0.0
-    pointcloud_yaw_offset_rad: float = -math.pi / 2.0
+    pointcloud_yaw_offset_rad: float = math.radians(70.0)
     range_scale: float = 1.0
     max_sample_age_s: float = 0.75
 
@@ -90,13 +90,13 @@ class LidarPerimeterService:
             robot_half_width=_env_float("NAV_ROBOT_HALF_WIDTH", 0.15),
             path_corridor_half_width=_env_float("NAV_PATH_CORRIDOR_HALF_WIDTH", 0.12),
             path_obstacle_min_points=_env_int("NAV_PATH_OBSTACLE_MIN_POINTS", 6),
-            self_mask_forward_m=_env_float("NAV_LIDAR_SELF_MASK_FORWARD", 0.36),
+            self_mask_forward_m=_env_float("NAV_LIDAR_SELF_MASK_FORWARD", 0.45),
             self_mask_rear_m=_env_float("NAV_LIDAR_SELF_MASK_REAR", 0.35),
-            self_mask_half_width_m=_env_float("NAV_LIDAR_SELF_MASK_HALF_WIDTH", 0.18),
+            self_mask_half_width_m=_env_float("NAV_LIDAR_SELF_MASK_HALF_WIDTH", 0.25),
             angle_offset_rad=_env_float("NAV_LIDAR_ANGLE_OFFSET_RAD", 0.0),
             pointcloud_yaw_offset_rad=_env_float(
                 "NAV_LIDAR_POINTCLOUD_YAW_OFFSET_RAD",
-                _env_float("NAV_LIDAR_ANGLE_OFFSET_RAD", -math.pi / 2.0),
+                _env_float("NAV_LIDAR_ANGLE_OFFSET_RAD", math.radians(70.0)),
             ),
             range_scale=_env_float("NAV_LIDAR_RANGE_SCALE", 1.0),
             max_sample_age_s=_env_float("NAV_LIDAR_MAX_SAMPLE_AGE", 0.75),

@@ -130,21 +130,28 @@ class TestLidarPerimeterService(unittest.TestCase):
         self.assertIsNotNone(grid)
         self.assertAlmostEqual(grid.path_obstacle_m, 0.85, places=2)
 
-    def test_go2_pointcloud_y_axis_is_rotated_to_robot_forward(self):
+    def test_go2_default_pointcloud_frame_rotates_negative_y_forward(self):
         service = LidarPerimeterService(
             LidarPerimeterConfig(
                 enabled=False,
                 robot_half_width=0.15,
                 path_obstacle_min_points=3,
-                pointcloud_yaw_offset_rad=-math.pi / 2.0,
             )
         )
+        yaw_offset = service._config.pointcloud_yaw_offset_rad
+
+        def raw_point(forward_m: float, left_m: float) -> tuple[float, float, float]:
+            return (
+                forward_m * math.cos(yaw_offset) + left_m * math.sin(yaw_offset),
+                -forward_m * math.sin(yaw_offset) + left_m * math.cos(yaw_offset),
+                0.15,
+            )
 
         grid = service.grid_from_points(
             [
-                (0.00, 0.90, 0.15),
-                (0.03, 0.90, 0.15),
-                (-0.03, 0.90, 0.15),
+                raw_point(0.90, 0.00),
+                raw_point(0.90, 0.03),
+                raw_point(0.90, -0.03),
             ]
         )
 
