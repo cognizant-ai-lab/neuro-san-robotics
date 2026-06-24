@@ -155,8 +155,10 @@ def _unitree_camera_interface(default_ifname: Optional[str] = None) -> Optional[
         default_ifname
         or os.environ.get("VISION_CAMERA_INTERFACE")
         or os.environ.get("GO2_CAMERA_INTERFACE")
+        or os.environ.get("GO2_NETWORK_INTERFACE")
         or os.environ.get("CYCLONEDDS_NETWORK_INTERFACE")
         or os.environ.get("IFNAME")
+        or "eth0"
     )
 
 
@@ -437,6 +439,30 @@ def _discover_v4l2_devices(limit: int = 6) -> List[str]:
     return [str(path) for path in devices[: max(0, limit)]]
 
 
+def _discover_realsense_color_devices(limit: int = 2) -> List[str]:
+    """Return stable RealSense color-camera device links, preferring video-index0."""
+    by_id_dir = Path("/dev/v4l/by-id")
+    if not by_id_dir.exists():
+        return []
+
+    patterns = (
+        "*RealSense*video-index0",
+        "*RealSense*video-index1",
+    )
+    devices = []
+    seen = set()
+    for pattern in patterns:
+        for path in sorted(by_id_dir.glob(pattern)):
+            device_path = str(path)
+            if device_path in seen:
+                continue
+            seen.add(device_path)
+            devices.append(device_path)
+            if len(devices) >= limit:
+                return devices
+    return devices
+
+
 def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[Dict[str, Any]]:
     """Normalize a camera source override into a single candidate descriptor."""
     if camera_source is None:
@@ -535,7 +561,7 @@ def get_camera_candidates(
 
     Priority:
     1. Explicit source override (`VISION_CAMERA_SOURCE`, `unitree:eth0`, `/dev/videoN`, index, or pipeline)
-    2. Unitree Go2 front camera via SDK2 (on Jetson/robot installs)
+    2. Intel RealSense color camera via stable `/dev/v4l/by-id` link
     3. Jetson CSI sensors via GStreamer
     4. Present V4L2 devices under `/dev/video*`
     5. Plain OpenCV camera indices for laptop/desktop webcams
@@ -562,19 +588,16 @@ def get_camera_candidates(
             "description": description,
         })
 
-    if _is_jetson_platform() and _unitree_camera_available():
-        unitree_ifname = _unitree_camera_interface()
-        unitree_description = "Unitree Go2 front camera"
-        if unitree_ifname:
-            unitree_description += f" via {unitree_ifname}"
-        candidates.append({
-            "kind": "unitree",
-            "source": "unitree",
-            "backend": None,
-            "description": unitree_description,
-            "ifname": unitree_ifname,
-        })
-        seen.add(("unitree", None))
+    for device_path in _discover_realsense_color_devices():
+        add_candidate(
+            device_path,
+            None,
+            f"Intel RealSense color camera ({Path(device_path).name})",
+        )
+
+    # Unitree front-camera auto fallback is intentionally disabled while the
+    # scene/face pipeline is tested against the RealSense RGB camera. Explicit
+    # VISION_CAMERA_SOURCE=unitree:eth0 still works through _normalize_camera_source().
 
     if _is_jetson_platform():
         for sensor_id in range(2):

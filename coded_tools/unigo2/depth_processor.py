@@ -140,8 +140,8 @@ class DepthProcessorConfig:
     depth_width: int = 640
     depth_height: int = 480
     depth_fps: int = 30
-    process_width: int = 320        # downsample target
-    process_height: int = 240
+    process_width: int = 640        # depth processing target
+    process_height: int = 480
 
     # Range limits
     min_depth_m: float = 0.1
@@ -202,6 +202,8 @@ class DepthProcessor:
             robot_half_width=_env_float("NAV_ROBOT_HALF_WIDTH", 0.15),
             path_corridor_half_width=_env_float("NAV_PATH_CORRIDOR_HALF_WIDTH", 0.12),
             path_obstacle_min_points=_env_int("NAV_PATH_OBSTACLE_MIN_POINTS", 6),
+            process_width=_env_int("NAV_DEPTH_PROCESS_WIDTH", 640),
+            process_height=_env_int("NAV_DEPTH_PROCESS_HEIGHT", 480),
             min_depth_m=_env_float("NAV_MIN_DEPTH", 0.1),
             max_depth_m=_env_float("NAV_MAX_DEPTH", 4.0),
             simulation_mode=_env_flag("NAV_SIMULATION_MODE", False),

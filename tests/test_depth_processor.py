@@ -1,4 +1,5 @@
 import math
+import os
 import unittest
 
 import numpy as np
@@ -80,6 +81,20 @@ class TestDepthProcessorSimulation(unittest.TestCase):
 
 
 class TestDepthProcessing(unittest.TestCase):
+
+    def test_depth_processing_defaults_to_full_realsense_sampling(self):
+        old_width = os.environ.pop("NAV_DEPTH_PROCESS_WIDTH", None)
+        old_height = os.environ.pop("NAV_DEPTH_PROCESS_HEIGHT", None)
+        try:
+            cfg = DepthProcessor._config_from_env()
+        finally:
+            if old_width is not None:
+                os.environ["NAV_DEPTH_PROCESS_WIDTH"] = old_width
+            if old_height is not None:
+                os.environ["NAV_DEPTH_PROCESS_HEIGHT"] = old_height
+
+        self.assertEqual(cfg.process_width, 640)
+        self.assertEqual(cfg.process_height, 480)
 
     def test_empty_depth_produces_empty_grid(self):
         """All-zeros depth (out of range) should produce an empty grid."""

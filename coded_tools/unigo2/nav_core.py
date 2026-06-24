@@ -54,6 +54,8 @@ from coded_tools.unigo2.obstacle_confirmation import ObstacleConfirmationTracker
 from coded_tools.unigo2.obstacle_provider import create_default_obstacle_provider
 
 logger = logging.getLogger(__name__)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_MAP_FILE = REPO_ROOT / "maps" / "cail_lab.json"
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +72,16 @@ def _get_go2_macros():
         from coded_tools.unigo2.go2_macros import Go2Macros
         _go2_macros_cls = Go2Macros
     return _go2_macros_cls()
+
+
+def _configured_map_file() -> str:
+    """Return the map file for production navigation, with env only as an override."""
+    configured = os.environ.get("NAV_MAP_FILE")
+    if configured is not None:
+        return configured.strip()
+    if _env_flag("NAV_SIMULATION_MODE", False):
+        return ""
+    return str(DEFAULT_MAP_FILE)
 
 
 # ---------------------------------------------------------------------------
@@ -1137,6 +1149,7 @@ def _create_odometry_provider() -> OdometryProvider:
     network_interface = (
         os.environ.get("GO2_NETWORK_INTERFACE")
         or os.environ.get("CYCLONEDDS_NETWORK_INTERFACE")
+        or "eth0"
     )
     provider = SdkSportModeOdometryProvider(
         topic=topic,
@@ -1172,8 +1185,8 @@ class NavCore:
 
     # Configuration (overridable via environment variables)
     NAV_LOOP_HZ: int = _env_int("NAV_LOOP_HZ", 10)
-    SAFETY_DISTANCE_M: float = _env_float("NAV_SAFETY_DISTANCE", 0.20)
-    AVOIDANCE_DISTANCE_M: float = _env_float("NAV_AVOIDANCE_DISTANCE", 0.60)
+    SAFETY_DISTANCE_M: float = _env_float("NAV_SAFETY_DISTANCE", 0.10)
+    AVOIDANCE_DISTANCE_M: float = _env_float("NAV_AVOIDANCE_DISTANCE", 0.30)
     MAX_LINEAR_SPEED: float = _env_float("NAV_MAX_LINEAR_SPEED", 0.40)
     MAX_YAW_RATE: float = _env_float("NAV_MAX_YAW_RATE", 0.08)
     PIVOT_YAW_RATE: float = _env_float(
@@ -1287,7 +1300,7 @@ class NavCore:
         self._go2 = None
 
         # Load map if configured
-        map_file = os.environ.get("NAV_MAP_FILE", "")
+        map_file = _configured_map_file()
         if map_file and Path(map_file).exists():
             if self._topo_map.load_from_file(map_file):
                 self._anchor_initial_pose()

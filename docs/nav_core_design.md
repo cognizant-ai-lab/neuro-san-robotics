@@ -122,7 +122,7 @@ Total: ~10ms per frame on Orin Nano CPU. No GPU needed.
 
 ### Camera Access Strategy
 
-The depth camera (Intel RealSense D435i or similar USB depth camera) is accessed via `pyrealsense2`, independently from the Unitree front RGB camera. This avoids contention with `scene_observer.py` which uses the front camera through `open_camera()`.
+The depth camera (Intel RealSense D435i or similar USB depth camera) is accessed via `pyrealsense2`. The scene observer prefers the RealSense color camera through `open_camera()` so the visual scene and depth grid are aligned during navigation tests.
 
 ### Fallback: Vision-Based Distance Estimation
 
@@ -784,8 +784,8 @@ Following existing patterns from `vision_core.py` (`_env_flag()`, `_env_float()`
 |----------|------|---------|---------|
 | `NAV_ENABLED` | bool | `False` | Master enable for navigation subsystem |
 | `NAV_LOOP_HZ` | int | `10` | Navigation loop frequency |
-| `NAV_SAFETY_DISTANCE` | float | `0.20` | Confirmed stop distance in the path corridor (meters) |
-| `NAV_AVOIDANCE_DISTANCE` | float | `0.60` | Slowdown start distance for path-corridor obstacles (meters) |
+| `NAV_SAFETY_DISTANCE` | float | `0.10` | Confirmed stop distance in the path corridor (meters) |
+| `NAV_AVOIDANCE_DISTANCE` | float | `0.30` | Slowdown and local-steering start distance for path-corridor obstacles (meters) |
 | `NAV_PATH_OBSTACLE_CONFIRM_S` | float | `0.3` | Seconds an avoidance-band path obstacle must persist before planner/safety use it |
 | `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | int | `3` | Nav-loop readings an avoidance-band path obstacle must persist before planner/safety use it |
 | `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | float | `0.15` | Raw center-depth agreement margin for avoidance-band path obstacles |
@@ -794,7 +794,7 @@ Following existing patterns from `vision_core.py` (`_env_flag()`, `_env_float()`
 | `NAV_PIVOT_YAW_RATE` | float | `0.50` | In-place yaw rate for planned map turns (rad/s) |
 | `NAV_DEPTH_CAMERA_SOURCE` | str | `"auto"` | Depth camera device identifier |
 | `NAV_USE_LIDAR` | bool | `True` | Attempt to subscribe to LiDAR DDS topic |
-| `NAV_MAP_FILE` | str | `""` | Path to topological map JSON file |
+| `NAV_MAP_FILE` | str | repo `maps/cail_lab.json` on robot, `""` in simulation | Path to topological map JSON file |
 | `NAV_SIMULATION_MODE` | bool | `False` | Desktop testing with synthetic obstacles |
 | `NAV_GOAL_TOLERANCE` | float | `0.15` | Distance to consider goal reached (meters) |
 | `NAV_STUCK_TIMEOUT` | float | `10.0` | Seconds without progress before STUCK state |

@@ -15,6 +15,7 @@ from coded_tools.unigo2.depth_processor import (
     ObstacleGrid,
 )
 from coded_tools.unigo2.nav_core import (
+    DEFAULT_MAP_FILE,
     GlobalPlanner,
     LocalPlanner,
     MapEdge,
@@ -28,6 +29,8 @@ from coded_tools.unigo2.nav_core import (
     SdkSportModeOdometryProvider,
     TopologicalMap,
     VelocityCommand,
+    _configured_map_file,
+    _create_odometry_provider,
 )
 from coded_tools.unigo2.obstacle_confirmation import ObstacleConfirmationTracker
 
@@ -71,6 +74,31 @@ def _grid_with_wall_ahead(distance_m=1.0, rows=80, cols=80, resolution=0.05) -> 
         path_obstacle_m=distance_m,
         path_obstacle_bearing=0.0,
         path_obstacle_points=100,
+    )
+
+
+def _grid_with_center_block_ahead(distance_m=0.25, rows=80, cols=80, resolution=0.05) -> ObstacleGrid:
+    grid = np.zeros((rows, cols), dtype=np.float32)
+    origin_row = rows - 1
+    origin_col = cols // 2
+
+    block_row = origin_row - int(distance_m / resolution)
+    for row in range(block_row - 2, block_row + 3):
+        for col in range(origin_col - 2, origin_col + 3):
+            if 0 <= row < rows and 0 <= col < cols:
+                grid[row, col] = 1.0
+
+    return ObstacleGrid(
+        grid=grid,
+        resolution=resolution,
+        origin_row=origin_row,
+        origin_col=origin_col,
+        timestamp=time.time(),
+        nearest_obstacle_m=distance_m,
+        nearest_obstacle_bearing=0.0,
+        path_obstacle_m=distance_m,
+        path_obstacle_bearing=0.0,
+        path_obstacle_points=25,
     )
 
 
@@ -310,6 +338,15 @@ class TestLocalPlanner(unittest.TestCase):
         cmd = planner.compute_velocity(grid, goal_direction=0.0, goal_distance=2.0)
         self.assertAlmostEqual(cmd.vx, 0.0,
                                msg="Should stop at safety distance")
+
+    def test_steers_around_supported_obstacle_in_avoidance_band(self):
+        planner = LocalPlanner(max_linear_speed=0.3, safety_distance=0.1, avoidance_distance=0.3)
+        grid = _grid_with_center_block_ahead(distance_m=0.25)
+
+        cmd = planner.compute_velocity(grid, goal_direction=0.0, goal_distance=2.0)
+
+        self.assertGreater(cmd.vx, 0.0, "Should keep moving while circumnavigating")
+        self.assertNotAlmostEqual(cmd.vyaw, 0.0, msg="Should steer around the block")
 
     def test_drives_when_only_side_obstacle_is_close(self):
         planner = LocalPlanner(max_linear_speed=0.3, safety_distance=0.4, avoidance_distance=0.8)
@@ -635,6 +672,20 @@ class TestTopologicalMap(unittest.TestCase):
 
 class TestOdometryProvider(unittest.TestCase):
 
+    @patch("coded_tools.unigo2.nav_core.SdkSportModeOdometryProvider")
+    def test_sdk_odometry_factory_defaults_to_eth0_interface(self, mock_sdk_provider):
+        provider = MagicMock()
+        provider.subscriber_error = None
+        mock_sdk_provider.return_value = provider
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIs(_create_odometry_provider(), provider)
+
+        mock_sdk_provider.assert_called_once_with(
+            topic="rt/sportmodestate",
+            network_interface="eth0",
+        )
+
     def test_initial_pose_is_zero(self):
         odom = OdometryProvider()
         pose = odom.get_pose()
@@ -782,8 +833,8 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.MAX_LINEAR_SPEED, 0.40)
         self.assertAlmostEqual(NavCore.MAX_YAW_RATE, 0.08)
         self.assertAlmostEqual(NavCore.PIVOT_YAW_RATE, 0.50)
-        self.assertAlmostEqual(NavCore.SAFETY_DISTANCE_M, 0.20)
-        self.assertAlmostEqual(NavCore.AVOIDANCE_DISTANCE_M, 0.60)
+        self.assertAlmostEqual(NavCore.SAFETY_DISTANCE_M, 0.10)
+        self.assertAlmostEqual(NavCore.AVOIDANCE_DISTANCE_M, 0.30)
         self.assertAlmostEqual(NavCore.PIVOT_HARD_STOP_DISTANCE_M, 0.00)
         self.assertAlmostEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_S, 0.7)
         self.assertEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS, 6)
@@ -791,6 +842,19 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertEqual(NavCore.PATH_OBSTACLE_CONFIRM_READINGS, 3)
         self.assertAlmostEqual(NavCore.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M, 0.15)
         self.assertAlmostEqual(NavCore.GOAL_TOLERANCE_M, 0.15)
+
+    def test_robot_map_default_is_in_code(self):
+        old_map = os.environ.pop("NAV_MAP_FILE", None)
+        old_sim = os.environ.pop("NAV_SIMULATION_MODE", None)
+        try:
+            self.assertEqual(_configured_map_file(), str(DEFAULT_MAP_FILE))
+            os.environ["NAV_SIMULATION_MODE"] = "1"
+            self.assertEqual(_configured_map_file(), "")
+        finally:
+            if old_map is not None:
+                os.environ["NAV_MAP_FILE"] = old_map
+            if old_sim is not None:
+                os.environ["NAV_SIMULATION_MODE"] = old_sim
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_get_status_summary(self, mock_go2):
@@ -996,7 +1060,7 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._go2 = fake_go2
 
             fake_depth = MagicMock()
-            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.18)
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.08)
             nav._depth_processor = fake_depth
 
             goal = NavGoal(goal_type="relative", x=2.0, y=0.0)
@@ -1009,12 +1073,12 @@ class TestNavCoreStatus(unittest.TestCase):
                 nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.E_STOP)
-            self.assertIn("E-STOP: path obstacle at 0.18m", nav.get_status_summary())
+            self.assertIn("E-STOP: path obstacle at 0.08m", nav.get_status_summary())
             self.assertEqual(
                 events,
                 [
                     "I stopped before reaching the destination because my depth sensor "
-                    "reported something in my path at 0.18 meters."
+                    "reported something in my path at 0.08 meters."
                 ],
             )
             fake_go2.stop_move.assert_called()
@@ -1041,7 +1105,7 @@ class TestNavCoreStatus(unittest.TestCase):
 
             fake_depth = MagicMock()
             fake_depth.get_obstacle_grid.side_effect = [
-                _grid_with_wall_ahead(distance_m=0.18),
+                _grid_with_wall_ahead(distance_m=0.08),
                 _empty_grid(),
             ]
             nav._depth_processor = fake_depth
@@ -1087,7 +1151,7 @@ class TestNavCoreStatus(unittest.TestCase):
 
             fake_depth = MagicMock()
             fake_depth.get_obstacle_grid.side_effect = [
-                _grid_with_wall_ahead(distance_m=0.55),
+                _grid_with_wall_ahead(distance_m=0.25),
                 _empty_grid(),
             ]
             nav._depth_processor = fake_depth
@@ -1132,7 +1196,7 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._go2 = fake_go2
 
             fake_depth = MagicMock()
-            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.55)
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.25)
             nav._depth_processor = fake_depth
             nav._local_planner = MagicMock()
             nav._local_planner.compute_velocity.return_value = VelocityCommand(
@@ -1157,7 +1221,7 @@ class TestNavCoreStatus(unittest.TestCase):
 
             nav._nav_cycle(NavState.NAVIGATING, goal)
             third_grid = nav._local_planner.compute_velocity.call_args.args[0]
-            self.assertAlmostEqual(third_grid.path_obstacle_m, 0.55)
+            self.assertAlmostEqual(third_grid.path_obstacle_m, 0.25)
 
             self.assertEqual(nav.state, NavState.NAVIGATING)
             nav.shutdown()
@@ -1186,7 +1250,7 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._go2 = fake_go2
 
             fake_depth = MagicMock()
-            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.55)
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.25)
             fake_depth.get_center_depth_reading.return_value = CenterDepthReading(
                 distance_m=2.0,
                 coverage=0.5,
@@ -1389,8 +1453,8 @@ class TestNavCoreStatus(unittest.TestCase):
                 max_linear_speed=0.40,
                 max_yaw_rate=0.08,
                 pivot_yaw_rate=0.50,
-                safety_distance=0.20,
-                avoidance_distance=0.60,
+                safety_distance=0.10,
+                avoidance_distance=0.30,
             )
             nav._topo_map.load_from_dict({
                 "name": "suite21",
@@ -1614,7 +1678,7 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._go2 = fake_go2
 
             fake_depth = MagicMock()
-            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.55)
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(distance_m=0.25)
             nav._depth_processor = fake_depth
             nav._local_planner = MagicMock()
             nav._local_planner.compute_velocity.return_value = VelocityCommand(
@@ -1658,7 +1722,7 @@ class TestNavCoreStatus(unittest.TestCase):
             fake_depth = MagicMock()
             fake_depth.get_obstacle_grid.return_value = _empty_grid()
             fake_depth.get_center_depth_reading.return_value = CenterDepthReading(
-                distance_m=0.40,
+                distance_m=0.20,
                 coverage=0.5,
             )
             nav._depth_processor = fake_depth
@@ -1705,7 +1769,7 @@ class TestNavCoreStatus(unittest.TestCase):
             fake_depth = MagicMock()
             fake_depth.get_obstacle_grid.return_value = _empty_grid()
             fake_depth.get_center_depth_reading.return_value = CenterDepthReading(
-                distance_m=0.18,
+                distance_m=0.08,
                 coverage=0.5,
             )
             nav._depth_processor = fake_depth
@@ -1726,7 +1790,7 @@ class TestNavCoreStatus(unittest.TestCase):
                 events,
                 [
                     "I stopped before reaching Kitchen because my depth sensor "
-                    "reported something in my path at 0.18 meters."
+                    "reported something in my path at 0.08 meters."
                 ],
             )
             fake_go2.move.assert_not_called()

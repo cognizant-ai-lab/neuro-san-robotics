@@ -116,7 +116,7 @@ class FusedObstacleProvider:
 
 def create_default_obstacle_provider() -> FusedObstacleProvider:
     """Create the production obstacle provider used by NavCore."""
-    default_source = "depth" if _env_flag("NAV_SIMULATION_MODE", False) else "lidar"
+    default_source = "depth"
     source = os.environ.get("NAV_OBSTACLE_SOURCE", default_source).strip().lower()
     use_depth = source in {"depth", "camera", "realsense", "fused", "all"}
     use_lidar = source in {"lidar", "fused", "all"}

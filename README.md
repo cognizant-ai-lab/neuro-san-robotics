@@ -40,36 +40,23 @@ export PYTHONPATH="$HOME/librealsense-2.54.2/build/Release:$PWD:$PWD/coded_tools
 export AGENT_TOOL_PATH="$PWD/coded_tools"
 export AGENT_MANIFEST_FILE="$PWD/registries/manifest.hocon"
 
-export VISION_CAMERA_SOURCE=unitree:eth0
-
-export GO2_NETWORK_INTERFACE=eth0
-export CYCLONEDDS_NETWORK_INTERFACE=eth0
 export CYCLONEDDS_HOME="$PWD/cyclonedds/install"
 export CYCLONEDDS_URI="file://$HOME/cyclonedds.xml"
 
 export LD_LIBRARY_PATH="$PWD/cyclonedds/install/lib:$HOME/librealsense-2.54.2/build:${LD_LIBRARY_PATH:-}"
 
-export NAV_MAP_FILE="$PWD/maps/cail_lab.json"
-
 printf 'PYTHONPATH=%s\n' "$PYTHONPATH"
 printf 'AGENT_TOOL_PATH=%s\n' "$AGENT_TOOL_PATH"
 printf 'AGENT_MANIFEST_FILE=%s\n' "$AGENT_MANIFEST_FILE"
-
-printf 'VISION_CAMERA_SOURCE=%s\n' "$VISION_CAMERA_SOURCE"
-
-printf 'GO2_NETWORK_INTERFACE=%s\n' "$GO2_NETWORK_INTERFACE"
-printf 'CYCLONEDDS_NETWORK_INTERFACE=%s\n' "$CYCLONEDDS_NETWORK_INTERFACE"
 printf 'CYCLONEDDS_HOME=%s\n' "$CYCLONEDDS_HOME"
 printf 'CYCLONEDDS_URI=%s\n' "$CYCLONEDDS_URI"
 printf 'LD_LIBRARY_PATH=%s\n' "$LD_LIBRARY_PATH"
-
-printf 'NAV_MAP_FILE=%s\n' "$NAV_MAP_FILE"
 ```
 
 The final `printf` block is intentionally limited to local environment wiring:
 after `source setmyenv.sh`, the shell prints only the values that differ by
-robot, checkout, network, or local install path. Navigation and behavior tuning
-defaults live in code and are logged by the app at startup.
+checkout or local install path. Navigation, camera, network-interface, and
+behavior tuning defaults live in code and are logged by the app at startup.
 
 #### Environment variable meanings
 
@@ -78,13 +65,9 @@ defaults live in code and are logged by the app at startup.
 | `PYTHONPATH` | RealSense binding, repo root, and `coded_tools` | Lets Python import the locally built `pyrealsense2`, project modules, and coded tools. |
 | `AGENT_TOOL_PATH` | `$PWD/coded_tools` | Directory where Neuro SAN finds coded tools. |
 | `AGENT_MANIFEST_FILE` | `$PWD/registries/manifest.hocon` | Tool/agent manifest used by the assistant runtime. |
-| `VISION_CAMERA_SOURCE` | `unitree:eth0` | Uses the Unitree front camera over `eth0` for visual observation. |
-| `GO2_NETWORK_INTERFACE` | `eth0` | Network interface used for Go2 SDK communication. |
-| `CYCLONEDDS_NETWORK_INTERFACE` | `eth0` | Network interface CycloneDDS should bind to. |
 | `CYCLONEDDS_HOME` | `$PWD/cyclonedds/install` | Local CycloneDDS install path. |
 | `CYCLONEDDS_URI` | `file://$HOME/cyclonedds.xml` | CycloneDDS configuration file. |
 | `LD_LIBRARY_PATH` | CycloneDDS and librealsense libs | Lets the runtime loader find DDS and RealSense shared libraries. |
-| `NAV_MAP_FILE` | `$PWD/maps/cail_lab.json` | Topological map for named destinations. |
 
 #### Navigation and behavior defaults in code
 
@@ -99,9 +82,14 @@ specific robot really needs a temporary override.
 | `GO2_MOVE_LOG_INTERVAL_SECONDS` | `-1` | Suppresses repeated raw `Move(vx, vy, vyaw)` logs. |
 | `GO2_DISABLE_FREE_AVOID_ON_INIT` | `1` | Calls `FreeAvoid(false)` after SportClient init so Unitree firmware avoidance does not override app-level navigation. |
 | `GO2_USE_SDK_SPECIAL_MOTIONS` | `1` | Uses Unitree SDK special motions when available. |
+| `GO2_NETWORK_INTERFACE` / `CYCLONEDDS_NETWORK_INTERFACE` | `eth0` | Unitree SDK communication interface. Override only if the robot network is not on `eth0`. |
+| `VISION_CAMERA_SOURCE` | auto RealSense color camera by stable `/dev/v4l/by-id` link | Camera source for visual observation and face detection. Override only for a different camera, for example `unitree:eth0`. |
+| `NAV_MAP_FILE` | repo `maps/cail_lab.json` on robot, none in simulation | Topological map for named destinations. Override only for a different map, or set empty to disable map loading. |
 | `NAV_DEPTH_CAMERA_SOURCE` | `auto` | Tries RealSense first, then OpenCV depth sources. |
-| `NAV_OBSTACLE_SOURCE` | `lidar` on robot, `depth` in simulation | Selects collision sensing source: `lidar`, `depth`, or `fused`. The robot default uses LiDAR only. |
-| `NAV_USE_LIDAR` | enabled outside simulation | Enables the onboard Unitree LiDAR perimeter service when `NAV_OBSTACLE_SOURCE` includes LiDAR. |
+| `NAV_DEPTH_PROCESS_WIDTH` | `640` | Depth-frame processing width. The robot default uses the full RealSense depth width for denser obstacle sampling. |
+| `NAV_DEPTH_PROCESS_HEIGHT` | `480` | Depth-frame processing height. The robot default uses the full RealSense depth height for denser obstacle sampling. |
+| `NAV_OBSTACLE_SOURCE` | `depth` | Selects collision sensing source: `depth`, `lidar`, or `fused`. The robot default uses the depth camera; LiDAR is opt-in. |
+| `NAV_USE_LIDAR` | enabled outside simulation | Enables the onboard Unitree LiDAR service when `NAV_OBSTACLE_SOURCE` includes LiDAR. |
 | `NAV_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS `sensor_msgs/PointCloud2` topic used by the LiDAR perimeter service. Override only if the robot publishes LiDAR on a different topic. |
 | `NAV_LIDAR_POINTCLOUD_YAW_OFFSET_RAD` | `1.2217` | Rotates Unitree PointCloud2 points into the robot frame before self-masking and path-corridor checks. |
 | `NAV_LIDAR_SELF_MASK_FORWARD` | `0.45` | Ignores LiDAR returns inside the robot footprint up to 0.45 m in front of the LiDAR frame. |
@@ -119,8 +107,8 @@ specific robot really needs a temporary override.
 | `NAV_SDK_ODOMETRY_MIN_DELTA_M` | `0.02` | SDK position must change by at least 0.02 m before translation odometry is trusted, when `NAV_USE_SDK_TRANSLATION_ODOMETRY=1`. |
 | `NAV_SDK_ODOMETRY_MIN_DELTA_YAW_RAD` | `0.03` | SDK yaw must change by at least 0.03 rad before it is trusted as moving odometry. |
 | `NAV_ODOMETRY_YAW_RATE_RATIO` | `1.00` | Fallback yaw scale used while SDK odometry is stale or unconfirmed. |
-| `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed safety stop threshold inside the path corridor. |
-| `NAV_AVOIDANCE_DISTANCE` | `0.60` | Slowdown begins for supported path obstacles closer than 0.60 m. |
+| `NAV_SAFETY_DISTANCE` | `0.10` | Confirmed safety stop threshold inside the path corridor. |
+| `NAV_AVOIDANCE_DISTANCE` | `0.30` | Slowdown and local steering begin for supported path obstacles closer than 0.30 m. |
 | `NAV_PIVOT_HARD_STOP_DISTANCE` | `0.00` | Lets close path obstacles use the confirmation window before aborting. |
 | `NAV_CLOSE_OBSTACLE_CONFIRM_S` | `0.7` | Close path obstacles must persist for at least 0.7 seconds before aborting. |
 | `NAV_CLOSE_OBSTACLE_CONFIRM_READINGS` | `6` | Close path obstacles must also persist for at least 6 nav-loop readings. |
@@ -258,10 +246,9 @@ cd ..
 
 ### Set up navigation sensors on the robot
 
-`nav_core` uses the onboard Unitree LiDAR for collision sensing on the robot by
-default. RealSense depth is optional and should only be enabled with
-`NAV_OBSTACLE_SOURCE=depth` or `NAV_OBSTACLE_SOURCE=fused` when that camera is
-calibrated for the robot.
+`nav_core` uses the RealSense/depth obstacle grid for collision sensing by
+default. The onboard Unitree LiDAR remains available only as an explicit opt-in
+with `NAV_OBSTACLE_SOURCE=lidar` or `NAV_OBSTACLE_SOURCE=fused`.
 
 For RealSense/depth mode on the Jetson/Go2, install the system tools first:
 

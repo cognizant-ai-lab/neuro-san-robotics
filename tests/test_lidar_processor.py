@@ -226,7 +226,15 @@ class TestObstacleProviderDefaults(unittest.TestCase):
             else:
                 os.environ[name] = value
 
-    def test_robot_default_is_lidar_only(self):
+    def test_robot_default_is_depth_only(self):
+        provider = create_default_obstacle_provider()
+
+        self.assertIsNotNone(provider._depth)
+        self.assertEqual(provider._perimeter_sources, [])
+
+    def test_lidar_can_still_be_enabled_explicitly(self):
+        os.environ["NAV_OBSTACLE_SOURCE"] = "lidar"
+
         provider = create_default_obstacle_provider()
 
         self.assertIsNone(provider._depth)

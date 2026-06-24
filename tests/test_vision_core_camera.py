@@ -176,16 +176,29 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertEqual(candidate["ifname"], "eth0")
         self.assertIn("Unitree Go2 front camera", candidate["description"])
 
+    def test_unitree_camera_interface_defaults_to_eth0(self):
+        with patch.dict(vision_core.os.environ, {}, clear=True):
+            self.assertEqual(vision_core._unitree_camera_interface(), "eth0")
+
     @patch.object(vision_core, "_discover_v4l2_devices", return_value=["/dev/video2", "/dev/video4"])
-    @patch.object(vision_core, "_unitree_camera_interface", return_value=None)
-    @patch.object(vision_core, "_unitree_camera_available", return_value=True)
+    @patch.object(
+        vision_core,
+        "_discover_realsense_color_devices",
+        return_value=[
+            "/dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_435i-video-index0"
+        ],
+    )
     @patch.object(vision_core, "_is_jetson_platform", return_value=True)
     def test_default_candidates_cover_jetson_v4l2_and_index_fallbacks(self, *_):
         candidates = vision_core.get_camera_candidates(max_indices=3)
         descriptions = [candidate["description"] for candidate in candidates]
 
-        self.assertEqual(descriptions[0], "Unitree Go2 front camera")
+        self.assertEqual(
+            descriptions[0],
+            "Intel RealSense color camera (usb-Intel_R__RealSense_TM__Depth_Camera_435i-video-index0)",
+        )
         self.assertEqual(descriptions[1:3], ["Jetson CSI sensor 0", "Jetson CSI sensor 1"])
+        self.assertNotIn("Unitree Go2 front camera", descriptions)
         self.assertIn("/dev/video2", descriptions)
         self.assertIn("/dev/video4", descriptions)
         self.assertIn("camera index 0", descriptions)

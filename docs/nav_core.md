@@ -38,8 +38,7 @@ print('Backend:', dp.backend)
 print(dp.get_obstacle_summary())
 "
 
-# 3. Start navigation with a map
-export NAV_MAP_FILE=maps/cail_lab.json
+# 3. Start navigation with the default map
 export NAV_ENABLED=1
 python -c "
 from coded_tools.unigo2.nav_core import NavCore
@@ -143,8 +142,8 @@ Maps are JSON files that define named locations and connections between them.
 ### Loading a map
 
 ```bash
-# Via environment variable (loaded at startup)
-export NAV_MAP_FILE=maps/cail_lab.json
+# The default robot map is loaded at startup from maps/cail_lab.json.
+# Set NAV_MAP_FILE only when overriding the map path.
 
 # Or programmatically
 from coded_tools.unigo2.nav_core import NavCore
@@ -196,13 +195,13 @@ Both tools are registered in `registries/conscious_agent.hocon`.
 |----------|---------|-------------|
 | `NAV_ENABLED` | `false` | Master enable for navigation |
 | `NAV_SIMULATION_MODE` | `false` | Use synthetic depth data (no hardware) |
-| `NAV_MAP_FILE` | `""` | Path to topological map JSON |
+| `NAV_MAP_FILE` | repo `maps/cail_lab.json` on robot, `""` in simulation | Path to topological map JSON |
 | `NAV_LOOP_HZ` | `10` | Navigation loop frequency |
 | `NAV_MAX_LINEAR_SPEED` | `0.40` | Max planned forward speed (m/s) |
 | `NAV_MAX_YAW_RATE` | `0.08` | Max yaw correction while translating (rad/s) |
 | `NAV_PIVOT_YAW_RATE` | `0.50` | In-place yaw rate for planned turns (rad/s) |
-| `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed stop distance in the path corridor (meters) |
-| `NAV_AVOIDANCE_DISTANCE` | `0.60` | Start slowing down for path-corridor obstacles (meters) |
+| `NAV_SAFETY_DISTANCE` | `0.10` | Confirmed stop distance in the path corridor (meters) |
+| `NAV_AVOIDANCE_DISTANCE` | `0.30` | Start slowing down and locally steering for path-corridor obstacles (meters) |
 | `NAV_PATH_OBSTACLE_CONFIRM_S` | `0.3` | Seconds an avoidance-band path obstacle must persist before affecting planning |
 | `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | `3` | Nav-loop readings an avoidance-band path obstacle must appear in before affecting planning |
 | `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | `0.15` | Raw center-depth agreement margin for avoidance-band path obstacles |
