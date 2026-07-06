@@ -439,20 +439,47 @@ def _discover_v4l2_devices(limit: int = 6) -> List[str]:
     return [str(path) for path in devices[: max(0, limit)]]
 
 
+def _realsense_color_link_sort_key(path: Path) -> tuple[int, str]:
+    """Sort RealSense V4L links by color-video index, then by stable name."""
+    name = path.name.lower()
+    marker = "video-index"
+    index = 99
+    if marker in name:
+        suffix = name.rsplit(marker, 1)[-1]
+        digits = "".join(char for char in suffix if char.isdigit())
+        if digits:
+            index = int(digits)
+    return index, path.name
+
+
+def _is_realsense_color_link(path: Path) -> bool:
+    """Return True for stable V4L links that look like RealSense video streams."""
+    name = path.name.lower()
+    if "video-index" not in name:
+        return False
+    return (
+        "realsense" in name
+        or "depth_camera" in name
+        or "depth-ca" in name
+        or "intel" in name
+    )
+
+
 def _discover_realsense_color_devices(limit: int = 2) -> List[str]:
     """Return stable RealSense color-camera device links, preferring video-index0."""
-    by_id_dir = Path("/dev/v4l/by-id")
-    if not by_id_dir.exists():
-        return []
-
-    patterns = (
-        "*RealSense*video-index0",
-        "*RealSense*video-index1",
-    )
     devices = []
     seen = set()
-    for pattern in patterns:
-        for path in sorted(by_id_dir.glob(pattern)):
+
+    for link_dir in (Path("/dev/v4l/by-id"), Path("/dev/v4l/by-path")):
+        if not link_dir.exists():
+            continue
+
+        links = [
+            path
+            for path in link_dir.iterdir()
+            if _is_realsense_color_link(path)
+        ]
+        for path in sorted(links, key=_realsense_color_link_sort_key):
             device_path = str(path)
             if device_path in seen:
                 continue
@@ -460,6 +487,7 @@ def _discover_realsense_color_devices(limit: int = 2) -> List[str]:
             devices.append(device_path)
             if len(devices) >= limit:
                 return devices
+
     return devices
 
 

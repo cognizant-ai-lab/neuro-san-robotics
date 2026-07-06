@@ -180,6 +180,16 @@ class VisionCoreCameraTests(unittest.TestCase):
         with patch.dict(vision_core.os.environ, {}, clear=True):
             self.assertEqual(vision_core._unitree_camera_interface(), "eth0")
 
+    def test_realsense_link_detection_matches_robot_symlink_names(self):
+        link = Path(
+            "/dev/v4l/by-id/"
+            "usb-Intel_R__RealSense_TM__Depth_Camera_435i_"
+            "Intel_R__RealSense_TM__Depth_Camera_435i_253243060707-video-index0"
+        )
+
+        self.assertTrue(vision_core._is_realsense_color_link(link))
+        self.assertEqual(vision_core._realsense_color_link_sort_key(link)[0], 0)
+
     @patch.object(vision_core, "_discover_v4l2_devices", return_value=["/dev/video2", "/dev/video4"])
     @patch.object(
         vision_core,
