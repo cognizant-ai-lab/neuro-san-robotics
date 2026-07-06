@@ -176,6 +176,16 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertEqual(candidate["ifname"], "eth0")
         self.assertIn("Unitree Go2 front camera", candidate["description"])
 
+    def test_normalize_v4l_symlink_uses_v4l2_backend(self):
+        source = (
+            "/dev/v4l/by-id/"
+            "usb-Intel_R__RealSense_TM__Depth_Camera_435i-video-index0"
+        )
+        candidate = vision_core._normalize_camera_source(source)
+
+        self.assertEqual(candidate["source"], source)
+        self.assertEqual(candidate["backend"], getattr(vision_core.cv2, "CAP_V4L2", None))
+
     def test_unitree_camera_interface_defaults_to_eth0(self):
         with patch.dict(vision_core.os.environ, {}, clear=True):
             self.assertEqual(vision_core._unitree_camera_interface(), "eth0")
@@ -220,6 +230,7 @@ class VisionCoreCameraTests(unittest.TestCase):
         )
         self.assertEqual(descriptions[1:3], ["Jetson CSI sensor 0", "Jetson CSI sensor 1"])
         self.assertNotIn("Unitree Go2 front camera", descriptions)
+        self.assertEqual(candidates[0]["backend"], getattr(vision_core.cv2, "CAP_V4L2", None))
         self.assertIn("/dev/video2", descriptions)
         self.assertIn("/dev/video4", descriptions)
         self.assertIn("camera index 0", descriptions)

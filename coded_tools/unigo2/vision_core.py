@@ -616,7 +616,7 @@ def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[
             "description": "inline GStreamer pipeline",
         }
 
-    if raw_source.startswith("/dev/video"):
+    if raw_source.startswith(("/dev/video", "/dev/v4l/")):
         return {
             "kind": "opencv",
             "source": raw_source,
@@ -671,7 +671,7 @@ def get_camera_candidates(
     for device_path in _discover_realsense_color_devices():
         add_candidate(
             device_path,
-            None,
+            getattr(cv2, "CAP_V4L2", None),
             f"Intel RealSense color camera ({Path(device_path).name})",
         )
 
