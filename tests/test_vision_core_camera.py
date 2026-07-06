@@ -224,8 +224,10 @@ class VisionCoreCameraTests(unittest.TestCase):
             "/dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_435i-video-index0"
         ],
     )
+    @patch.object(vision_core, "_unitree_camera_available", return_value=True)
+    @patch.object(vision_core, "_unitree_camera_interface", return_value="eth0")
     @patch.object(vision_core, "_is_jetson_platform", return_value=True)
-    def test_default_candidates_cover_jetson_v4l2_and_index_fallbacks(self, *_):
+    def test_default_candidates_cover_robot_v4l2_and_index_fallbacks(self, *_):
         candidates = vision_core.get_camera_candidates(max_indices=3)
         descriptions = [candidate["description"] for candidate in candidates]
 
@@ -233,13 +235,26 @@ class VisionCoreCameraTests(unittest.TestCase):
             descriptions[0],
             "Intel RealSense color camera (usb-Intel_R__RealSense_TM__Depth_Camera_435i-video-index0)",
         )
-        self.assertEqual(descriptions[1:3], ["Jetson CSI sensor 0", "Jetson CSI sensor 1"])
-        self.assertNotIn("Unitree Go2 front camera", descriptions)
+        self.assertEqual(descriptions[1], "Unitree Go2 front camera via eth0")
+        self.assertEqual(descriptions[2:4], ["Jetson CSI sensor 0", "Jetson CSI sensor 1"])
+        self.assertEqual(candidates[1]["kind"], "unitree")
         self.assertEqual(candidates[0]["backend"], getattr(vision_core.cv2, "CAP_V4L2", None))
         self.assertIn("/dev/video2", descriptions)
         self.assertIn("/dev/video4", descriptions)
         self.assertIn("camera index 0", descriptions)
         self.assertIn("camera index 2", descriptions)
+
+    @patch.object(vision_core, "_discover_realsense_color_devices", return_value=[])
+    @patch.object(vision_core, "_discover_v4l2_devices", return_value=[])
+    @patch.object(vision_core, "_unitree_camera_available", return_value=True)
+    @patch.object(vision_core, "_unitree_camera_interface", return_value="eth0")
+    @patch.object(vision_core, "_is_jetson_platform", return_value=False)
+    def test_unitree_front_camera_is_default_fallback_when_realsense_is_absent(self, *_):
+        candidates = vision_core.get_camera_candidates(max_indices=0)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["kind"], "unitree")
+        self.assertEqual(candidates[0]["description"], "Unitree Go2 front camera via eth0")
 
     def test_open_camera_falls_back_until_frame_is_available(self):
         first = _FakeCapture(opened=False)

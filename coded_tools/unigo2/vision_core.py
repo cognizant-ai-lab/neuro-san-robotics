@@ -656,9 +656,10 @@ def get_camera_candidates(
     Priority:
     1. Explicit source override (`VISION_CAMERA_SOURCE`, `unitree:eth0`, `/dev/videoN`, index, or pipeline)
     2. Intel RealSense color camera via stable `/dev/v4l/by-id` link
-    3. Jetson CSI sensors via GStreamer
-    4. Present V4L2 devices under `/dev/video*`
-    5. Plain OpenCV camera indices for laptop/desktop webcams
+    3. Unitree front camera via SDK as a robot fallback
+    4. Jetson CSI sensors via GStreamer
+    5. Present V4L2 devices under `/dev/video*`
+    6. Plain OpenCV camera indices for laptop/desktop webcams
     """
     normalized = _normalize_camera_source(camera_source)
     if normalized is not None:
@@ -682,6 +683,28 @@ def get_camera_candidates(
             "description": description,
         })
 
+    def add_unitree_candidate() -> None:
+        if not _unitree_camera_available():
+            return
+
+        interface_name = _unitree_camera_interface()
+        source = f"unitree:{interface_name}" if interface_name else "unitree"
+        key = (source, "unitree")
+        if key in seen:
+            return
+        seen.add(key)
+
+        description = "Unitree Go2 front camera"
+        if interface_name:
+            description += f" via {interface_name}"
+        candidates.append({
+            "kind": "unitree",
+            "source": source,
+            "backend": None,
+            "description": description,
+            "ifname": interface_name,
+        })
+
     for device_path in _discover_realsense_color_devices():
         add_candidate(
             _v4l2_capture_source(device_path),
@@ -689,9 +712,7 @@ def get_camera_candidates(
             f"Intel RealSense color camera ({Path(device_path).name})",
         )
 
-    # Unitree front-camera auto fallback is intentionally disabled while the
-    # scene/face pipeline is tested against the RealSense RGB camera. Explicit
-    # VISION_CAMERA_SOURCE=unitree:eth0 still works through _normalize_camera_source().
+    add_unitree_candidate()
 
     if _is_jetson_platform():
         for sensor_id in range(2):
@@ -702,7 +723,11 @@ def get_camera_candidates(
             )
 
     for device_path in _discover_v4l2_devices(limit=max_indices):
-        add_candidate(_v4l2_capture_source(device_path), getattr(cv2, "CAP_V4L2", None), device_path)
+        add_candidate(
+            _v4l2_capture_source(device_path),
+            getattr(cv2, "CAP_V4L2", None),
+            device_path,
+        )
 
     for camera_index in range(max(0, max_indices)):
         add_candidate(camera_index, None, f"camera index {camera_index}")
