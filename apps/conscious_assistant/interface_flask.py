@@ -571,6 +571,7 @@ def conscious_thinking_process():
         global conscious_thread  # pylint: disable=global-statement
         last_scene_signature = ()
         last_passive_agent_turn_at = 0.0
+        interactive_turn_seen = False
         while not shutdown_event.is_set():
             processing_started = False
             is_user_turn = False
@@ -580,6 +581,9 @@ def conscious_thinking_process():
                 try:
                     user_text = user_input_queue.get(timeout=THINKING_INTERVAL)
                 except queue.Empty:
+                    if not interactive_turn_seen:
+                        continue
+
                     observation = scene_observer.observe()
                     if observation is not None:
                         emit_observation_update(observation)
@@ -634,6 +638,7 @@ def conscious_thinking_process():
                         continue
 
                     is_user_turn = True
+                    interactive_turn_seen = True
                     agent_input = f"\n{timestamp} user: {user_text}"
                     socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
                     processing_started = True

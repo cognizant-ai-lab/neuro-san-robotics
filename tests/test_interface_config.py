@@ -74,6 +74,13 @@ class InterfaceConfigTests(unittest.TestCase):
         self.assertIn("CONSCIOUS_PASSIVE_AGENT_TURN_INTERVAL_SECONDS", source)
         self.assertIn("last_passive_agent_turn_at", source)
 
+    def test_passive_observation_waits_for_first_interactive_turn(self):
+        source = _interface_source_text()
+
+        self.assertIn("interactive_turn_seen = False", source)
+        self.assertIn("if not interactive_turn_seen:", source)
+        self.assertIn("interactive_turn_seen = True", source)
+
 
 if __name__ == "__main__":
     unittest.main()
