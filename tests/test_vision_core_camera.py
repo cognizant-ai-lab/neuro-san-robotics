@@ -190,6 +190,17 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertTrue(vision_core._is_realsense_color_link(link))
         self.assertEqual(vision_core._realsense_color_link_sort_key(link)[0], 0)
 
+    def test_realsense_sysfs_name_detection_matches_robot_card_name(self):
+        self.assertTrue(
+            vision_core._looks_like_realsense_device_name(
+                "Intel(R) RealSense(TM) Depth Ca"
+            )
+        )
+        self.assertLess(
+            vision_core._video_device_sort_key("/dev/video4"),
+            vision_core._video_device_sort_key("/dev/video12"),
+        )
+
     @patch.object(vision_core, "_discover_v4l2_devices", return_value=["/dev/video2", "/dev/video4"])
     @patch.object(
         vision_core,

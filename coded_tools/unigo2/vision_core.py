@@ -465,6 +465,50 @@ def _is_realsense_color_link(path: Path) -> bool:
     )
 
 
+def _looks_like_realsense_device_name(device_name: str) -> bool:
+    """Return True when a V4L2 device name looks like an Intel RealSense camera."""
+    normalized = device_name.lower()
+    return (
+        "realsense" in normalized
+        or "intel(r) realsense" in normalized
+        or "depth camera" in normalized
+    )
+
+
+def _video_device_sort_key(device_path: str) -> tuple[int, str]:
+    """Sort /dev/videoN devices numerically when possible."""
+    name = Path(device_path).name
+    if name.startswith("video") and name.removeprefix("video").isdigit():
+        return int(name.removeprefix("video")), name
+    return 99, name
+
+
+def _discover_realsense_video_devices(limit: int = 2) -> List[str]:
+    """Return /dev/videoN RealSense devices from Linux V4L2 sysfs metadata."""
+    sysfs_dir = Path("/sys/class/video4linux")
+    if not sysfs_dir.exists():
+        return []
+
+    devices = []
+    for entry in sorted(sysfs_dir.iterdir(), key=lambda path: _video_device_sort_key(path.name)):
+        name_file = entry / "name"
+        try:
+            device_name = name_file.read_text(encoding="utf-8", errors="ignore").strip()
+        except OSError:
+            continue
+
+        if not _looks_like_realsense_device_name(device_name):
+            continue
+
+        device_path = f"/dev/{entry.name}"
+        if Path(device_path).exists():
+            devices.append(device_path)
+            if len(devices) >= limit:
+                return devices
+
+    return devices
+
+
 def _discover_realsense_color_devices(limit: int = 2) -> List[str]:
     """Return stable RealSense color-camera device links, preferring video-index0."""
     devices = []
@@ -487,6 +531,14 @@ def _discover_realsense_color_devices(limit: int = 2) -> List[str]:
             devices.append(device_path)
             if len(devices) >= limit:
                 return devices
+
+    for device_path in _discover_realsense_video_devices(limit=limit - len(devices)):
+        if device_path in seen:
+            continue
+        seen.add(device_path)
+        devices.append(device_path)
+        if len(devices) >= limit:
+            return devices
 
     return devices
 
