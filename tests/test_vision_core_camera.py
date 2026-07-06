@@ -176,15 +176,20 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertEqual(candidate["ifname"], "eth0")
         self.assertIn("Unitree Go2 front camera", candidate["description"])
 
-    def test_normalize_v4l_symlink_uses_v4l2_backend(self):
-        source = (
-            "/dev/v4l/by-id/"
-            "usb-Intel_R__RealSense_TM__Depth_Camera_435i-video-index0"
-        )
-        candidate = vision_core._normalize_camera_source(source)
+    def test_normalize_v4l_device_uses_numeric_v4l2_source(self):
+        candidate = vision_core._normalize_camera_source("/dev/video4")
 
-        self.assertEqual(candidate["source"], source)
+        self.assertEqual(candidate["source"], 4)
         self.assertEqual(candidate["backend"], getattr(vision_core.cv2, "CAP_V4L2", None))
+
+    def test_v4l2_capture_source_resolves_video_symlink(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "video4"
+            target.touch()
+            link = Path(temp_dir) / "camera-link"
+            link.symlink_to(target)
+
+            self.assertEqual(vision_core._v4l2_capture_source(str(link)), 4)
 
     def test_unitree_camera_interface_defaults_to_eth0(self):
         with patch.dict(vision_core.os.environ, {}, clear=True):

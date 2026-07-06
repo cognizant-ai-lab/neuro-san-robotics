@@ -543,6 +543,20 @@ def _discover_realsense_color_devices(limit: int = 2) -> List[str]:
     return devices
 
 
+def _v4l2_capture_source(device_path: str) -> CameraSource:
+    """Return the numeric OpenCV V4L2 source for a /dev/videoN path or symlink."""
+    try:
+        resolved_path = Path(device_path).resolve(strict=False)
+    except OSError:
+        resolved_path = Path(device_path)
+
+    for name in (resolved_path.name, Path(device_path).name):
+        if name.startswith("video") and name.removeprefix("video").isdigit():
+            return int(name.removeprefix("video"))
+
+    return device_path
+
+
 def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[Dict[str, Any]]:
     """Normalize a camera source override into a single candidate descriptor."""
     if camera_source is None:
@@ -619,7 +633,7 @@ def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[
     if raw_source.startswith(("/dev/video", "/dev/v4l/")):
         return {
             "kind": "opencv",
-            "source": raw_source,
+            "source": _v4l2_capture_source(raw_source),
             "backend": getattr(cv2, "CAP_V4L2", None),
             "description": raw_source,
         }
@@ -670,7 +684,7 @@ def get_camera_candidates(
 
     for device_path in _discover_realsense_color_devices():
         add_candidate(
-            device_path,
+            _v4l2_capture_source(device_path),
             getattr(cv2, "CAP_V4L2", None),
             f"Intel RealSense color camera ({Path(device_path).name})",
         )
@@ -688,7 +702,7 @@ def get_camera_candidates(
             )
 
     for device_path in _discover_v4l2_devices(limit=max_indices):
-        add_candidate(device_path, getattr(cv2, "CAP_V4L2", None), device_path)
+        add_candidate(_v4l2_capture_source(device_path), getattr(cv2, "CAP_V4L2", None), device_path)
 
     for camera_index in range(max(0, max_indices)):
         add_candidate(camera_index, None, f"camera index {camera_index}")
