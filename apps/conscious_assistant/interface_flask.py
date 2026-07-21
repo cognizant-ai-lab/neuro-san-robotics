@@ -113,14 +113,21 @@ def receive_agent_output():
 
     thought = payload.get("thought", "")
     say = payload.get("say", "")
+    navigation_status = payload.get("navigation_status", "")
     observation = payload.get("observation")
-    if not isinstance(thought, str) or not isinstance(say, str):
-        return jsonify({"error": "thought and say must be strings"}), 400
+    if not all(isinstance(value, str) for value in (thought, say, navigation_status)):
+        return jsonify({"error": "thought, say, and navigation_status must be strings"}), 400
 
     if thought.strip():
         socketio.emit("update_thoughts", {"data": thought.strip()}, namespace="/chat")
     if say.strip():
         enqueue_speech(say.strip(), emit_to_ui=True)
+    if navigation_status.strip():
+        socketio.emit(
+            "update_navigation_status",
+            {"data": navigation_status.strip()},
+            namespace="/chat",
+        )
     if isinstance(observation, dict):
         global latest_observation  # pylint: disable=global-statement
         latest_observation = observation

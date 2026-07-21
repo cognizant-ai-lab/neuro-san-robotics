@@ -56,12 +56,10 @@ class NavPlannerTool(CodedTool):
         Returns:
             Human-readable status string for the conscious agent.
         """
-        from coded_tools.unigo2.agent_events import dispatch_agent_event
+        from coded_tools.unigo2.agent_events import publish_navigation_status
         from coded_tools.unigo2.nav_core import NavCore, NavState
 
-        NavCore.set_status_callback(
-            lambda message: dispatch_agent_event(message, source="navigation"),
-        )
+        NavCore.set_status_callback(publish_navigation_status)
 
         command = args.get("command", "").lower().strip()
         if not command:

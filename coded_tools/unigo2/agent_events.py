@@ -63,6 +63,23 @@ def dispatch_agent_event(text: str, *, source: str) -> bool:
         return False
 
 
+def _publish_ui_event(
+    payload: dict[str, Any],
+    *,
+    event_name: str,
+    timeout: float = 2.0,
+) -> bool:
+    """Post one non-agent event to the local Flask presentation adapter."""
+    endpoint = os.environ.get("CONSCIOUS_UI_EVENT_ENDPOINT", "http://127.0.0.1:5001/api/agent-output")
+    token = os.environ.get("CONSCIOUS_UI_EVENT_TOKEN", "")
+    try:
+        _post_json(endpoint, payload, token=token, timeout=timeout)
+        return True
+    except (OSError, URLError, ValueError) as exc:
+        logger.warning("Could not publish %s to the UI: %s", event_name, exc)
+        return False
+
+
 def publish_ui_output(*, thought: str = "", say: str = "") -> bool:
     """Deliver agent-authored UI output to the local Flask presentation adapter."""
     thought = str(thought).strip()
@@ -70,23 +87,26 @@ def publish_ui_output(*, thought: str = "", say: str = "") -> bool:
     if not thought and not say:
         return False
 
-    endpoint = os.environ.get("CONSCIOUS_UI_EVENT_ENDPOINT", "http://127.0.0.1:5001/api/agent-output")
-    token = os.environ.get("CONSCIOUS_UI_EVENT_TOKEN", "")
-    try:
-        _post_json(endpoint, {"thought": thought, "say": say}, token=token, timeout=10.0)
-        return True
-    except (OSError, URLError, ValueError) as exc:
-        logger.warning("Could not publish agent output to the UI: %s", exc)
+    return _publish_ui_event(
+        {"thought": thought, "say": say},
+        event_name="agent output",
+        timeout=10.0,
+    )
+
+
+def publish_navigation_status(status: str) -> bool:
+    """Deliver a terminal navigation status to the UI without waking the agent."""
+    status = str(status).strip()
+    if not status:
         return False
+
+    return _publish_ui_event({"navigation_status": status}, event_name="navigation status")
 
 
 def publish_observation(observation: dict[str, Any]) -> bool:
     """Deliver the newest scene metadata after the observer overwrote its JPEG."""
-    endpoint = os.environ.get("CONSCIOUS_UI_EVENT_ENDPOINT", "http://127.0.0.1:5001/api/agent-output")
-    token = os.environ.get("CONSCIOUS_UI_EVENT_TOKEN", "")
-    try:
-        _post_json(endpoint, {"observation": observation}, token=token, timeout=10.0)
-        return True
-    except (OSError, URLError, ValueError) as exc:
-        logger.warning("Could not publish observation to the UI: %s", exc)
-        return False
+    return _publish_ui_event(
+        {"observation": observation},
+        event_name="observation",
+        timeout=10.0,
+    )
