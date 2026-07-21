@@ -5,13 +5,23 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 from typing import Any
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import Request
 from urllib.request import urlopen
 
 
 logger = logging.getLogger(__name__)
+
+
+def _local_ssl_context(url: str) -> ssl.SSLContext | None:
+    """Trust Flask's self-signed certificate only for a loopback callback."""
+    parsed = urlparse(url)
+    if parsed.scheme == "https" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}:
+        return ssl._create_unverified_context()
+    return None
 
 
 def _post_json(url: str, payload: dict[str, Any], *, token: str = "", timeout: float = 5.0) -> None:
@@ -20,7 +30,11 @@ def _post_json(url: str, payload: dict[str, Any], *, token: str = "", timeout: f
     if token:
         headers["X-Conscious-Bridge-Token"] = token
     request = Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-    with urlopen(request, timeout=timeout) as response:  # nosec B310 - endpoints are local runtime configuration
+    ssl_context = _local_ssl_context(url)
+    open_kwargs = {"timeout": timeout}
+    if ssl_context is not None:
+        open_kwargs["context"] = ssl_context
+    with urlopen(request, **open_kwargs) as response:  # nosec B310 - endpoints are local runtime configuration
         # Event invocation sends a short acknowledgement before Neuro-SAN hands
         # the real work to EventWorkMonitor. Closing after one byte aborts that
         # handoff on some HTTP stacks.

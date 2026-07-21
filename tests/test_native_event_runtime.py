@@ -58,6 +58,16 @@ class NativeEventRuntimeTests(unittest.TestCase):
 
         response.read.assert_called_once_with()
 
+    def test_event_bridge_accepts_only_loopback_self_signed_tls(self):
+        response = MagicMock()
+        opener = MagicMock()
+        opener.__enter__.return_value = response
+        with patch.object(agent_events, "urlopen", return_value=opener) as post:
+            agent_events._post_json("https://127.0.0.1:5001/event", {"event": "wake"})
+
+        self.assertIn("context", post.call_args.kwargs)
+        self.assertIsNone(agent_events._local_ssl_context("https://example.com/event"))
+
     def test_native_event_runtime_requires_event_continuation_release(self):
         with patch.object(agent_runtime, "version", return_value="0.6.48"):
             with self.assertRaisesRegex(RuntimeError, "native event continuation"):

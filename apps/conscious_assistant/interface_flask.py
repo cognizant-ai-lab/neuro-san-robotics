@@ -40,6 +40,15 @@ BASE_DIR = Path(__file__).resolve().parent
 CERT = BASE_DIR / "certs" / "cert.pem"
 KEY  = BASE_DIR / "certs" / "key.pem"
 
+
+def _ui_event_endpoint() -> str:
+    """Return the local callback URL using the same transport as Flask."""
+    configured = os.environ.get("CONSCIOUS_UI_EVENT_ENDPOINT")
+    if configured:
+        return configured
+    scheme = "https" if CERT.exists() and KEY.exists() else "http"
+    return f"{scheme}://127.0.0.1:5001/api/agent-output"
+
 # Import TTS function used when the agent emits a say: block.
 try:
     from coded_tools.unigo2.tts_go2 import say as tts_say
@@ -67,6 +76,7 @@ ACKNOWLEDGMENT_PHRASES = [
 os.environ.setdefault("AGENT_MANIFEST_FILE", str(REPO_ROOT / "registries" / "manifest.hocon"))
 os.environ.setdefault("AGENT_TOOL_PATH", str(REPO_ROOT / "coded_tools"))
 os.environ.setdefault("VISION_FACE_DB_PATH", str(REPO_ROOT / "face_database"))
+os.environ.setdefault("CONSCIOUS_UI_EVENT_ENDPOINT", _ui_event_endpoint())
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
