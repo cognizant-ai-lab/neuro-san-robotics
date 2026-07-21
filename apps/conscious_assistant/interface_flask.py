@@ -35,15 +35,14 @@ from apps.conscious_assistant.scene_observer import SceneObserver
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 
 
-# SSL certificate paths
-BASE_DIR = Path(__file__).resolve().parent
-CERT = BASE_DIR / "certs" / "cert.pem"
-KEY  = BASE_DIR / "certs" / "key.pem"
+# TLS certificate paths used by both Flask and the native runtime callback.
+TLS_CERT = Path("/home/unitree/certs/cert.pem")
+TLS_KEY = Path("/home/unitree/certs/key.pem")
 
 
 def _ui_event_endpoint() -> str:
     """Return the local callback URL using the same transport as Flask."""
-    scheme = "https" if CERT.exists() and KEY.exists() else "http"
+    scheme = "https" if TLS_CERT.exists() and TLS_KEY.exists() else "http"
     return f"{scheme}://127.0.0.1:5001/api/agent-output"
 
 # Import TTS function used when the agent emits a say: block.
@@ -477,15 +476,12 @@ atexit.register(cleanup)
 if __name__ == "__main__":
     import ssl
 
-    CERT = "/home/unitree/certs/cert.pem"
-    KEY = "/home/unitree/certs/key.pem"
-
     agent_runtime.start()
 
     ssl_ctx = None
-    if os.path.exists(CERT) and os.path.exists(KEY):
+    if TLS_CERT.exists() and TLS_KEY.exists():
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_ctx.load_cert_chain(CERT, KEY)
+        ssl_ctx.load_cert_chain(TLS_CERT, TLS_KEY)
 
     socketio.run(
         app,

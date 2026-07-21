@@ -85,6 +85,8 @@ class NativeEventRuntimeTests(unittest.TestCase):
         source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()
 
         self.assertIn('os.environ["CONSCIOUS_UI_EVENT_ENDPOINT"] = _ui_event_endpoint()', source)
+        self.assertIn('TLS_CERT = Path("/home/unitree/certs/cert.pem")', source)
+        self.assertNotIn('CERT = "/home/unitree/certs/cert.pem"', source)
 
     def test_robot_actions_execute_in_the_native_agent_process(self):
         class FakeGo2:
