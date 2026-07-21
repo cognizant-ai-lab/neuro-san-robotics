@@ -8,12 +8,35 @@ import socket
 import subprocess
 import sys
 import time
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version
 from pathlib import Path
 from typing import Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PORT = 8188
+MIN_NEURO_SAN_VERSION = (0, 6, 76)
+
+
+def _require_native_event_support() -> None:
+    """Reject Neuro-SAN versions that acknowledge events without continuing them."""
+    try:
+        installed = version("neuro-san")
+        installed_parts = tuple(int(part) for part in installed.split(".")[:3])
+    except PackageNotFoundError as exc:
+        raise RuntimeError("neuro-san==0.6.76 is required for the conscious assistant") from exc
+    except ValueError as exc:
+        raise RuntimeError(
+            "Could not verify the installed neuro-san version; "
+            "install neuro-san==0.6.76"
+        ) from exc
+
+    if installed_parts < MIN_NEURO_SAN_VERSION:
+        raise RuntimeError(
+            f"neuro-san {installed} does not support native event continuation; "
+            "install neuro-san==0.6.76"
+        )
 
 
 def _port_is_open(port: int) -> bool:
@@ -37,6 +60,7 @@ class AgentRuntime:
 
     def start(self) -> None:
         """Launch the native service unless an operator already launched it."""
+        _require_native_event_support()
         if _port_is_open(self.port):
             return
 

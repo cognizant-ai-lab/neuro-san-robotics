@@ -1,6 +1,5 @@
 # Neuro SAN
-# neuro-san==0.5.68
-# Note: Install neuro-san from source by disabling ddgs because there's an unsolvable dependency 'primp' that gets stuck on the pip install
+neuro-san==0.6.76
 
 nsflow==0.5.20
 langchain-google-genai

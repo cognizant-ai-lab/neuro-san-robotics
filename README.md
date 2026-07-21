@@ -179,7 +179,12 @@ Install `neuro-san` and the other requirements:
 
 ```shell
 pip install -r requirements.txt
+python -c 'from importlib.metadata import version; print(version("neuro-san"))'
 ```
+
+The conscious assistant's native event and periodic execution require
+`neuro-san==0.6.76` or later. Older releases can acknowledge an event without
+continuing the agent work, so the application refuses to start with them.
 
 ### Set up Unitree's SDK
 

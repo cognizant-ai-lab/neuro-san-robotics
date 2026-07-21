@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from coded_tools.unigo2 import agent_events
 from coded_tools.unigo2.robot_macros import RobotMacros
+from apps.conscious_assistant import agent_runtime
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +51,14 @@ class NativeEventRuntimeTests(unittest.TestCase):
             agent_events._post_json("http://127.0.0.1:8188/event", {"event": "wake"})
 
         response.read.assert_called_once_with()
+
+    def test_native_event_runtime_requires_event_continuation_release(self):
+        with patch.object(agent_runtime, "version", return_value="0.6.48"):
+            with self.assertRaisesRegex(RuntimeError, "native event continuation"):
+                agent_runtime._require_native_event_support()
+
+        with patch.object(agent_runtime, "version", return_value="0.6.76"):
+            agent_runtime._require_native_event_support()
 
     def test_interface_has_no_agent_input_queue(self):
         source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()
