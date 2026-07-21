@@ -52,6 +52,7 @@ from coded_tools.unigo2.depth_processor import (
 )
 from coded_tools.unigo2.obstacle_confirmation import ObstacleConfirmationTracker
 from coded_tools.unigo2.obstacle_provider import create_default_obstacle_provider
+from coded_tools.unigo2.structural_localization import DepthMapLocalizer, StructuralMap
 
 logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -160,6 +161,7 @@ class TopologicalMap:
     def __init__(self):
         """Initialize an empty topological map."""
         self.name: str = ""
+        self.coordinate_system: Dict[str, Any] = {}
         self.nodes: Dict[str, MapNode] = {}
         self.edges: List[MapEdge] = []
         self._adjacency: Dict[str, List[Tuple[str, float]]] = {}
@@ -182,6 +184,7 @@ class TopologicalMap:
     def _parse(self, data: Dict[str, Any]) -> bool:
         """Parse map data, building nodes, edges, and adjacency list."""
         self.name = data.get("name", "")
+        self.coordinate_system = data.get("coordinate_system", {})
         self.nodes.clear()
         self.edges.clear()
         self._adjacency.clear()
@@ -1260,6 +1263,7 @@ class NavCore:
     )
     ODOMETRY_YAW_RATE_RATIO: float = _env_float("NAV_ODOMETRY_YAW_RATE_RATIO", 1.0)
     DEPTH_STOP_WHEN_IDLE: bool = _env_flag("NAV_DEPTH_STOP_WHEN_IDLE", True)
+    DEPTH_MAP_LOCALIZATION_INTERVAL_S = 2.0
 
     @classmethod
     def get_instance(cls) -> "NavCore":
@@ -1308,6 +1312,8 @@ class NavCore:
         # Global planner (optional, requires map)
         self._topo_map = TopologicalMap()
         self._global_planner = GlobalPlanner(self._topo_map)
+        self._depth_map_localizer: Optional[DepthMapLocalizer] = None
+        self._last_depth_map_localization = 0.0
 
         # Progress tracking
         self._last_progress_pose = RobotPose()
@@ -1331,6 +1337,7 @@ class NavCore:
         if map_file and Path(map_file).exists():
             if self._topo_map.load_from_file(map_file):
                 self._anchor_initial_pose()
+                self._load_structural_map(Path(map_file))
 
         logger.info(
             "NavCore: initialized (obstacle_sensors=%s, map=%s, loop=%d Hz)",
@@ -1375,6 +1382,27 @@ class NavCore:
             node.x,
             node.y,
             heading_deg,
+        )
+
+    def _load_structural_map(self, map_file: Path) -> None:
+        """Load optional fixed-wall geometry stored beside the topological map."""
+        structure_file = map_file.with_name(f"{map_file.stem}_structure.json")
+        if not structure_file.exists():
+            return
+        try:
+            structural_map = StructuralMap.load_from_file(
+                structure_file,
+                self._topo_map.coordinate_system,
+            )
+        except Exception as exc:
+            logger.warning("NavCore: failed to load structural map %s: %s", structure_file, exc)
+            return
+        if not structural_map.is_loaded:
+            return
+        self._depth_map_localizer = DepthMapLocalizer(structural_map)
+        logger.info(
+            "NavCore: loaded %d fixed wall segments for depth localization",
+            len(structural_map.segments),
         )
 
     def _ensure_go2(self):
@@ -1955,6 +1983,7 @@ class NavCore:
         raw_grid = self._depth_processor.get_obstacle_grid()
         grid = self._filter_transient_path_obstacle(raw_grid)
         pose = self._odometry.get_pose()
+        pose = self._correct_pose_from_depth_map(grid, pose, goal)
         self._update_progress(pose)
 
         path_dist = grid.path_obstacle_m if grid else float("inf")
@@ -2108,6 +2137,60 @@ class NavCore:
 
         # 7. Update progress tracker
         self._update_progress(self._odometry.get_pose())
+
+    def _correct_pose_from_depth_map(
+        self,
+        grid: Optional[ObstacleGrid],
+        pose: RobotPose,
+        goal: NavGoal,
+    ) -> RobotPose:
+        """Re-anchor map pose when current depth agrees with fixed wall geometry."""
+        if (
+            grid is None
+            or goal.goal_type != "semantic"
+            or self._depth_map_localizer is None
+            or time.monotonic() - self._last_depth_map_localization
+            < self.DEPTH_MAP_LOCALIZATION_INTERVAL_S
+        ):
+            return pose
+
+        self._last_depth_map_localization = time.monotonic()
+        correction = self._depth_map_localizer.correct_pose(
+            grid,
+            pose.x,
+            pose.y,
+            pose.yaw,
+        )
+        if correction is None:
+            return pose
+
+        corrected_pose = RobotPose(
+            x=correction.pose_x,
+            y=correction.pose_y,
+            yaw=correction.pose_yaw,
+            timestamp=time.time(),
+        )
+        self._odometry.set_pose(
+            corrected_pose.x,
+            corrected_pose.y,
+            corrected_pose.yaw,
+        )
+        self._reset_progress_tracker()
+        self._global_planner.plan_path(corrected_pose, goal.label)
+        logger.info(
+            "NavCore: depth map correction dx=%.2fm dy=%.2fm dyaw=%.1f deg "
+            "score=%.2f walls=%d points=%d",
+            corrected_pose.x - pose.x,
+            corrected_pose.y - pose.y,
+            math.degrees(math.atan2(
+                math.sin(corrected_pose.yaw - pose.yaw),
+                math.cos(corrected_pose.yaw - pose.yaw),
+            )),
+            correction.score,
+            correction.support_segments,
+            correction.support_points,
+        )
+        return corrected_pose
 
     def _forward_clearance_for_safety(
         self,
