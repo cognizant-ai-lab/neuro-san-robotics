@@ -28,6 +28,12 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn('"scene_observer"', source)
         self.assertIn("only content that appears in the Thoughts pane", source)
 
+    def test_scene_observer_has_a_valid_native_function_schema(self):
+        source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
+
+        self.assertNotIn('"parameters": {"type": "object", "properties": {}}', source)
+        self.assertIn('"capture": {', source)
+
     def test_native_periodic_turns_are_manifest_owned(self):
         source = (ROOT / "registries" / "manifest.hocon").read_text()
 

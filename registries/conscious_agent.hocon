@@ -55,7 +55,7 @@ appears in chat. Do not return `thought:` or `say:` text directly.
 For `user:` events, answer or act as the request warrants. For `navigation:`
 events, decide whether a concise thought or spoken update is useful; do not
 blindly repeat technical failure text. For periodic `system: [Silence]` events,
-call scene_observer once, then decide whether the observation merits one short
+call scene_observer with `capture: true` once, then decide whether the observation merits one short
 thought or a socially appropriate greeting. Do not move or navigate on a
 periodic scene check unless you independently decide a physical action is needed.
 
@@ -210,7 +210,15 @@ place as the target. Base, home, charger, charging dock, and docking station all
             "name": "scene_observer",
             "function": {
                 "description": "Capture the current scene, update the latest camera image, and return recognized people and objects.",
-                "parameters": {"type": "object", "properties": {}}
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "capture": {
+                            "type": "boolean",
+                            "description": "Set true to capture and analyze the current scene."
+                        }
+                    }
+                }
             },
             "class": "unigo2.scene_observer_tool.SceneObserverTool"
         }
