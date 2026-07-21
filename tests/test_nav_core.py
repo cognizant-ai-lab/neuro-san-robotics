@@ -469,6 +469,34 @@ class TestSafetyMonitor(unittest.TestCase):
         self.assertLess(filtered.vx, 0.3, "Should be slower than full speed")
         self.assertIsNone(event)
 
+    def test_braking_envelope_caps_forward_speed(self):
+        safety = SafetyMonitor(
+            safety_distance=0.1,
+            avoidance_distance=0.3,
+            braking_reaction_time_s=0.25,
+            braking_deceleration_mps2=0.5,
+        )
+        cmd = VelocityCommand(vx=0.4, vy=0.0, vyaw=0.0)
+
+        filtered, event = safety.filter_command(cmd, nearest_obstacle_m=0.25)
+
+        self.assertIsNone(event)
+        self.assertGreater(filtered.vx, 0.0)
+        self.assertLess(filtered.vx, 0.3)
+
+    def test_braking_envelope_ignores_side_clearance(self):
+        safety = SafetyMonitor(safety_distance=0.1, avoidance_distance=0.3)
+        cmd = VelocityCommand(vx=0.4, vy=0.0, vyaw=0.0)
+
+        filtered, event = safety.filter_command(
+            cmd,
+            nearest_obstacle_m=0.25,
+            nearest_obstacle_bearing=math.pi / 2,
+        )
+
+        self.assertIsNone(event)
+        self.assertAlmostEqual(filtered.vx, 0.4)
+
     def test_cliff_detection_stops(self):
         safety = SafetyMonitor()
         cmd = VelocityCommand(vx=0.3, vy=0.0, vyaw=0.0)

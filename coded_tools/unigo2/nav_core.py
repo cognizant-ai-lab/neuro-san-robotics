@@ -702,6 +702,8 @@ class SafetyMonitor:
         stuck_timeout: float = 10.0,
         pivot_hard_stop_distance: float = 0.2,
         forward_hazard_cone_rad: float = math.radians(20.0),
+        braking_reaction_time_s: float = 0.25,
+        braking_deceleration_mps2: float = 0.5,
     ):
         """Configure safety thresholds.
 
@@ -711,12 +713,16 @@ class SafetyMonitor:
             stuck_timeout: Trigger stuck event after this many seconds without progress.
             pivot_hard_stop_distance: Minimum distance allowed for in-place turning.
             forward_hazard_cone_rad: Bearing cone treated as forward path blockage.
+            braking_reaction_time_s: Maximum command-to-brake delay for forward motion.
+            braking_deceleration_mps2: Conservative forward braking deceleration.
         """
         self.safety_distance = safety_distance
         self.avoidance_distance = avoidance_distance
         self.stuck_timeout = stuck_timeout
         self.pivot_hard_stop_distance = pivot_hard_stop_distance
         self.forward_hazard_cone_rad = forward_hazard_cone_rad
+        self.braking_reaction_time_s = max(0.0, braking_reaction_time_s)
+        self.braking_deceleration_mps2 = max(1e-6, braking_deceleration_mps2)
 
     def filter_command(
         self,
@@ -765,7 +771,28 @@ class SafetyMonitor:
                 vyaw=cmd.vyaw,
             )
 
+        if cmd.vx > 0.0 and forward_hazard:
+            cmd = VelocityCommand(
+                vx=min(cmd.vx, self._safe_forward_speed(nearest_obstacle_m)),
+                vy=cmd.vy,
+                vyaw=cmd.vyaw,
+            )
+
         return cmd, None
+
+    def _safe_forward_speed(self, clearance_m: float) -> float:
+        """Return the largest speed that can stop before the safety boundary."""
+        if not math.isfinite(clearance_m):
+            return float("inf")
+
+        stopping_distance_m = max(0.0, clearance_m - self.safety_distance)
+        deceleration = self.braking_deceleration_mps2
+        reaction = self.braking_reaction_time_s
+        return max(
+            0.0,
+            math.sqrt((deceleration * reaction) ** 2 + 2.0 * deceleration * stopping_distance_m)
+            - deceleration * reaction,
+        )
 
 
 # ---------------------------------------------------------------------------
