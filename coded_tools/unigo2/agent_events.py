@@ -15,13 +15,16 @@ logger = logging.getLogger(__name__)
 
 
 def _post_json(url: str, payload: dict[str, Any], *, token: str = "", timeout: float = 5.0) -> None:
-    """POST one local JSON event and consume its immediate response."""
+    """POST one local JSON event and fully consume its acknowledgement."""
     headers = {"Content-Type": "application/json"}
     if token:
         headers["X-Conscious-Bridge-Token"] = token
     request = Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
     with urlopen(request, timeout=timeout) as response:  # nosec B310 - endpoints are local runtime configuration
-        response.read(1)
+        # Event invocation sends a short acknowledgement before Neuro-SAN hands
+        # the real work to EventWorkMonitor. Closing after one byte aborts that
+        # handoff on some HTTP stacks.
+        response.read()
 
 
 def dispatch_agent_event(text: str, *, source: str) -> bool:

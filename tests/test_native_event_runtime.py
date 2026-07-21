@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 from coded_tools.unigo2 import agent_events
@@ -40,6 +41,15 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn("/conscious_agent/streaming_chat", endpoint)
         self.assertEqual(payload["user_message"]["text"], "user: go home")
         self.assertEqual(payload["chat_filter"]["chat_filter_type"], "MINIMAL")
+
+    def test_event_bridge_consumes_the_full_native_acknowledgement(self):
+        response = MagicMock()
+        opener = MagicMock()
+        opener.__enter__.return_value = response
+        with patch.object(agent_events, "urlopen", return_value=opener):
+            agent_events._post_json("http://127.0.0.1:8188/event", {"event": "wake"})
+
+        response.read.assert_called_once_with()
 
     def test_interface_has_no_agent_input_queue(self):
         source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()
