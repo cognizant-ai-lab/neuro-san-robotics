@@ -12,68 +12,10 @@
 
 from typing import Any
 from typing import Dict
-from typing import List
-from typing import Tuple
 import logging
-import threading
+import asyncio
 from neuro_san.interfaces.coded_tool import CodedTool
 from coded_tools.unigo2.go2_macros import Go2Macros
-
-
-# Global deferred action queue - actions are queued here and executed later
-# This allows speech to complete before robot performs physical actions
-_deferred_actions: List[Tuple[str, Dict[str, Any]]] = []
-_deferred_actions_lock = threading.Lock()
-
-
-def queue_deferred_action(action: str, args: Dict[str, Any]) -> None:
-    """Queue an action to be executed later."""
-    with _deferred_actions_lock:
-        _deferred_actions.append((action, args))
-        logging.info("Queued deferred action: %s", action)
-
-
-def clear_deferred_actions() -> int:
-    """Drop any queued deferred actions without executing them."""
-    with _deferred_actions_lock:
-        cleared_count = len(_deferred_actions)
-        _deferred_actions.clear()
-
-    if cleared_count:
-        logging.info("Cleared %d deferred action(s) without executing them", cleared_count)
-
-    return cleared_count
-
-
-def execute_deferred_actions() -> List[str]:
-    """
-    Execute all queued deferred actions and clear the queue.
-
-    Returns a list of results from each action execution.
-    This should be called after speech completes to ensure proper ordering.
-    """
-    with _deferred_actions_lock:
-        actions_to_execute = list(_deferred_actions)
-        _deferred_actions.clear()
-
-    if not actions_to_execute:
-        return []
-
-    results = []
-    go2 = Go2Macros()
-    if not getattr(go2, "available", False):
-        logging.warning("Robot control unavailable; skipping %d deferred actions", len(actions_to_execute))
-        return [
-            f"Skipped action '{action}' because robot control is unavailable"
-            for action, _args in actions_to_execute
-        ]
-
-    for action, args in actions_to_execute:
-        logging.info("Executing deferred action: %s", action)
-        result = _execute_single_action(go2, action, args)
-        results.append(result)
-
-    return results
 
 
 def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) -> str:
@@ -259,10 +201,9 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
 class RobotMacros(CodedTool):
     """
     CodedTool implementation of robot macros.
-    
-    Actions are queued for deferred execution to ensure speech completes
-    before physical robot actions are performed. Call execute_deferred_actions()
-    after speech to execute the queued actions.
+
+    Event-invoked agents execute actions in the native Neuro SAN process. A
+    Flask-owned deferred queue would be isolated in a different process.
     """
 
     async def async_invoke(self, args: Dict[str, Any], sly_data: Dict[str, Any]) -> Any:
@@ -273,7 +214,7 @@ class RobotMacros(CodedTool):
 
         action_lower = action.lower()
 
-        # Validate the action is known before queueing
+        # Validate the action before touching robot control.
         known_actions = {
             "damp", "balance_stand", "stop_move", "stand_up", "lie_down",
             "recovery_stand", "sit", "rise_sit", "euler", "look_left",
@@ -290,7 +231,11 @@ class RobotMacros(CodedTool):
         if action_lower not in known_actions:
             return f"Unknown action: {action}"
 
-        # Queue the action for deferred execution (after speech completes)
-        queue_deferred_action(action_lower, dict(args))
+        return await asyncio.to_thread(self._execute, action_lower, dict(args))
 
-        return f"Action '{action}' queued for execution after speech"
+    @staticmethod
+    def _execute(action: str, args: Dict[str, Any]) -> str:
+        go2 = Go2Macros()
+        if not getattr(go2, "available", False):
+            return f"Skipped action '{action}' because robot control is unavailable"
+        return _execute_single_action(go2, action, args)

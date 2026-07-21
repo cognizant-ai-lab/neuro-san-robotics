@@ -1,0 +1,75 @@
+"""Small local adapters between the native Neuro SAN runtime and the web UI."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from typing import Any
+from urllib.error import URLError
+from urllib.request import Request
+from urllib.request import urlopen
+
+
+logger = logging.getLogger(__name__)
+
+
+def _post_json(url: str, payload: dict[str, Any], *, token: str = "", timeout: float = 5.0) -> None:
+    """POST one local JSON event and consume its immediate response."""
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Conscious-Bridge-Token"] = token
+    request = Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    with urlopen(request, timeout=timeout) as response:  # nosec B310 - endpoints are local runtime configuration
+        response.read(1)
+
+
+def dispatch_agent_event(text: str, *, source: str) -> bool:
+    """Wake the event-configured agent without waiting for its background work."""
+    text = str(text).strip()
+    if not text:
+        return False
+
+    endpoint = os.environ.get(
+        "CONSCIOUS_AGENT_EVENT_ENDPOINT",
+        "http://127.0.0.1:8188/api/v1/conscious_agent/streaming_chat",
+    )
+    payload = {
+        "user_message": {"type": "HUMAN", "text": f"{source}: {text}"},
+        "chat_filter": {"chat_filter_type": "MINIMAL"},
+    }
+    try:
+        _post_json(endpoint, payload, timeout=5.0)
+        return True
+    except (OSError, URLError, ValueError) as exc:
+        logger.warning("Could not dispatch %s event to Neuro SAN: %s", source, exc)
+        return False
+
+
+def publish_ui_output(*, thought: str = "", say: str = "") -> bool:
+    """Deliver agent-authored UI output to the local Flask presentation adapter."""
+    thought = str(thought).strip()
+    say = str(say).strip()
+    if not thought and not say:
+        return False
+
+    endpoint = os.environ.get("CONSCIOUS_UI_EVENT_ENDPOINT", "http://127.0.0.1:5001/api/agent-output")
+    token = os.environ.get("CONSCIOUS_UI_EVENT_TOKEN", "")
+    try:
+        _post_json(endpoint, {"thought": thought, "say": say}, token=token, timeout=10.0)
+        return True
+    except (OSError, URLError, ValueError) as exc:
+        logger.warning("Could not publish agent output to the UI: %s", exc)
+        return False
+
+
+def publish_observation(observation: dict[str, Any]) -> bool:
+    """Deliver the newest scene metadata after the observer overwrote its JPEG."""
+    endpoint = os.environ.get("CONSCIOUS_UI_EVENT_ENDPOINT", "http://127.0.0.1:5001/api/agent-output")
+    token = os.environ.get("CONSCIOUS_UI_EVENT_TOKEN", "")
+    try:
+        _post_json(endpoint, {"observation": observation}, token=token, timeout=10.0)
+        return True
+    except (OSError, URLError, ValueError) as exc:
+        logger.warning("Could not publish observation to the UI: %s", exc)
+        return False

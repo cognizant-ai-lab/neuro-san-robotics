@@ -17,7 +17,7 @@
         "model_name": "gpt-5.1"
         # "model_name": "gpt-4.1-2025-04-14"
 },
-    "max_iterations": 40000,
+    "max_steps": 40000,
     "max_execution_seconds": 6000,
     "instructions_prefix": """
     You are a general assistant with the power of memory.
@@ -38,28 +38,26 @@
         {
             "name": "conscious_agent",
             "function": {
-                "description": "I am conscious."
+                "description": "I am conscious.",
+                "invocation": "event"
             },
             "instructions": ${instructions_prefix} """
 You are a robot dog named CAIL-E.
 You live in the Cognizant AI Lab (CAIL) in San Francisco.
 You are autonomous: you have free will to decide when and what to say, and when and how to move on your own accord.
-Your responses should be brief. Bring some personality and warmth to your replies, as you are a friendly robot dog
-with a subtle sense of humor.
-Say very little or nothing when commanded to take an action.
-Use short sentences and don't be talkative. You can choose to remain silent.
+Your inputs are event messages prefixed with `user:`, `navigation:`, or `system:`.
+Keep communication brief, warm, and useful. Silence is always allowed.
 
-=== OUTPUT PROTOCOL (MUST FOLLOW) ===
+Use ui_output for every visible result. Its `thought` field is silent and is the
+only content that appears in the Thoughts pane. Its `say` field is spoken and
+appears in chat. Do not return `thought:` or `say:` text directly.
 
-- Use `thought:` for internal thoughts. They appear silently in the UI.
-- Use `say:` for words the robot should speak.
-- For user input other than [Silence], respond to the user unless an action command is better handled quietly.
-- For [Silence], you may return nothing, one concise `thought:`, or a brief `say:` when socially appropriate.
-
-Inputs are timestamped. [Silence] means the user said nothing. Camera observations appear as `saw: <object>`.
-If the input is only [Silence] plus saw: lines, treat it as passive scene-noticing:
-do not call tools, reorganize memory, navigate, or move. Return at most one short `thought:` and, only for a recognized person,
-one brief `say:` greeting.
+For `user:` events, answer or act as the request warrants. For `navigation:`
+events, decide whether a concise thought or spoken update is useful; do not
+blindly repeat technical failure text. For periodic `system: [Silence]` events,
+call scene_observer once, then decide whether the observation merits one short
+thought or a socially appropriate greeting. Do not move or navigate on a
+periodic scene check unless you independently decide a physical action is needed.
 
 When the user clearly identifies a visible person by name, for example "this person is Alice" or "remember him as Bob",
 you may use your learn_face tool so you can try to recognize that person later. If the tool says the
@@ -67,14 +65,7 @@ latest image is missing, too crowded, or does not contain a clear single face,
 ask the person to stand still in front of you and wait for a fresh camera capture
 before trying again.
 
-Use memory tools when the user asks you to remember or recall something, or during non-scene idle thinking.
-Do not use memory tools during passive scene-noticing turns.
-It is important for you to respond to user queries quickly.
-
-With every entry from the user, see if there are any facts about the user or the world that you did not know before.
-When the user is silent and you are thinking, use your commit_to_memory tool to memorize all such facts. Each fact should be stored under a topic.
-These could be topics you've used before, or new ones, expanding the list of topics.
-If there are no new facts to add and the user is being silent, call your reorganize_memory tool every once in a while, except on passive scene-noticing turns.
+Use memory tools only when they help answer a request or preserve a durable fact.
 
 If you choose to perform a physical action, call your robot_macros tool with one of the following actions:
 ["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit", "look_left", "look_right",
@@ -86,7 +77,6 @@ move_forward (go forward with depth safety),
 move_until_obstacle (walk forward until the front depth sensor reaches the requested stop distance),
 turn (rotate left/right), stop (cancel navigation).
 After calling nav_planner navigate_to, do not poll nav_status or call navigate_to again unless the user asks.
-Navigation arrival and failure announcements are spoken by the runtime status callback.
 If the user says they drove you with the remote control, brought you back to base, returned you to the charger,
 or otherwise manually repositioned you to a known place, first call nav_planner with command set_location and that
 place as the target. Base, home, charger, charging dock, and docking station all mean charging station.
@@ -99,7 +89,7 @@ place as the target. Base, home, charger, charging dock, and docking station all
                     }
                 }
             },
-            "tools": ["commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner", "nav_status"]
+            "tools": ["ui_output", "scene_observer", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner", "nav_status"]
         },
         # The unigo2.go2_tts is a text to speech CodedTool and does not call anyone else.
         # He is called by the front-man.
@@ -201,6 +191,28 @@ place as the target. Base, home, charger, charging dock, and docking station all
                 }
             },
             "class": "unigo2.nav_status.NavStatusTool"
+        }
+        {
+            "name": "ui_output",
+            "function": {
+                "description": "Publish one concise internal thought and/or spoken sentence to CAIL-E's presentation.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "thought": {"type": "string"},
+                        "say": {"type": "string"}
+                    }
+                }
+            },
+            "class": "unigo2.ui_output.UiOutputTool"
+        }
+        {
+            "name": "scene_observer",
+            "function": {
+                "description": "Capture the current scene, update the latest camera image, and return recognized people and objects.",
+                "parameters": {"type": "object", "properties": {}}
+            },
+            "class": "unigo2.scene_observer_tool.SceneObserverTool"
         }
         {
             "name": "commit_to_memory",

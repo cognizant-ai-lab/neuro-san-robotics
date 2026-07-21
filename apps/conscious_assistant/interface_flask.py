@@ -5,12 +5,9 @@ import os
 import queue
 import random
 import re
-import site
 import sys
 import tempfile
 import threading
-import time
-from datetime import datetime
 
 from pathlib import Path
 
@@ -25,160 +22,6 @@ logging.basicConfig(
     level=getattr(logging, os.environ.get("CONSCIOUS_LOG_LEVEL", "INFO").upper(), logging.INFO)
 )
 
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    """Parse common boolean environment variable values."""
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _quiet_memory_tool_loggers() -> None:
-    """Keep verbose memory maintenance from flooding the robot console."""
-    if _env_flag("CONSCIOUS_VERBOSE_MEMORY_LOGS", default=False):
-        return
-
-    for logger_name in (
-        "ListTopics",
-        "RecallMemory",
-        "CommitToMemory",
-        "conscious_agent.reorganize_memory",
-    ):
-        logging.getLogger(logger_name).setLevel(logging.WARNING)
-
-
-_quiet_memory_tool_loggers()
-
-
-def _should_preinitialize_robot_control() -> bool:
-    return _env_flag(
-        "CONSCIOUS_PREINIT_ROBOT",
-        default=sys.platform.startswith("linux"),
-    )
-
-
-def _should_enable_scene_observer() -> bool:
-    return _env_flag("CONSCIOUS_ENABLE_SCENE_OBSERVER", default=sys.platform.startswith("linux"))
-
-
-def _should_enable_passive_agent_turns() -> bool:
-    return _env_flag("CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS", default=True)
-
-
-def _should_enable_vision_runtime_prime() -> bool:
-    raw_value = os.environ.get("VISION_SKIP_EARLY_IMPORT")
-    if raw_value is None:
-        return sys.platform.startswith("linux") and _should_enable_scene_observer()
-    return raw_value.strip().lower() not in {"1", "true", "yes", "on"}
-
-
-def _candidate_libgomp_paths() -> list[Path]:
-    candidates = []
-
-    override_path = os.environ.get("VISION_LIBGOMP_PATH")
-    if override_path:
-        candidates.append(Path(override_path))
-
-    for site_dir in site.getsitepackages():
-        candidates.append(Path(site_dir) / "torch" / "lib" / "libgomp.so.1")
-
-    common_system_paths = [
-        "/usr/lib/aarch64-linux-gnu/libgomp.so.1",
-        "/usr/lib/x86_64-linux-gnu/libgomp.so.1",
-        "/lib/aarch64-linux-gnu/libgomp.so.1",
-        "/lib/x86_64-linux-gnu/libgomp.so.1",
-    ]
-    candidates.extend(Path(path) for path in common_system_paths)
-
-    unique_candidates = []
-    seen = set()
-    for candidate in candidates:
-        candidate_text = str(candidate)
-        if candidate_text in seen:
-            continue
-        seen.add(candidate_text)
-        unique_candidates.append(candidate)
-
-    return unique_candidates
-
-
-def _env_float(name: str, default: float) -> float:
-    """Parse float environment variables with a safe fallback."""
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    try:
-        return float(raw_value)
-    except ValueError:
-        return default
-
-
-def _prime_robot_control() -> None:
-    """
-    Initialize Unitree DDS/SportClient before loading heavy vision runtimes.
-
-    On the robot, initializing CycloneDDS from the long-running Flask worker path
-    can fail after Torch/DeepFace have loaded. Doing the robot client setup once
-    on the main thread lets later Go2Macros instances reuse the cached client.
-    """
-    if not _should_preinitialize_robot_control():
-        return
-
-    try:
-        from coded_tools.unigo2.go2_macros import Go2Macros as _Go2Macros
-
-        robot = _Go2Macros()
-        if getattr(robot, "available", False):
-            print("[Go2] SportClient preinitialized for Flask runtime")
-        else:
-            print("[Go2] SportClient preinitialization did not complete")
-    except Exception as exc:
-        print(f"[Go2] SportClient preinitialization skipped: {exc}")
-
-
-def _prime_vision_runtime_imports() -> None:
-    """
-    Prime YOLO dependencies before Flask imports on Linux.
-
-    On some Jetson/ARM environments, importing torch/ultralytics later in the
-    Flask startup path can fail with `libgomp.so.1: cannot allocate memory in
-    static TLS block`, even though the same environment works in a simpler
-    standalone process. Preloading libgomp and importing ultralytics early keeps
-    the app closer to that standalone import order.
-    """
-    if not _should_enable_vision_runtime_prime():
-        return
-
-    try:
-        import ctypes
-
-        rtld_global = getattr(ctypes, "RTLD_GLOBAL", None)
-        for candidate in _candidate_libgomp_paths():
-            if not candidate.exists():
-                continue
-            try:
-                if rtld_global is None:
-                    ctypes.CDLL(str(candidate))
-                else:
-                    ctypes.CDLL(str(candidate), mode=rtld_global)
-                print(f"[VisionCore] Preloaded libgomp: {candidate}")
-                break
-            except OSError:
-                continue
-    except Exception as exc:
-        print(f"[VisionCore] libgomp preload skipped: {exc}")
-
-    try:
-        from ultralytics import YOLO as _EarlyYOLO  # noqa: F401
-        print("[VisionCore] Early ultralytics import succeeded for Flask startup")
-    except Exception as exc:
-        print(f"[VisionCore] Early ultralytics import failed during Flask startup: {exc}")
-
-
-_prime_robot_control()
-_prime_vision_runtime_imports()
-
 # pylint: disable=import-error
 from flask import Flask
 from flask import jsonify
@@ -187,14 +30,9 @@ from flask import request
 from flask import send_file
 from flask_socketio import SocketIO
 
-from apps.conscious_assistant.agent_output import combine_speech_blocks
-from apps.conscious_assistant.agent_output import parse_agent_output_blocks
-from apps.conscious_assistant.conscious_assistant import conscious_thinker
-from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
+from apps.conscious_assistant.agent_runtime import AgentRuntime
 from apps.conscious_assistant.scene_observer import SceneObserver
-from apps.conscious_assistant.scene_observer import build_scene_input
-from apps.conscious_assistant.scene_observer import observation_signature
-from apps.conscious_assistant.conscious_assistant import tear_down_conscious_assistant
+from coded_tools.unigo2.agent_events import dispatch_agent_event
 
 
 # SSL certificate paths
@@ -210,30 +48,6 @@ except ImportError:
     logging.warning("TTS module not available - speech will be text-only")
     TTS_AVAILABLE = False
     tts_say = None
-
-# Import deferred action executor for robot actions after speech
-try:
-    # Neuro-SAN loads CodedTools through AGENT_TOOL_PATH as unigo2.*.
-    # Import the same module name here so the deferred-action queue is shared.
-    from unigo2.robot_macros import clear_deferred_actions
-    from unigo2.robot_macros import execute_deferred_actions
-    DEFERRED_ACTIONS_AVAILABLE = True
-except ImportError:
-    try:
-        from coded_tools.unigo2.robot_macros import clear_deferred_actions
-        from coded_tools.unigo2.robot_macros import execute_deferred_actions
-        DEFERRED_ACTIONS_AVAILABLE = True
-    except ImportError:
-        logging.warning("execute_deferred_actions not available - deferred robot actions disabled")
-        DEFERRED_ACTIONS_AVAILABLE = False
-        clear_deferred_actions = None
-        execute_deferred_actions = None
-
-THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
-PASSIVE_AGENT_TURN_INTERVAL = _env_float(
-    "CONSCIOUS_PASSIVE_AGENT_TURN_INTERVAL_SECONDS",
-    max(THINKING_INTERVAL, 10.0),
-)
 
 ACKNOWLEDGMENT_PHRASES = [
     "Got it",
@@ -256,21 +70,15 @@ os.environ.setdefault("VISION_FACE_DB_PATH", str(REPO_ROOT / "face_database"))
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
-thread_started = False  # pylint: disable=invalid-name
-thinking_task = None
 shutdown_event = threading.Event()
-
-user_input_queue = queue.Queue()
 
 # Speech queue for TTS - allows non-blocking speech processing
 speech_queue = queue.Queue()
-navigation_status_lock = threading.Lock()
-last_navigation_status_message = ""
-last_navigation_status_at = 0.0
-NAV_STATUS_REPEAT_SUPPRESS_SECONDS = _env_float("NAV_STATUS_REPEAT_SUPPRESS_SECONDS", 30.0)
-scene_observer = SceneObserver(enabled=_should_enable_scene_observer())
-os.environ.setdefault("VISION_LATEST_IMAGE_PATH", str(scene_observer.latest_image_path()))
+latest_observation = None
+scene_image_path = SceneObserver(enabled=False).latest_image_path()
+os.environ.setdefault("VISION_LATEST_IMAGE_PATH", str(scene_image_path))
 os.environ.setdefault("VISION_LATEST_IMAGE_MAX_AGE_SECONDS", "0")
+agent_runtime = AgentRuntime()
 
 
 @app.before_request
@@ -285,9 +93,38 @@ def health():
     return jsonify({"ok": True})
 
 
+@app.route("/api/agent-output", methods=["POST"])
+def receive_agent_output():
+    """Receive explicit event-agent output from the local Neuro SAN process."""
+    expected_token = os.environ.get("CONSCIOUS_UI_EVENT_TOKEN", "")
+    if expected_token and request.headers.get("X-Conscious-Bridge-Token") != expected_token:
+        return jsonify({"error": "unauthorized"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "expected JSON object"}), 400
+
+    thought = payload.get("thought", "")
+    say = payload.get("say", "")
+    observation = payload.get("observation")
+    if not isinstance(thought, str) or not isinstance(say, str):
+        return jsonify({"error": "thought and say must be strings"}), 400
+
+    if thought.strip():
+        socketio.emit("update_thoughts", {"data": thought.strip()}, namespace="/chat")
+    if say.strip():
+        enqueue_speech(say.strip(), emit_to_ui=True)
+    if isinstance(observation, dict):
+        global latest_observation  # pylint: disable=global-statement
+        latest_observation = observation
+        emit_observation_update(observation)
+
+    return jsonify({"ok": True})
+
+
 def emit_observation_update(observation=None, sid=None):
     """Send the latest observation image and caption data to clients."""
-    payload = observation or scene_observer.latest_observation()
+    payload = observation or latest_observation
     if not payload:
         return
 
@@ -323,48 +160,6 @@ def sanitize_speech_text(text: str) -> str:
         clean_lines.append(line)
 
     return '\n'.join(clean_lines).strip()
-
-
-def normalize_agent_output(output) -> str:
-    """Normalize agent responses so the Flask loop can parse them safely."""
-    if output is None:
-        return ""
-
-    if isinstance(output, str):
-        return output
-
-    if isinstance(output, dict):
-        candidate = output.get("last_chat_response") or output.get("data") or ""
-        normalized = candidate if isinstance(candidate, str) else str(candidate)
-        logging.warning(
-            "Conscious thinker returned dict output; normalized to string (%d chars)",
-            len(normalized),
-        )
-        return normalized
-
-    if isinstance(output, (list, tuple)):
-        parts = []
-        for item in output:
-            if item is None:
-                continue
-            text = str(item).strip()
-            if text:
-                parts.append(text)
-        normalized = "\n".join(parts)
-        logging.warning(
-            "Conscious thinker returned %s output; normalized to string (%d chars)",
-            type(output).__name__,
-            len(normalized),
-        )
-        return normalized
-
-    normalized = str(output)
-    logging.warning(
-        "Conscious thinker returned unexpected %s output; normalized to string (%d chars)",
-        type(output).__name__,
-        len(normalized),
-    )
-    return normalized
 
 
 def speak_text_streaming(
@@ -490,230 +285,14 @@ def enqueue_speech(
     )
 
 
-def enqueue_navigation_status_update(message: str) -> None:
-    """Speak terminal NavCore updates once without starting an agent turn."""
-    global last_navigation_status_at, last_navigation_status_message  # pylint: disable=global-statement
-    if not message:
-        return
-
-    now = datetime.now().timestamp()
-    with navigation_status_lock:
-        repeated = (
-            message == last_navigation_status_message
-            and now - last_navigation_status_at < NAV_STATUS_REPEAT_SUPPRESS_SECONDS
-        )
-        if repeated:
-            logging.info("Suppressing repeated navigation status update: %s", message)
-            return
-        last_navigation_status_message = message
-        last_navigation_status_at = now
-
-    logging.info("Navigation status update: %s", message)
-    enqueue_speech(message, emit_to_ui=True)
-
-
-def register_navigation_status_callback() -> None:
-    """Register NavCore terminal status for direct speech updates."""
-    try:
-        from coded_tools.unigo2.nav_core import NavCore
-
-        NavCore.set_status_callback(enqueue_navigation_status_update)
-        logging.info("Registered NavCore status callback for spoken navigation updates")
-    except Exception:
-        logging.exception("Failed to register NavCore status callback")
-
-
-register_navigation_status_callback()
-
-
-def discard_deferred_actions(reason: str) -> int:
-    """Drop queued deferred robot actions when a turn should not execute them."""
-    if not DEFERRED_ACTIONS_AVAILABLE or clear_deferred_actions is None:
-        return 0
-
-    cleared_count = clear_deferred_actions()
-    if cleared_count:
-        logging.info("Discarded %d deferred action(s): %s", cleared_count, reason)
-    return cleared_count
-
-
-def execute_deferred_actions_after_speech() -> None:
-    """
-    Run deferred robot actions after queued speech drains, without blocking the UI.
-
-    The assistant should be ready for the next turn as soon as the text response
-    is available, even if TTS playback or robot motions take longer.
-    """
-    if not DEFERRED_ACTIONS_AVAILABLE or execute_deferred_actions is None:
-        return
-    if shutdown_event.is_set():
-        return
-
-    try:
-        speech_queue.join()
-        results = execute_deferred_actions()
-        if results:
-            logging.info("Executed %d deferred robot actions", len(results))
-    except Exception:
-        logging.exception("Failed to execute deferred robot actions")
-
-
 # Start speech worker thread
 speech_thread = threading.Thread(target=speech_worker, daemon=True)
 speech_thread.start()
-
-conscious_session, conscious_thread = set_up_conscious_assistant()
-
-
-def conscious_thinking_process():
-    """Main permanent agent-calling loop."""
-    with app.app_context():  # Manually push the application context
-        global conscious_thread  # pylint: disable=global-statement
-        last_scene_signature = ()
-        last_passive_agent_turn_at = 0.0
-        interactive_turn_seen = False
-        while not shutdown_event.is_set():
-            processing_started = False
-            is_user_turn = False
-            is_passive_turn = False
-            try:
-                timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
-                try:
-                    user_text = user_input_queue.get(timeout=THINKING_INTERVAL)
-                except queue.Empty:
-                    if not interactive_turn_seen:
-                        continue
-
-                    observation = scene_observer.observe()
-                    if observation is not None:
-                        emit_observation_update(observation)
-
-                    if not _should_enable_passive_agent_turns():
-                        continue
-
-                    if not user_input_queue.empty():
-                        logging.info("User input arrived during passive observation; prioritizing it")
-                        continue
-
-                    now = time.monotonic()
-                    if (
-                        PASSIVE_AGENT_TURN_INTERVAL > 0
-                        and now - last_passive_agent_turn_at < PASSIVE_AGENT_TURN_INTERVAL
-                    ):
-                        continue
-
-                    scene_signature = observation_signature(observation)
-                    if scene_signature and scene_signature != last_scene_signature:
-                        agent_input = build_scene_input(timestamp, list(scene_signature))
-                        if agent_input is None:
-                            last_scene_signature = ()
-                            continue
-
-                        last_scene_signature = scene_signature
-                        logging.info(
-                            "Scene observer detected updated entities: %s",
-                            ", ".join(scene_signature),
-                        )
-                    else:
-                        if scene_signature:
-                            logging.debug(
-                                "Scene observer saw unchanged entities; continuing passive thought turn: %s",
-                                ", ".join(scene_signature),
-                            )
-                        else:
-                            last_scene_signature = ()
-                            logging.debug("Passive idle thinking turn")
-                        agent_input = f"\n{timestamp} user: [Silence]"
-                    is_passive_turn = True
-                    last_passive_agent_turn_at = now
-                else:
-                    logging.info("Received user input: %r", user_text)
-                    if user_text is None:
-                        break
-
-                    user_text = str(user_text).strip()
-                    if user_text == "exit":
-                        break
-                    if not user_text:
-                        continue
-
-                    is_user_turn = True
-                    interactive_turn_seen = True
-                    agent_input = f"\n{timestamp} user: {user_text}"
-                    socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
-                    processing_started = True
-                    acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
-                    logging.info("Speaking acknowledgment: %s", acknowledgment)
-                    enqueue_speech(acknowledgment, emit_to_ui=True)
-
-                logging.info("Proceeding with agent turn")
-                raw_output, conscious_thread = conscious_thinker(
-                    conscious_session,
-                    conscious_thread,
-                    agent_input,
-                )
-                agent_output = normalize_agent_output(raw_output)
-
-                if not agent_output:
-                    if is_passive_turn:
-                        discard_deferred_actions("passive scene turn returned no output")
-                    logging.info("Conscious thinker returned no output")
-                    continue
-
-                thoughts_to_emit = []
-                thought_blocks, speech_blocks = parse_agent_output_blocks(agent_output)
-
-                for content in thought_blocks:
-                    timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
-                    thoughts_to_emit.append(f"{timestamp} thought: {content}")
-
-                if thoughts_to_emit:
-                    socketio.emit(
-                        "update_thoughts",
-                        {"data": "\n".join(thoughts_to_emit)},
-                        namespace="/chat",
-                    )
-
-                if speech_blocks:
-                    display_text, spoken_text = combine_speech_blocks(speech_blocks)
-                    if spoken_text:
-                        logging.info(
-                            "Queueing %d speech block(s) as one utterance",
-                            len(speech_blocks),
-                        )
-                        enqueue_speech(
-                            spoken_text,
-                            emit_to_ui=True,
-                            ui_text=display_text,
-                        )
-
-                # Execute deferred robot actions after queued speech drains,
-                # but do not block the interaction loop waiting for them.
-                if DEFERRED_ACTIONS_AVAILABLE and execute_deferred_actions is not None:
-                    if is_user_turn:
-                        threading.Thread(
-                            target=execute_deferred_actions_after_speech,
-                            daemon=True,
-                        ).start()
-                    else:
-                        discard_deferred_actions("passive scene turn")
-            except Exception:
-                logging.exception("Conscious thinking loop iteration failed")
-            finally:
-                if processing_started:
-                    socketio.emit("processing_complete", {"interactive": True}, namespace="/chat")
-
-
 @socketio.on("connect", namespace="/chat")
 def on_connect():
-    """Start background task on connect."""
-    global thread_started, thinking_task  # pylint: disable=global-statement
+    """Send the retained observation without creating a second control loop."""
     logging.info("Socket client connected: %s", request.sid)
-    if not thread_started:
-        thread_started = True
-        # let socketio manage the green-thread
-        thinking_task = socketio.start_background_task(conscious_thinking_process)
-    socketio.start_background_task(emit_observation_update, sid=request.sid)
+    emit_observation_update(sid=request.sid)
 
 
 @app.route("/")
@@ -726,10 +305,9 @@ def index():
 @app.route("/api/observation/latest.jpg")
 def latest_observation_image():
     """Return the latest retained observation image, if available."""
-    image_path = scene_observer.latest_image_path()
-    if not image_path.exists():
+    if not scene_image_path.exists():
         return "", 404
-    return send_file(image_path, mimetype="image/jpeg", conditional=False, max_age=0)
+    return send_file(scene_image_path, mimetype="image/jpeg", conditional=False, max_age=0)
 
 
 @app.route("/api/transcribe", methods=["POST"])
@@ -820,32 +398,26 @@ def handle_user_input(json, *_):
         - skip_echo: Optional boolean to skip echoing back to chat (used when
                      client has already displayed the text, e.g., from voice input)
     """
-    user_input = json["data"]
+    user_input = str(json.get("data", "")).strip()
+    if not user_input:
+        return
     skip_echo = json.get("skip_echo", False)
-    user_input_queue.put(user_input)
     # Only emit update_user_input if client hasn't already displayed it
     if not skip_echo:
         socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
+    socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
+    enqueue_speech(random.choice(ACKNOWLEDGMENT_PHRASES), emit_to_ui=True)
+
+    def submit() -> None:
+        accepted = dispatch_agent_event(user_input, source="user")
+        if not accepted:
+            logging.error("User event was not accepted by the Neuro SAN runtime")
+        socketio.emit("processing_complete", {"interactive": True}, namespace="/chat")
+
+    socketio.start_background_task(submit)
 
 
 cleaned_up = False
-
-
-def shutdown_nav_core_if_initialized():
-    """Stop NavCore resources without importing/creating NavCore during app teardown."""
-    for module_name in ("coded_tools.unigo2.nav_core", "unigo2.nav_core"):
-        nav_module = sys.modules.get(module_name)
-        nav_cls = getattr(nav_module, "NavCore", None) if nav_module else None
-        nav_instance = getattr(nav_cls, "_instance", None) if nav_cls else None
-        if nav_instance is None:
-            continue
-
-        try:
-            nav_instance.shutdown()
-        except Exception:
-            logging.exception("Failed to shut down NavCore")
-        finally:
-            nav_cls._instance = None
 
 
 def cleanup(from_request=False):
@@ -857,22 +429,12 @@ def cleanup(from_request=False):
 
     print("Bye!")
     shutdown_event.set()
-    user_input_queue.put(None)
     speech_queue.put(None)
-    discard_deferred_actions("shutdown")
-
-    try:
-        if thinking_task is not None and hasattr(thinking_task, "join"):
-            thinking_task.join(timeout=3.0)
-    except RuntimeError:
-        logging.debug("Skipping join on current thinking thread during shutdown")
 
     if threading.current_thread() is not speech_thread:
         speech_thread.join(timeout=3.0)
 
-    shutdown_nav_core_if_initialized()
-    scene_observer.cleanup()
-    tear_down_conscious_assistant(conscious_session)
+    agent_runtime.stop()
 
     if from_request:
         try:
@@ -910,12 +472,7 @@ if __name__ == "__main__":
     CERT = "/home/unitree/certs/cert.pem"
     KEY = "/home/unitree/certs/key.pem"
 
-    if scene_observer.available():
-        logging.info("Pre-initializing scene observer on the main thread")
-        if scene_observer.initialize():
-            logging.info("Scene observer vision backend is ready")
-        else:
-            logging.warning("Scene observer vision backend did not initialize during startup")
+    agent_runtime.start()
 
     ssl_ctx = None
     if os.path.exists(CERT) and os.path.exists(KEY):

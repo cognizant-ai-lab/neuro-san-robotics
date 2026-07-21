@@ -27,6 +27,12 @@ on its power button.
 You can now navigate to https://10.194.17.130:5001 (check the IP address)
 to interact with CAIL-E.
 
+The Flask process starts one local Neuro SAN event service on port `8188` before
+serving the browser. Flask only transports browser input/output, TTS playback,
+voice transcription, and the latest camera image. The native service owns agent
+events and periodic autonomous turns; `NavCore` remains the independent real-time
+navigation controller. Stop the Flask process to stop the service it started.
+
 ### Robot environment (`setmyenv.sh`)
 
 Use this as the robot-side `setmyenv.sh`. Keep secrets such as
@@ -77,8 +83,7 @@ specific robot really needs a temporary override.
 | Setting | Code default | Meaning |
 | --- | --- | --- |
 | `CONSCIOUS_ENABLE_SCENE_OBSERVER` | enabled on Linux | Keeps the latest camera scene available in the UI and face-learning tools. |
-| `CONSCIOUS_ENABLE_PASSIVE_AGENT_TURNS` | `1` | Scene changes may wake the agent for prompt-governed passive thoughts. Set to `0` only when camera updates should never trigger an agent turn. |
-| `CONSCIOUS_PASSIVE_AGENT_TURN_INTERVAL_SECONDS` | at least `10.0` | Minimum time between passive agent/thought turns. User input is not delayed by this cooldown. |
+| Native periodic interaction | every minute | Neuro SAN's manifest sends `system: [Silence]`; the agent decides whether to inspect the scene, think, speak, or remain silent. |
 | `GO2_MOVE_LOG_INTERVAL_SECONDS` | `-1` | Suppresses repeated raw `Move(vx, vy, vyaw)` logs. |
 | `GO2_DISABLE_FREE_AVOID_ON_INIT` | `1` | Calls `FreeAvoid(false)` after SportClient init so Unitree firmware avoidance does not override app-level navigation. |
 | `GO2_USE_SDK_SPECIAL_MOTIONS` | `1` | Uses Unitree SDK special motions when available. |
