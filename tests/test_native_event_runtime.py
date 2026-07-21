@@ -81,6 +81,11 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertNotIn("user_input_queue", source)
         self.assertNotIn("THINKING_INTERVAL", source)
 
+    def test_flask_owns_the_native_ui_callback_url(self):
+        source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()
+
+        self.assertIn('os.environ["CONSCIOUS_UI_EVENT_ENDPOINT"] = _ui_event_endpoint()', source)
+
     def test_robot_actions_execute_in_the_native_agent_process(self):
         class FakeGo2:
             available = True
