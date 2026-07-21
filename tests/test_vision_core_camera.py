@@ -233,12 +233,15 @@ class VisionCoreCameraTests(unittest.TestCase):
 
         self.assertEqual(
             descriptions[0],
+            "Unitree Go2 front camera via eth0",
+        )
+        self.assertEqual(
+            descriptions[1],
             "Intel RealSense color camera (usb-Intel_R__RealSense_TM__Depth_Camera_435i-video-index0)",
         )
-        self.assertEqual(descriptions[1], "Unitree Go2 front camera via eth0")
         self.assertEqual(descriptions[2:4], ["Jetson CSI sensor 0", "Jetson CSI sensor 1"])
-        self.assertEqual(candidates[1]["kind"], "unitree")
-        self.assertEqual(candidates[0]["backend"], getattr(vision_core.cv2, "CAP_V4L2", None))
+        self.assertEqual(candidates[0]["kind"], "unitree")
+        self.assertEqual(candidates[1]["backend"], getattr(vision_core.cv2, "CAP_V4L2", None))
         self.assertIn("/dev/video2", descriptions)
         self.assertIn("/dev/video4", descriptions)
         self.assertIn("camera index 0", descriptions)

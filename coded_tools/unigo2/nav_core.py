@@ -1260,6 +1260,7 @@ class NavCore:
     )
     ODOMETRY_YAW_RATE_RATIO: float = _env_float("NAV_ODOMETRY_YAW_RATE_RATIO", 1.0)
     DEPTH_STOP_WHEN_IDLE: bool = _env_flag("NAV_DEPTH_STOP_WHEN_IDLE", True)
+    DEPTH_GRID_MAX_AGE_S = 0.5
 
     @classmethod
     def get_instance(cls) -> "NavCore":
@@ -1595,7 +1596,7 @@ class NavCore:
 
         deadline = time.monotonic() + max(0.0, timeout_s)
         while True:
-            if self._depth_processor.get_obstacle_grid() is not None:
+            if self._is_fresh_obstacle_grid(self._depth_processor.get_obstacle_grid()):
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -1953,6 +1954,15 @@ class NavCore:
 
         # 1. Read sensors
         raw_grid = self._depth_processor.get_obstacle_grid()
+        if not self._is_fresh_obstacle_grid(raw_grid):
+            self._abort_active_navigation(
+                goal,
+                "E-STOP: obstacle grid is stale",
+                f"I stopped before reaching {self._goal_display_name(goal)} because "
+                "my depth sensor stopped updating.",
+                state=NavState.E_STOP,
+            )
+            return
         grid = self._filter_transient_path_obstacle(raw_grid)
         pose = self._odometry.get_pose()
         self._update_progress(pose)
@@ -2108,6 +2118,15 @@ class NavCore:
 
         # 7. Update progress tracker
         self._update_progress(self._odometry.get_pose())
+
+    def _is_fresh_obstacle_grid(self, grid: Optional[ObstacleGrid]) -> bool:
+        """Return True only for a recently captured obstacle grid."""
+        if grid is None:
+            return False
+        timestamp = getattr(grid, "timestamp", None)
+        if not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp):
+            return False
+        return time.time() - float(timestamp) <= self.DEPTH_GRID_MAX_AGE_S
 
     def _forward_clearance_for_safety(
         self,
