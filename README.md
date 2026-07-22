@@ -31,7 +31,7 @@ The Flask process starts one local Neuro SAN event service on port `8188` before
 serving the browser. Flask only transports browser input/output, TTS playback,
 voice transcription, and the latest camera image. The native service owns agent
 events and periodic autonomous turns; `NavCore` remains the independent real-time
-navigation controller. A dedicated native observer network captures the scene
+navigation controller. A lightweight Python observer service captures the scene
 periodically, updates the UI image, and sends compact `observation:` events to
 CAIL-E. Stop the Flask process to stop the service it started.
 
@@ -85,7 +85,7 @@ specific robot really needs a temporary override.
 | Setting | Code default | Meaning |
 | --- | --- | --- |
 | `CONSCIOUS_ENABLE_SCENE_OBSERVER` | enabled on Linux | Keeps the latest camera scene available in the UI and face-learning tools. |
-| Native scene observation | every 15 seconds | Neuro SAN wakes the dedicated observer network, which captures the scene and sends its metadata to CAIL-E as an internal event. |
+| Native scene observation | every 15 seconds | The native runtime's Python observer service captures the scene and sends its metadata to CAIL-E as an internal event. |
 | `GO2_MOVE_LOG_INTERVAL_SECONDS` | `-1` | Suppresses repeated raw `Move(vx, vy, vyaw)` logs. |
 | `GO2_USE_SDK_SPECIAL_MOTIONS` | `1` | Uses Unitree SDK special motions when available. |
 | `GO2_NETWORK_INTERFACE` / `CYCLONEDDS_NETWORK_INTERFACE` | `eth0` | Unitree SDK communication interface. Override only if the robot network is not on `eth0`. |

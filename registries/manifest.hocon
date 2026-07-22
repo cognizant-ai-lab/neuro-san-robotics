@@ -13,18 +13,3 @@
     "serve": True,
     "public": False
 }
-"scene_observer_agent.hocon" = {
-    "serve": True,
-    "public": False,
-    "periodic": {
-        "interactions": [
-            {
-                "enable": true,
-                "cron_schedule": "* * * * * */15",
-                "second_at_beginning": false,
-                "text": "system: [Silence]",
-                "metadata": {"user_id": "system"}
-            }
-        ]
-    }
-}

@@ -5,7 +5,7 @@ The **Conscious Agent** is a basic multi-agent system that is called from the
 
 ## Note
 
-- The native Neuro SAN service periodically invokes the scene observer network and can accumulate token usage.
+- The native runtime periodically captures the scene without invoking an LLM.
 - The flask app will store memory items in a file locally. You can turn this feature off by changing the flag in
  [list_topics.py](../../coded_tools/kwik_agents/list_topics.py)
 
@@ -13,8 +13,7 @@ The **Conscious Agent** is a basic multi-agent system that is called from the
 
 ## File
 
-[conscious_agent.hocon](../../registries/conscious_agent.hocon) and
-[scene_observer_agent.hocon](../../registries/scene_observer_agent.hocon)
+[conscious_agent.hocon](../../registries/conscious_agent.hocon)
 
 ---
 

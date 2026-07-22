@@ -242,7 +242,7 @@ class SceneObserver:
         """
         Eagerly initialize the observer so heavy imports can happen on the main thread.
 
-        The native observer agent invokes captures periodically. On some deployments,
+        The native observer service invokes captures periodically. On some deployments,
         importing the YOLO stack from that worker thread is less reliable than doing
         it once during startup.
         """

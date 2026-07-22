@@ -42,9 +42,15 @@ def main() -> None:
     """Run Neuro SAN's service main loop with the normal command-line arguments."""
     _preinitialize_robot_control()
     _prime_vision_runtime()
+    from apps.conscious_assistant.scene_observer_service import SceneObserverService
     from neuro_san.service.main_loop.server_main_loop import ServerMainLoop
 
-    ServerMainLoop().main_loop()
+    observer_service = SceneObserverService()
+    observer_service.start()
+    try:
+        ServerMainLoop().main_loop()
+    finally:
+        observer_service.stop()
 
 
 if __name__ == "__main__":

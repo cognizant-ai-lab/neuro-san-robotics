@@ -1,6 +1,6 @@
 import unittest
-import asyncio
 import json
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import numpy as np
@@ -12,7 +12,7 @@ from apps.conscious_assistant.scene_observer import build_scene_input
 from apps.conscious_assistant.scene_observer import observation_signature
 from apps.conscious_assistant.scene_observer import summarize_observed_entities
 from apps.conscious_assistant.scene_observer import summarize_observed_objects
-from coded_tools.unigo2 import scene_observer_tool
+from apps.conscious_assistant import scene_observer_service
 
 
 class _VisionCtorResult:
@@ -22,19 +22,21 @@ class _VisionCtorResult:
 
 
 class SceneObserverTests(unittest.TestCase):
-    def test_observer_tool_forwards_successful_capture_as_agent_event(self):
+    def test_observer_service_forwards_successful_capture_as_agent_event(self):
         observation = {
             "summary": "Recognized: Alice",
             "objects": ["Alice", "chair"],
             "faces": [{"name": "Alice"}],
         }
+        observer = MagicMock(enabled=True)
+        observer.observe.return_value = observation
+        service = scene_observer_service.SceneObserverService(observer=observer)
 
         with (
-            patch.object(scene_observer_tool._OBSERVER, "observe", return_value=observation),
-            patch.object(scene_observer_tool, "publish_observation", return_value=True) as publish,
-            patch.object(scene_observer_tool, "queue_agent_event") as queue_event,
+            patch.object(scene_observer_service, "publish_observation", return_value=True) as publish,
+            patch.object(scene_observer_service, "queue_agent_event") as queue_event,
         ):
-            result = asyncio.run(scene_observer_tool.SceneObserverTool().async_invoke({"capture": True}, {}))
+            captured = service.capture_once()
 
         publish.assert_called_once_with(observation)
         event_text = queue_event.call_args.args[0]
@@ -43,7 +45,7 @@ class SceneObserverTests(unittest.TestCase):
             json.loads(event_text),
             {"summary": "Recognized: Alice", "entities": ["Alice", "chair"]},
         )
-        self.assertTrue(result["available"])
+        self.assertTrue(captured)
 
     def test_resolve_repo_relative_path_uses_repo_copy_when_present(self):
         resolved = _resolve_repo_relative_path("yolov8n.pt")
