@@ -17,8 +17,10 @@
         "model_name": "gpt-5.1"
         # "model_name": "gpt-4.1-2025-04-14"
 },
-    "max_steps": 40000,
-    "max_execution_seconds": 6000,
+    # A normal turn needs at most a few LLM/tool stages. Bound event work so a
+    # stalled model call cannot retain the native event session indefinitely.
+    "max_steps": 12,
+    "max_execution_seconds": 60,
     "instructions_prefix": """
     You are a general assistant with the power of memory.
     """,

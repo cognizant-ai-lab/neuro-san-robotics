@@ -48,6 +48,12 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn('"periodic"', source)
         self.assertIn('"text": "system: [Silence]"', source)
 
+    def test_native_event_turns_have_bounded_execution(self):
+        source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
+
+        self.assertIn('"max_steps": 12', source)
+        self.assertIn('"max_execution_seconds": 60', source)
+
     def test_dispatch_agent_event_posts_a_minimal_event(self):
         with patch.object(agent_events, "_post_json") as post:
             self.assertTrue(agent_events.dispatch_agent_event("go home", source="user"))
