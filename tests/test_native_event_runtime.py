@@ -46,6 +46,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
         source = (ROOT / "registries" / "manifest.hocon").read_text()
 
         self.assertIn('"periodic"', source)
+        self.assertIn('"cron_schedule": "* * * * * 0"', source)
         self.assertIn('"text": "system: [Silence]"', source)
 
     def test_native_event_turns_have_bounded_execution(self):
