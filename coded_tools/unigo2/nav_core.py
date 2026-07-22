@@ -402,7 +402,12 @@ class GlobalPlanner:
         self._waypoint_index = 1  # skip start node
         return path
 
-    def get_next_waypoint(self, current_pose: RobotPose, tolerance_m: float = 0.3) -> Optional[MapNode]:
+    def get_next_waypoint(
+        self,
+        current_pose: RobotPose,
+        tolerance_m: float = 0.3,
+        on_advance: Optional[Callable[[MapNode, MapNode], None]] = None,
+    ) -> Optional[MapNode]:
         """Return the next waypoint to steer toward, advancing when within tolerance.
 
         Returns None when the final waypoint (goal) has been reached.
@@ -414,10 +419,13 @@ class GlobalPlanner:
         dist = math.hypot(wp.x - current_pose.x, wp.y - current_pose.y)
 
         if dist < tolerance_m and self._waypoint_index < len(self._current_path) - 1:
+            reached = wp
             self._waypoint_index += 1
             wp = self._current_path[self._waypoint_index]
             dist = math.hypot(wp.x - current_pose.x, wp.y - current_pose.y)
             logger.info("GlobalPlanner: advancing to waypoint '%s'", wp.name)
+            if on_advance is not None:
+                on_advance(reached, wp)
 
         if dist < tolerance_m and self._waypoint_index == len(self._current_path) - 1:
             return None  # goal reached
@@ -428,6 +436,36 @@ class GlobalPlanner:
         """Reset the current path and waypoint index."""
         self._current_path = []
         self._waypoint_index = 0
+
+    def project_onto_current_segment(
+        self,
+        pose: RobotPose,
+    ) -> Optional[Tuple[RobotPose, MapNode, MapNode]]:
+        """Project an operator-corrected pose onto the active route edge."""
+        if not self._current_path or self._waypoint_index <= 0:
+            return None
+        if self._waypoint_index >= len(self._current_path):
+            return None
+
+        start = self._current_path[self._waypoint_index - 1]
+        target = self._current_path[self._waypoint_index]
+        edge_x = target.x - start.x
+        edge_y = target.y - start.y
+        edge_length_sq = edge_x * edge_x + edge_y * edge_y
+        if edge_length_sq <= 1e-9:
+            return None
+
+        along = (
+            (pose.x - start.x) * edge_x + (pose.y - start.y) * edge_y
+        ) / edge_length_sq
+        along = min(1.0, max(0.0, along))
+        corrected = RobotPose(
+            x=start.x + along * edge_x,
+            y=start.y + along * edge_y,
+            yaw=math.atan2(edge_y, edge_x),
+            timestamp=time.time(),
+        )
+        return corrected, start, target
 
     def _dijkstra(self, start: str, goal: str) -> Optional[List[str]]:
         """Run Dijkstra's shortest path on the topological map adjacency graph."""
@@ -481,6 +519,13 @@ class LocalPlanner:
         "NAV_PIVOT_YAW_RATE",
         _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.50),
     )
+    CORRIDOR_MIN_POINTS_PER_SIDE = 8
+    CORRIDOR_MIN_LENGTH_M = 0.45
+    CORRIDOR_MAX_RESIDUAL_M = 0.12
+    CORRIDOR_MAX_WALL_ANGLE_RAD = math.radians(25.0)
+    CORRIDOR_MAX_PARALLEL_ERROR_RAD = math.radians(10.0)
+    CORRIDOR_MIN_WIDTH_M = 0.55
+    CORRIDOR_MAX_WIDTH_M = 2.50
 
     def __init__(
         self,
@@ -615,6 +660,105 @@ class LocalPlanner:
         vx = self._modulate_speed(0.1, nearest)
 
         return VelocityCommand(vx=vx, vy=0.0, vyaw=vyaw)
+
+    def apply_corridor_course_correction(
+        self,
+        cmd: VelocityCommand,
+        obstacle_grid: ObstacleGrid,
+    ) -> VelocityCommand:
+        """Add bounded steering from reliable, parallel corridor-wall geometry."""
+        if cmd.vx <= 0.05 or obstacle_grid.path_obstacle_m < self.avoidance_distance:
+            return cmd
+
+        walls = self._estimate_corridor_walls(obstacle_grid)
+        if walls is None:
+            return cmd
+
+        wall_heading, center_offset = walls
+        correction = 0.30 * wall_heading + 0.20 * center_offset
+        correction_limit = min(0.04, self.max_yaw_rate * 0.5)
+        corrected_yaw = float(
+            np.clip(
+                cmd.vyaw + correction,
+                -self.max_yaw_rate,
+                self.max_yaw_rate,
+            )
+        )
+        if abs(corrected_yaw - cmd.vyaw) > correction_limit:
+            corrected_yaw = cmd.vyaw + math.copysign(
+                correction_limit,
+                corrected_yaw - cmd.vyaw,
+            )
+        return VelocityCommand(vx=cmd.vx, vy=cmd.vy, vyaw=corrected_yaw)
+
+    def _estimate_corridor_walls(
+        self,
+        obstacle_grid: ObstacleGrid,
+    ) -> Optional[Tuple[float, float]]:
+        """Return corridor heading and center offset when both walls are reliable."""
+        occupied = np.argwhere(obstacle_grid.grid > 0)
+        if occupied.size == 0:
+            return None
+
+        forward = (obstacle_grid.origin_row - occupied[:, 0]) * obstacle_grid.resolution
+        lateral = (obstacle_grid.origin_col - occupied[:, 1]) * obstacle_grid.resolution
+        usable = (
+            (forward >= 0.30)
+            & (forward <= 2.00)
+            & (np.abs(lateral) >= 0.25)
+            & (np.abs(lateral) <= 1.50)
+        )
+        forward = forward[usable]
+        lateral = lateral[usable]
+
+        left = self._fit_corridor_wall(forward[lateral > 0], lateral[lateral > 0])
+        right = self._fit_corridor_wall(forward[lateral < 0], lateral[lateral < 0])
+        if left is None or right is None:
+            return None
+
+        left_heading, left_at_reference = left
+        right_heading, right_at_reference = right
+        heading_delta = abs(
+            math.atan2(
+                math.sin(left_heading - right_heading),
+                math.cos(left_heading - right_heading),
+            )
+        )
+        corridor_width = left_at_reference - right_at_reference
+        if (
+            heading_delta > self.CORRIDOR_MAX_PARALLEL_ERROR_RAD
+            or not self.CORRIDOR_MIN_WIDTH_M
+            <= corridor_width
+            <= self.CORRIDOR_MAX_WIDTH_M
+        ):
+            return None
+
+        wall_heading = math.atan2(
+            math.sin(left_heading) + math.sin(right_heading),
+            math.cos(left_heading) + math.cos(right_heading),
+        )
+        center_offset = 0.5 * (left_at_reference + right_at_reference)
+        return wall_heading, center_offset
+
+    def _fit_corridor_wall(
+        self,
+        forward: np.ndarray,
+        lateral: np.ndarray,
+    ) -> Optional[Tuple[float, float]]:
+        """Fit one longitudinal wall and reject short or scattered point sets."""
+        if len(forward) < self.CORRIDOR_MIN_POINTS_PER_SIDE:
+            return None
+        if np.percentile(forward, 90) - np.percentile(forward, 10) < self.CORRIDOR_MIN_LENGTH_M:
+            return None
+
+        slope, intercept = np.polyfit(forward, lateral, 1)
+        heading = math.atan(float(slope))
+        if abs(heading) > self.CORRIDOR_MAX_WALL_ANGLE_RAD:
+            return None
+        residual = np.median(np.abs(lateral - (slope * forward + intercept)))
+        if residual > self.CORRIDOR_MAX_RESIDUAL_M:
+            return None
+        return heading, float(slope * 0.75 + intercept)
 
     def _pivot_yaw_rate(self, heading_error: float) -> float:
         """Return a decisive in-place turn rate for large heading corrections."""
@@ -840,6 +984,8 @@ class SdkSportModeOdometryProvider(OdometryProvider):
     MAX_SAMPLE_AGE_S = _env_float("NAV_SDK_ODOMETRY_MAX_AGE", 0.75)
     MIN_MOTION_DELTA_M = _env_float("NAV_SDK_ODOMETRY_MIN_DELTA_M", 0.02)
     MIN_MOTION_DELTA_YAW_RAD = _env_float("NAV_SDK_ODOMETRY_MIN_DELTA_YAW_RAD", 0.03)
+    REMOTE_STICK_DEADZONE = 0.08
+    REMOTE_RELEASE_GRACE_S = 0.35
 
     def __init__(
         self,
@@ -850,14 +996,16 @@ class SdkSportModeOdometryProvider(OdometryProvider):
         super().__init__()
         self._topic = topic
         self._subscriber = None
+        self._remote_subscriber = None
         self._latest_sdk_pose: Optional[Tuple[float, float, float, float]] = None
         self._sdk_anchor: Optional[Tuple[float, float, float]] = None
         self._map_anchor = RobotPose()
         self._subscriber_error: Optional[str] = None
         self._use_translation_odometry = _env_flag(
             "NAV_USE_SDK_TRANSLATION_ODOMETRY",
-            False,
+            True,
         )
+        self._manual_control_until = 0.0
         self._sdk_translation_confirmed = False
         self._sdk_yaw_confirmed = False
         self._reported_static_fallback = False
@@ -886,7 +1034,7 @@ class SdkSportModeOdometryProvider(OdometryProvider):
     def _start_subscriber(self, network_interface: Optional[str]) -> None:
         """Initialize the Unitree SportModeState subscriber."""
         try:
-            ChannelSubscriber, ChannelFactoryInitialize, SportModeState_ = (
+            ChannelSubscriber, ChannelFactoryInitialize, SportModeState_, WirelessController_ = (
                 self._import_unitree_sport_state()
             )
 
@@ -897,9 +1045,22 @@ class SdkSportModeOdometryProvider(OdometryProvider):
 
             self._subscriber = ChannelSubscriber(self._topic, SportModeState_)
             self._subscriber.Init(self._handle_sample, 1)
-            logger.info(
-                "SdkSportModeOdometryProvider: subscribed to %s", self._topic
-            )
+            if WirelessController_ is not None:
+                self._remote_subscriber = ChannelSubscriber(
+                    "rt/wirelesscontroller",
+                    WirelessController_,
+                )
+                self._remote_subscriber.Init(self._handle_remote_sample, 1)
+                logger.info(
+                    "SdkSportModeOdometryProvider: subscribed to %s and "
+                    "rt/wirelesscontroller",
+                    self._topic,
+                )
+            else:
+                logger.warning(
+                    "SdkSportModeOdometryProvider: wireless controller IDL unavailable; "
+                    "remote override detection disabled"
+                )
         except Exception as exc:
             self._subscriber = None
             self._subscriber_error = str(exc)
@@ -920,6 +1081,7 @@ class SdkSportModeOdometryProvider(OdometryProvider):
                     channel_mod.ChannelSubscriber,
                     channel_mod.ChannelFactoryInitialize,
                     dds_mod.SportModeState_,
+                    getattr(dds_mod, "WirelessController_", None),
                 )
             except Exception as exc:
                 import_errors.append(f"{root}: {exc}")
@@ -995,6 +1157,35 @@ class SdkSportModeOdometryProvider(OdometryProvider):
                 aligned_pose = self._aligned_pose_from_sdk_locked(sdk_pose)
                 self._pose.yaw = aligned_pose.yaw
                 self._pose.timestamp = aligned_pose.timestamp
+
+    def _handle_remote_sample(self, sample: Any) -> None:
+        """Record recent human controller input without taking over locomotion."""
+        sticks = (
+            self._read_field(sample, "lx"),
+            self._read_field(sample, "ly"),
+            self._read_field(sample, "rx"),
+            self._read_field(sample, "ry"),
+        )
+        keys = self._read_field(sample, "keys") or 0
+        stick_active = any(
+            isinstance(value, (int, float))
+            and abs(float(value)) >= self.REMOTE_STICK_DEADZONE
+            for value in sticks
+        )
+        try:
+            button_active = int(keys) != 0
+        except (TypeError, ValueError):
+            button_active = False
+        if stick_active or button_active:
+            with self._lock:
+                self._manual_control_until = (
+                    time.monotonic() + self.REMOTE_RELEASE_GRACE_S
+                )
+
+    def is_manual_control_active(self) -> bool:
+        """Return whether the wireless controller was used very recently."""
+        with self._lock:
+            return time.monotonic() < self._manual_control_until
 
     def _has_fresh_sdk_pose_locked(self) -> bool:
         """True if the last SDK sample is recent enough to trust."""
@@ -1096,6 +1287,7 @@ class SdkSportModeOdometryProvider(OdometryProvider):
             self._sdk_translation_confirmed = False
             self._sdk_yaw_confirmed = False
             self._reported_static_fallback = False
+            self._manual_control_until = 0.0
             self._last_update = time.monotonic()
 
     def get_pose(self) -> RobotPose:
@@ -1129,14 +1321,19 @@ class SdkSportModeOdometryProvider(OdometryProvider):
 
     def shutdown(self):
         """Close the SDK subscriber if it was started."""
-        if self._subscriber is None:
-            return
-        try:
-            self._subscriber.Close()
-        except Exception:
-            logger.debug("SdkSportModeOdometryProvider: subscriber close failed", exc_info=True)
-        finally:
-            self._subscriber = None
+        for subscriber_name in ("_subscriber", "_remote_subscriber"):
+            subscriber = getattr(self, subscriber_name)
+            if subscriber is None:
+                continue
+            try:
+                subscriber.Close()
+            except Exception:
+                logger.debug(
+                    "SdkSportModeOdometryProvider: subscriber close failed",
+                    exc_info=True,
+                )
+            finally:
+                setattr(self, subscriber_name, None)
 
 
 def _create_odometry_provider() -> OdometryProvider:
@@ -1223,6 +1420,7 @@ class NavCore:
     FORWARD_COMMAND_PERIOD_S: float = _env_float("NAV_FORWARD_COMMAND_PERIOD", 0.20)
     FORWARD_ACTUAL_SPEED_RATIO: float = _env_float("NAV_FORWARD_ACTUAL_SPEED_RATIO", 1.40)
     DEPTH_READY_TIMEOUT_S: float = _env_float("NAV_DEPTH_READY_TIMEOUT", 2.0)
+    OBSTACLE_GRID_MAX_AGE_S: float = 0.50
     YAW_PROGRESS_TOLERANCE_RAD: float = _env_float(
         "NAV_YAW_PROGRESS_TOLERANCE_RAD",
         math.radians(5.0),
@@ -1244,7 +1442,7 @@ class NavCore:
 
     @classmethod
     def set_status_callback(cls, callback: Optional[Callable[[str], None]]) -> None:
-        """Register a callback for terminal navigation status updates."""
+        """Register a callback for meaningful navigation state changes."""
         with cls._instance_lock:
             cls._global_status_callback = callback
             if cls._instance is not None:
@@ -1295,6 +1493,8 @@ class NavCore:
             distance_tolerance_m=self.PATH_OBSTACLE_DISTANCE_TOLERANCE_M,
             bearing_tolerance_rad=self.PATH_OBSTACLE_BEARING_TOLERANCE_RAD,
         )
+        self._path_obstacle_active = False
+        self._manual_override_active = False
 
         # Go2 macros (lazy init)
         self._go2 = None
@@ -1372,7 +1572,7 @@ class NavCore:
             stop()
 
     def _notify_status_change(self, message: str) -> None:
-        """Notify the host application of a terminal navigation status change."""
+        """Notify the agent of a meaningful navigation state change."""
         callback = self._on_status_change
         if callback is None:
             return
@@ -1400,6 +1600,37 @@ class NavCore:
         self._global_planner.clear()
         self._reset_close_obstacle_confirmation()
         self._reset_path_obstacle_confirmation()
+        self._path_obstacle_active = False
+
+    def _notify_waypoint_advance(self, reached: MapNode, upcoming: MapNode) -> None:
+        """Publish topological progress without exposing noisy coordinates."""
+        reached_label = self._topo_map.get_node_label(reached)
+        upcoming_label = self._topo_map.get_node_label(upcoming)
+        self._notify_status_change(
+            f"I reached {reached_label} and am continuing toward {upcoming_label}."
+        )
+
+    def _update_path_obstacle_event(self, path_distance_m: float, goal: NavGoal) -> None:
+        """Publish confirmed obstacle enter/clear transitions once each."""
+        in_avoidance_band = (
+            self.SAFETY_DISTANCE_M < path_distance_m < self.AVOIDANCE_DISTANCE_M
+        )
+        if in_avoidance_band and not self._path_obstacle_active:
+            self._path_obstacle_active = True
+            self._notify_status_change(
+                f"I encountered an obstacle in my path at {path_distance_m:.2f} meters "
+                f"while heading to {self._goal_display_name(goal)}. "
+                "My local planner is navigating around it."
+            )
+        elif (
+            path_distance_m >= self.AVOIDANCE_DISTANCE_M
+            and self._path_obstacle_active
+        ):
+            self._path_obstacle_active = False
+            self._notify_status_change(
+                f"The path is clear again, and I am continuing toward "
+                f"{self._goal_display_name(goal)}."
+            )
 
     def _abort_active_navigation(
         self,
@@ -1909,6 +2140,10 @@ class NavCore:
                 time.sleep(0.1)
                 continue
 
+            if self._handle_manual_override(goal):
+                time.sleep(0.1)
+                continue
+
             try:
                 self._nav_cycle(state, goal)
             except Exception as exc:
@@ -1919,19 +2154,93 @@ class NavCore:
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
+    def _handle_manual_override(self, goal: NavGoal) -> bool:
+        """Pause for remote control, then replan from the measured robot pose."""
+        is_active = getattr(self._odometry, "is_manual_control_active", None)
+        manual_active = callable(is_active) and is_active()
+        if manual_active:
+            if not self._manual_override_active:
+                self._manual_override_active = True
+                logger.info("NavCore: autonomous navigation paused for remote control")
+                self._notify_status_change(
+                    f"Manual control is active. I paused autonomous navigation to "
+                    f"{self._goal_display_name(goal)}."
+                )
+            return True
+
+        if not self._manual_override_active:
+            return False
+
+        self._manual_override_active = False
+        if goal.goal_type != "semantic":
+            with self._state_lock:
+                self._state = NavState.IDLE
+                self._goal = None
+                self._last_stop_reason = "Relative movement canceled after manual control"
+                self._clear_planner_and_obstacle_state()
+            self._notify_status_change(
+                "Manual control ended, so I canceled the previous relative movement command."
+            )
+            self._stop_depth_when_idle()
+            return True
+
+        measured_pose = self._odometry.get_pose()
+        correction = self._global_planner.project_onto_current_segment(measured_pose)
+        if correction is None:
+            corrected_pose = RobotPose(
+                x=measured_pose.x,
+                y=measured_pose.y,
+                yaw=math.atan2(
+                    goal.y - measured_pose.y,
+                    goal.x - measured_pose.x,
+                ),
+            )
+            status_message = (
+                f"Manual control ended. I accepted the corrected position and am "
+                f"continuing toward {self._goal_display_name(goal)}."
+            )
+            log_args = (self._goal_display_name(goal),)
+            log_message = "NavCore: accepted remote correction toward '%s'"
+        else:
+            corrected_pose, segment_start, segment_target = correction
+            status_message = (
+                f"Manual control ended. I accepted the correction on the route from "
+                f"{self._topo_map.get_node_label(segment_start)} to "
+                f"{self._topo_map.get_node_label(segment_target)} and am "
+                f"continuing toward {self._goal_display_name(goal)}."
+            )
+            log_args = (segment_start.name, segment_target.name)
+            log_message = (
+                "NavCore: accepted remote correction on route segment '%s' -> '%s'"
+            )
+
+        self._odometry.set_pose(
+            corrected_pose.x,
+            corrected_pose.y,
+            corrected_pose.yaw,
+        )
+        self._reset_progress_tracker()
+        logger.info(log_message, *log_args)
+        self._notify_status_change(status_message)
+        return False
+
     def _nav_cycle(self, state: NavState, goal: NavGoal):
         """Execute one navigation cycle: sense -> plan -> safety filter -> actuate."""
         if state in {NavState.IDLE, NavState.STUCK, NavState.E_STOP}:
             return
 
         # 1. Read sensors
-        raw_grid = self._depth_processor.get_obstacle_grid()
+        raw_grid = self._fresh_obstacle_grid(
+            self._depth_processor.get_obstacle_grid()
+        )
         grid = self._filter_transient_path_obstacle(raw_grid)
         pose = self._odometry.get_pose()
         self._update_progress(pose)
 
         path_dist = grid.path_obstacle_m if grid else float("inf")
         path_bearing = grid.path_obstacle_bearing if grid else 0.0
+        safety_dist = raw_grid.path_obstacle_m if raw_grid else float("inf")
+        safety_bearing = raw_grid.path_obstacle_bearing if raw_grid else 0.0
 
         # 2. Check if goal reached
         dist_to_goal = math.hypot(goal.x - pose.x, goal.y - pose.y)
@@ -1950,10 +2259,16 @@ class NavCore:
                 self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
             return
 
+        self._update_path_obstacle_event(path_dist, goal)
+
         # 3. Compute velocity command
         if state == NavState.NAVIGATING:
             if goal.goal_type == "semantic":
-                waypoint = self._global_planner.get_next_waypoint(pose, self.GOAL_TOLERANCE_M)
+                waypoint = self._global_planner.get_next_waypoint(
+                    pose,
+                    self.GOAL_TOLERANCE_M,
+                    on_advance=self._notify_waypoint_advance,
+                )
                 if waypoint is None:
                     # Global path complete
                     with self._state_lock:
@@ -1975,6 +2290,8 @@ class NavCore:
 
             if grid:
                 cmd = self._local_planner.compute_velocity(grid, goal_dir, goal_dist)
+                if goal.goal_type == "semantic":
+                    cmd = self._local_planner.apply_corridor_course_correction(cmd, grid)
             else:
                 self._abort_active_navigation(
                     goal,
@@ -2001,16 +2318,16 @@ class NavCore:
             cmd = VelocityCommand(0.0, 0.0, 0.0)
 
         # 4. Safety filter
-        path_dist, path_bearing = self._forward_clearance_for_safety(
+        safety_dist, safety_bearing = self._forward_clearance_for_safety(
             cmd,
-            path_dist,
-            path_bearing,
+            safety_dist,
+            safety_bearing,
         )
         seconds_since_progress = time.monotonic() - self._last_progress_time
         cmd, event = self._safety.filter_command(
             cmd,
-            nearest_obstacle_m=path_dist,
-            nearest_obstacle_bearing=path_bearing,
+            nearest_obstacle_m=safety_dist,
+            nearest_obstacle_bearing=safety_bearing,
             seconds_since_progress=seconds_since_progress,
         )
 
@@ -2018,12 +2335,15 @@ class NavCore:
             if event.startswith("e_stop"):
                 if (
                     event == "e_stop:obstacle_too_close"
-                    and self._should_defer_close_obstacle_stop(path_dist, path_bearing)
+                    and self._should_defer_close_obstacle_stop(
+                        safety_dist,
+                        safety_bearing,
+                    )
                 ):
                     return
 
                 if event == "e_stop:obstacle_too_close":
-                    reason = f"E-STOP: path obstacle at {path_dist:.2f}m"
+                    reason = f"E-STOP: path obstacle at {safety_dist:.2f}m"
                 else:
                     reason = f"E-STOP: {event.split(':', 1)[-1].replace('_', ' ')}"
                 logger.warning("NavCore: safety event: %s (%s)", event, reason)
@@ -2031,7 +2351,7 @@ class NavCore:
                     message = (
                         f"I stopped before reaching {self._goal_display_name(goal)} "
                         f"because my depth sensor reported something in my path "
-                        f"at {path_dist:.2f} meters."
+                        f"at {safety_dist:.2f} meters."
                     )
                 else:
                     message = (
@@ -2107,6 +2427,20 @@ class NavCore:
         if center_dist < path_dist:
             return center_dist, 0.0
         return path_dist, path_bearing
+
+    def _fresh_obstacle_grid(
+        self,
+        grid: Optional[ObstacleGrid],
+    ) -> Optional[ObstacleGrid]:
+        """Reject stale obstacle data before it can authorize robot motion."""
+        if grid is None:
+            return None
+        timestamp = getattr(grid, "timestamp", 0.0)
+        age = time.time() - timestamp if timestamp > 0.0 else 0.0
+        if age > self.OBSTACLE_GRID_MAX_AGE_S:
+            logger.warning("NavCore: obstacle grid is stale by %.2fs", age)
+            return None
+        return grid
 
     def _read_forward_clearance(self, max_depth_m: float) -> Optional[CenterDepthReading]:
         """Read forward clearance from the active obstacle provider."""

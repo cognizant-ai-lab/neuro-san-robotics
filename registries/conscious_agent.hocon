@@ -71,15 +71,21 @@ If you choose to perform a physical action, call your robot_macros tool with one
 ["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit", "look_left", "look_right",
 "step_forward", "step_backward", "shake", "stretch", "dance", "dance2", "heart_pose", "hand_stand","scrape", "content"]
 
-You can also move to a location using your nav_planner tool and check your surroundings and navigation progress using nav_status.
+Use nav_planner to navigate, control movement, or answer explicit navigation questions.
 Available navigation commands: navigate_to (go to a named place), set_location (tell navigation where you currently are),
 move_forward (go forward with depth safety),
 move_until_obstacle (walk forward until the front depth sensor reaches the requested stop distance),
-turn (rotate left/right), stop (cancel navigation).
-After calling nav_planner navigate_to, do not poll nav_status or call navigate_to again unless the user asks.
-If the user says they drove you with the remote control, brought you back to base, returned you to the charger,
-or otherwise manually repositioned you to a known place, first call nav_planner with command set_location and that
-place as the target. Base, home, charger, charging dock, and docking station all mean charging station.
+turn (rotate left/right), stop (cancel navigation), status (current navigation state),
+destinations (known mapped places), and obstacles (current obstacle information).
+Navigation runs asynchronously and sends `navigation:` events when CAIL-E reaches a waypoint,
+encounters or clears an obstacle, arrives, or cannot continue. Treat those events as current awareness:
+decide whether to think, speak, continue, stop, or issue another navigation command. Use a query command
+only when the user asks for details or an event does not contain enough information for a decision.
+Remote-controller course corrections are detected automatically. Autonomous navigation pauses during manual control,
+then treats the corrected pose as being on the current route segment and continues toward the active waypoint when
+the controller is released. Do not call set_location for ordinary controller corrections. Use set_location only when
+the robot was physically carried, reset, or placed at a known location in a way odometry could not measure. Base,
+home, charger, charging dock, and docking station all mean charging station.
 
             """,
             "allow": {
@@ -89,7 +95,7 @@ place as the target. Base, home, charger, charging dock, and docking station all
                     }
                 }
             },
-            "tools": ["ui_output", "scene_observer", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner", "nav_status"]
+            "tools": ["ui_output", "scene_observer", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner"]
         },
         # The unigo2.go2_tts is a text to speech CodedTool and does not call anyone else.
         # He is called by the front-man.
@@ -155,7 +161,7 @@ place as the target. Base, home, charger, charging dock, and docking station all
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "Navigation command: 'navigate_to', 'set_location', 'move_forward', 'move_until_obstacle', 'turn', 'stop', 'status'"
+                            "description": "Navigation command: 'navigate_to', 'set_location', 'move_forward', 'move_until_obstacle', 'turn', 'stop', 'status', 'destinations', 'obstacles'"
                         },
                         "target": {
                             "type": "string",
@@ -174,23 +180,6 @@ place as the target. Base, home, charger, charging dock, and docking station all
                 }
             },
             "class": "unigo2.nav_planner.NavPlannerTool"
-        }
-        {
-            "name": "nav_status",
-            "function": {
-                "description": "Query the robot's navigation state, available destinations, and obstacle information.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "What to query: 'status', 'destinations', 'obstacles'"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            },
-            "class": "unigo2.nav_status.NavStatusTool"
         }
         {
             "name": "ui_output",

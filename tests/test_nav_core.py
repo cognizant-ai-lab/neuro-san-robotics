@@ -257,6 +257,45 @@ class TestObstacleConfirmationTracker(unittest.TestCase):
 
 class TestLocalPlanner(unittest.TestCase):
 
+    @staticmethod
+    def _corridor_grid(
+        slope: float = 0.10,
+        center_offset: float = 0.08,
+        include_right_wall: bool = True,
+    ) -> ObstacleGrid:
+        grid = _empty_grid()
+        for forward in np.linspace(0.30, 1.80, 31):
+            for lateral in (0.55, -0.55) if include_right_wall else (0.55,):
+                lateral += slope * forward + center_offset
+                row = grid.origin_row - round(forward / grid.resolution)
+                col = grid.origin_col - round(lateral / grid.resolution)
+                grid.grid[row, col] = 1.0
+        return grid
+
+    def test_parallel_corridor_walls_add_bounded_course_correction(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.30)
+        cmd = VelocityCommand(vx=0.30, vy=0.0, vyaw=0.0)
+
+        corrected = planner.apply_corridor_course_correction(
+            cmd,
+            self._corridor_grid(),
+        )
+
+        self.assertGreater(corrected.vyaw, 0.0)
+        self.assertLessEqual(corrected.vyaw, 0.04)
+        self.assertAlmostEqual(corrected.vx, cmd.vx)
+
+    def test_one_sided_depth_geometry_does_not_change_course(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.30)
+        cmd = VelocityCommand(vx=0.30, vy=0.0, vyaw=0.01)
+
+        corrected = planner.apply_corridor_course_correction(
+            cmd,
+            self._corridor_grid(include_right_wall=False),
+        )
+
+        self.assertEqual(corrected, cmd)
+
     def test_drives_toward_goal_in_clear_space(self):
         planner = LocalPlanner(max_linear_speed=0.3, safety_distance=0.4, avoidance_distance=0.8)
         grid = _empty_grid()
@@ -496,6 +535,22 @@ class TestSafetyMonitor(unittest.TestCase):
 
 class TestGlobalPlanner(unittest.TestCase):
 
+    def test_projects_remote_correction_onto_active_segment(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.plan_path(RobotPose(0.0, 0.0, 0.0), "C")
+
+        correction = planner.project_onto_current_segment(
+            RobotPose(1.4, 0.8, 0.5)
+        )
+
+        self.assertIsNotNone(correction)
+        pose, start, target = correction
+        self.assertEqual((start.name, target.name), ("A", "B"))
+        self.assertAlmostEqual(pose.x, 1.4)
+        self.assertAlmostEqual(pose.y, 0.0)
+        self.assertAlmostEqual(pose.yaw, 0.0)
+        self.assertEqual(planner._waypoint_index, 1)
+
     def test_dijkstra_finds_shortest_path(self):
         topo = _create_test_map()
         planner = GlobalPlanner(topo)
@@ -553,14 +608,22 @@ class TestGlobalPlanner(unittest.TestCase):
         topo = _create_test_map()
         planner = GlobalPlanner(topo)
         planner.plan_path(RobotPose(0, 0, 0), "C")
+        advances = []
 
         wp1 = planner.get_next_waypoint(RobotPose(0, 0, 0), tolerance_m=0.3)
         self.assertIsNotNone(wp1)
         self.assertEqual(wp1.name, "B")
 
-        wp2 = planner.get_next_waypoint(RobotPose(3.0, 0.0, 0), tolerance_m=0.3)
+        wp2 = planner.get_next_waypoint(
+            RobotPose(3.0, 0.0, 0),
+            tolerance_m=0.3,
+            on_advance=lambda reached, upcoming: advances.append(
+                (reached.name, upcoming.name)
+            ),
+        )
         self.assertIsNotNone(wp2)
         self.assertEqual(wp2.name, "C")
+        self.assertEqual(advances, [("B", "C")])
 
     def test_get_next_waypoint_returns_none_at_goal(self):
         topo = _create_test_map()
@@ -771,8 +834,26 @@ class TestOdometryProvider(unittest.TestCase):
         self.assertAlmostEqual(math.hypot(pose.x, pose.y), 1.0, places=2)
         self.assertAlmostEqual(pose.yaw, 0.1, places=2)
 
-    def test_sdk_translation_is_opt_in(self):
+    def test_sdk_translation_is_enabled_by_default(self):
         odom = SdkSportModeOdometryProvider(start_subscriber=False)
+        odom.set_pose(5.0, 10.0, 0.0)
+        odom._handle_sample(SimpleNamespace(
+            position=[0.0, 0.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0]),
+        ))
+        odom._handle_sample(SimpleNamespace(
+            position=[1.0, 0.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0]),
+        ))
+
+        pose = odom.get_pose()
+        self.assertTrue(odom._sdk_translation_confirmed)
+        self.assertAlmostEqual(pose.x, 6.0, places=2)
+        self.assertAlmostEqual(pose.y, 10.0, places=2)
+
+    def test_sdk_translation_can_be_disabled_explicitly(self):
+        with patch.dict(os.environ, {"NAV_USE_SDK_TRANSLATION_ODOMETRY": "0"}):
+            odom = SdkSportModeOdometryProvider(start_subscriber=False)
         odom.set_pose(5.0, 10.0, 0.0)
         odom._handle_sample(SimpleNamespace(
             position=[0.0, 0.0, 0.0],
@@ -788,23 +869,16 @@ class TestOdometryProvider(unittest.TestCase):
         self.assertAlmostEqual(pose.x, 5.0, places=2)
         self.assertAlmostEqual(pose.y, 10.0, places=2)
 
-    def test_sdk_translation_can_be_enabled_for_robots_that_report_map_aligned_motion(self):
+    def test_wireless_controller_activity_has_release_grace(self):
         odom = SdkSportModeOdometryProvider(start_subscriber=False)
-        odom._use_translation_odometry = True
-        odom.set_pose(5.0, 10.0, 0.0)
-        odom._handle_sample(SimpleNamespace(
-            position=[0.0, 0.0, 0.0],
-            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0]),
-        ))
-        odom._handle_sample(SimpleNamespace(
-            position=[1.0, 0.0, 0.0],
-            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0]),
-        ))
+        odom._handle_remote_sample(
+            SimpleNamespace(lx=0.0, ly=0.2, rx=0.0, ry=0.0, keys=0)
+        )
+        self.assertTrue(odom.is_manual_control_active())
 
-        pose = odom.get_pose()
-        self.assertTrue(odom._sdk_translation_confirmed)
-        self.assertAlmostEqual(pose.x, 6.0, places=2)
-        self.assertAlmostEqual(pose.y, 10.0, places=2)
+        with odom._lock:
+            odom._manual_control_until = time.monotonic() - 0.01
+        self.assertFalse(odom.is_manual_control_active())
 
     def test_sdk_odometry_falls_back_when_sample_is_stale(self):
         odom = SdkSportModeOdometryProvider(start_subscriber=False)
@@ -829,6 +903,52 @@ class TestOdometryProvider(unittest.TestCase):
 
 class TestNavCoreStatus(unittest.TestCase):
 
+    def test_remote_control_release_accepts_current_route_segment(self):
+        core = NavCore.__new__(NavCore)
+        core._manual_override_active = False
+        core._state_lock = threading.Lock()
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.plan_path(RobotPose(0.0, 0.0, 0.0), "C")
+        measured_pose = RobotPose(x=1.5, y=0.7, yaw=0.2)
+        core._odometry = MagicMock()
+        core._odometry.is_manual_control_active.side_effect = [True, False]
+        core._odometry.get_pose.return_value = measured_pose
+        core._notify_status_change = MagicMock()
+        core._reset_progress_tracker = MagicMock()
+        goal = NavGoal(x=3.0, y=4.0, goal_type="semantic", label="C")
+
+        self.assertTrue(core._handle_manual_override(goal))
+        self.assertFalse(core._handle_manual_override(goal))
+
+        core._odometry.set_pose.assert_called_once_with(1.5, 0.0, 0.0)
+        core._reset_progress_tracker.assert_called_once_with()
+        self.assertIn(
+            "route from A to B",
+            core._notify_status_change.call_args.args[0],
+        )
+
+    def test_remote_control_release_does_not_abort_without_route_edge(self):
+        core = NavCore.__new__(NavCore)
+        core._manual_override_active = True
+        core._state_lock = threading.Lock()
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._odometry = MagicMock()
+        core._odometry.is_manual_control_active.return_value = False
+        core._odometry.get_pose.return_value = RobotPose(1.0, 1.0, 0.4)
+        core._notify_status_change = MagicMock()
+        core._reset_progress_tracker = MagicMock()
+        goal = NavGoal(x=3.0, y=1.0, goal_type="semantic", label="B")
+
+        self.assertFalse(core._handle_manual_override(goal))
+
+        core._odometry.set_pose.assert_called_once_with(1.0, 1.0, 0.0)
+        self.assertIn(
+            "continuing toward B",
+            core._notify_status_change.call_args.args[0],
+        )
+
     def test_robot_navigation_defaults_are_in_code(self):
         self.assertAlmostEqual(NavCore.MAX_LINEAR_SPEED, 0.40)
         self.assertAlmostEqual(NavCore.MAX_YAW_RATE, 0.08)
@@ -842,6 +962,14 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertEqual(NavCore.PATH_OBSTACLE_CONFIRM_READINGS, 3)
         self.assertAlmostEqual(NavCore.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M, 0.15)
         self.assertAlmostEqual(NavCore.GOAL_TOLERANCE_M, 0.15)
+        self.assertAlmostEqual(NavCore.OBSTACLE_GRID_MAX_AGE_S, 0.50)
+
+    def test_stale_obstacle_grid_is_rejected(self):
+        core = NavCore.__new__(NavCore)
+        grid = _empty_grid()
+        grid.timestamp = time.time() - 1.0
+
+        self.assertIsNone(core._fresh_obstacle_grid(grid))
 
     def test_robot_map_default_is_in_code(self):
         old_map = os.environ.pop("NAV_MAP_FILE", None)
@@ -1167,6 +1295,10 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertEqual(nav.state, NavState.NAVIGATING)
             fake_go2.move.assert_called()
             self.assertGreater(fake_go2.move.call_args.kwargs["vx"], 0.0)
+            self.assertLess(
+                fake_go2.move.call_args.kwargs["vx"],
+                nav.MAX_LINEAR_SPEED,
+            )
             self.assertEqual(events, [])
 
             nav._nav_cycle(NavState.NAVIGATING, goal)
@@ -1191,6 +1323,8 @@ class TestNavCoreStatus(unittest.TestCase):
         NavCore.PATH_OBSTACLE_CONFIRM_READINGS = 3
         NavCore._instance = None
         os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
         try:
             nav = NavCore.get_instance()
             nav._go2 = fake_go2
@@ -1222,10 +1356,18 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._nav_cycle(NavState.NAVIGATING, goal)
             third_grid = nav._local_planner.compute_velocity.call_args.args[0]
             self.assertAlmostEqual(third_grid.path_obstacle_m, 0.25)
+            self.assertEqual(len(events), 1)
+            self.assertIn("encountered an obstacle", events[0])
+
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+            self.assertEqual(len(events), 2)
+            self.assertIn("path is clear again", events[1])
 
             self.assertEqual(nav.state, NavState.NAVIGATING)
             nav.shutdown()
         finally:
+            NavCore.set_status_callback(None)
             NavCore.PATH_OBSTACLE_CONFIRM_S = original_confirm_s
             NavCore.PATH_OBSTACLE_CONFIRM_READINGS = original_confirm_readings
             NavCore._instance = None
@@ -1696,7 +1838,8 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.NAVIGATING)
-            self.assertEqual(events, [])
+            self.assertEqual(len(events), 1)
+            self.assertIn("encountered an obstacle", events[0])
             fake_go2.move.assert_called_once()
             fake_go2.stop_move.assert_not_called()
             nav.shutdown()
