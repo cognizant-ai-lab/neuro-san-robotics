@@ -31,10 +31,15 @@ class NativeEventRuntimeTests(unittest.TestCase):
     def test_navigation_has_one_event_aware_agent_tool(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
 
-        self.assertIn("Navigation runs asynchronously", source)
-        self.assertIn("encounters or clears an obstacle", source)
         self.assertIn('"name": "nav_planner"', source)
         self.assertNotIn('"name": "nav_status"', source)
+
+    def test_internal_events_are_not_treated_as_user_speech(self):
+        source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
+
+        self.assertIn("Only `user:` is a person speaking to you", source)
+        self.assertIn("For `navigation:`\nevents, remain silent by default", source)
+        self.assertIn("Do not speak\nroutine waypoints", source)
 
     def test_scene_observer_has_a_valid_native_function_schema(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
