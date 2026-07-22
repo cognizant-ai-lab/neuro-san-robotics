@@ -108,6 +108,7 @@ specific robot really needs a temporary override.
 | `NAV_PIVOT_YAW_RATE` | `0.50` | In-place yaw rate for planned map turns. |
 | `NAV_USE_SDK_ODOMETRY` | enabled outside simulation | Uses Unitree SportModeState position and yaw when available, with command integration as a stale-data fallback. |
 | `NAV_USE_SDK_TRANSLATION_ODOMETRY` | `1` | Uses measured SportModeState translation as the map position. Disable only for SDKs that do not publish valid translation. |
+
 | `NAV_SPORT_MODE_STATE_TOPIC` | `rt/sportmodestate` | DDS topic for measured Unitree sport-mode position and yaw. |
 | `NAV_SDK_ODOMETRY_MAX_AGE` | `0.75` | SDK pose samples older than 0.75 seconds are stale. |
 | `NAV_SDK_ODOMETRY_MIN_DELTA_M` | `0.02` | SDK position must change by at least 0.02 m before translation odometry is trusted. |
@@ -126,6 +127,11 @@ specific robot really needs a temporary override.
 | `NAV_GOAL_TOLERANCE` | `0.15` | Destination is considered reached within 0.15 m. |
 | `NAV_PATH_CORRIDOR_HALF_WIDTH` | `0.12` | Only points within 0.12 m left/right of centerline count as path-corridor obstacles. |
 | `NAV_PATH_OBSTACLE_MIN_POINTS` | `6` | Requires at least 6 supporting sensor points before a path obstacle is considered real. |
+
+Map nodes may declare directional `arrival_landmarks`. A confirmed transverse wall can
+correct the robot's along-track pose and advance its route only within that landmark's
+configured longitudinal, lateral, and sensor-distance bounds. Otherwise it remains an
+ordinary obstacle for the local planner to circumnavigate.
 
 ## Setup
 

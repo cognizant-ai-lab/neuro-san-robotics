@@ -114,6 +114,32 @@ def occupied_xy_points(grid: ObstacleGrid) -> np.ndarray:
     return np.column_stack((x, y)).astype(np.float32)
 
 
+def is_transverse_wall(
+    grid: ObstacleGrid,
+    distance_m: float,
+    min_span_m: float,
+) -> bool:
+    """Return whether occupied cells form a broad wall across the path."""
+    points = occupied_xy_points(grid)
+    if not points.size:
+        return False
+
+    forward, lateral = points.T
+    depth_band_m = max(0.10, grid.resolution * 2.0)
+    across = np.abs(forward - distance_m) <= depth_band_m
+    forward, lateral = forward[across], lateral[across]
+    if len(lateral) < 6:
+        return False
+
+    low, high = np.percentile(lateral, (10, 90))
+    if high - low < min_span_m or low >= -0.10 or high <= 0.10:
+        return False
+
+    slope, intercept = np.polyfit(lateral, forward, 1)
+    residual = np.median(np.abs(forward - (slope * lateral + intercept)))
+    return abs(math.atan(float(slope))) <= math.radians(20.0) and residual <= 0.10
+
+
 def grid_with_metadata(
     grid: np.ndarray,
     resolution: float,

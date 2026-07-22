@@ -51,6 +51,7 @@ from coded_tools.unigo2.depth_processor import (
     _env_int,
 )
 from coded_tools.unigo2.obstacle_confirmation import ObstacleConfirmationTracker
+from coded_tools.unigo2.obstacle_grid_utils import is_transverse_wall
 from coded_tools.unigo2.obstacle_provider import create_default_obstacle_provider
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,7 @@ class MapNode:
     description: str = ""
     tags: List[str] = field(default_factory=list)
     aliases: List[str] = field(default_factory=list)
+    arrival_landmarks: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -201,6 +203,7 @@ class TopologicalMap:
                 description=node_data.get("description", ""),
                 tags=node_data.get("tags", []),
                 aliases=node_data.get("aliases", []),
+                arrival_landmarks=node_data.get("arrival_landmarks", []),
             )
             self.nodes[name] = node
             self._adjacency.setdefault(name, [])
@@ -239,6 +242,7 @@ class TopologicalMap:
                     "name": n.name, "x": n.x, "y": n.y,
                     "description": n.description, "tags": n.tags,
                     "aliases": n.aliases,
+                    "arrival_landmarks": n.arrival_landmarks,
                 }
                 for n in self.nodes.values()
             ],
@@ -418,19 +422,41 @@ class GlobalPlanner:
         wp = self._current_path[self._waypoint_index]
         dist = math.hypot(wp.x - current_pose.x, wp.y - current_pose.y)
 
-        if dist < tolerance_m and self._waypoint_index < len(self._current_path) - 1:
-            reached = wp
-            self._waypoint_index += 1
-            wp = self._current_path[self._waypoint_index]
-            dist = math.hypot(wp.x - current_pose.x, wp.y - current_pose.y)
-            logger.info("GlobalPlanner: advancing to waypoint '%s'", wp.name)
-            if on_advance is not None:
-                on_advance(reached, wp)
-
-        if dist < tolerance_m and self._waypoint_index == len(self._current_path) - 1:
-            return None  # goal reached
+        if dist < tolerance_m:
+            advanced = self.advance_current_waypoint(on_advance=on_advance)
+            return advanced[1] if advanced is not None else None
 
         return wp
+
+    def current_segment(self) -> Optional[Tuple[MapNode, MapNode]]:
+        """Return the active directed map edge."""
+        if not self._current_path or not 0 < self._waypoint_index < len(self._current_path):
+            return None
+        return (
+            self._current_path[self._waypoint_index - 1],
+            self._current_path[self._waypoint_index],
+        )
+
+    def advance_current_waypoint(
+        self,
+        on_advance: Optional[Callable[[MapNode, MapNode], None]] = None,
+    ) -> Optional[Tuple[MapNode, Optional[MapNode]]]:
+        """Accept the active waypoint and return the following waypoint, if any."""
+        if not self._current_path or self._waypoint_index >= len(self._current_path):
+            return None
+
+        reached = self._current_path[self._waypoint_index]
+        self._waypoint_index += 1
+        upcoming = (
+            self._current_path[self._waypoint_index]
+            if self._waypoint_index < len(self._current_path)
+            else None
+        )
+        if upcoming is not None:
+            logger.info("GlobalPlanner: advancing to waypoint '%s'", upcoming.name)
+            if on_advance is not None:
+                on_advance(reached, upcoming)
+        return reached, upcoming
 
     def clear(self):
         """Reset the current path and waypoint index."""
@@ -587,7 +613,14 @@ class LocalPlanner:
             path_nearest <= self.safety_distance
             and abs(goal_direction) < self.PIVOT_HEADING_ERROR_RAD
         ):
-            return VelocityCommand(0.0, 0.0, 0.0)
+            goal_sector = self._angle_to_sector(goal_direction)
+            best_sector = self._select_best_sector(free_sectors, goal_sector)
+            target_heading = self._sector_to_angle(best_sector)
+            return VelocityCommand(
+                vx=0.0,
+                vy=0.0,
+                vyaw=self._pivot_yaw_rate(target_heading),
+            )
 
         if (
             goal_distance > 0.5
@@ -1610,6 +1643,81 @@ class NavCore:
             f"I reached {reached_label} and am continuing toward {upcoming_label}."
         )
 
+    def _accept_expected_landmark(
+        self,
+        pose: RobotPose,
+        grid: Optional[ObstacleGrid],
+        waypoint: MapNode,
+    ) -> Tuple[RobotPose, Optional[MapNode], bool]:
+        """Use a mapped landmark to correct along-track pose and accept a waypoint."""
+        segment = self._global_planner.current_segment()
+        if segment is None:
+            return pose, waypoint, False
+
+        start, target = segment
+        path_distance = grid.path_obstacle_m if grid is not None else float("inf")
+        path_bearing = grid.path_obstacle_bearing if grid is not None else 0.0
+        edge_x = target.x - start.x
+        edge_y = target.y - start.y
+        edge_length = math.hypot(edge_x, edge_y)
+        if edge_length <= 1e-6:
+            return pose, target, False
+
+        unit_x = edge_x / edge_length
+        unit_y = edge_y / edge_length
+        remaining_x = target.x - pose.x
+        remaining_y = target.y - pose.y
+        longitudinal_error = remaining_x * unit_x + remaining_y * unit_y
+        lateral_error = abs(remaining_x * unit_y - remaining_y * unit_x)
+
+        for landmark in target.arrival_landmarks:
+            if landmark.get("type") != "wall":
+                continue
+            approach_from = landmark.get("approach_from", [])
+            if approach_from and start.name not in approach_from:
+                continue
+            if (
+                abs(longitudinal_error) > float(landmark.get("max_pose_error_m", 1.0))
+                or lateral_error > float(landmark.get("max_lateral_error_m", 0.5))
+                or path_distance > float(landmark.get("max_detection_distance_m", 0.3))
+                or abs(path_bearing) > self.FORWARD_HAZARD_CONE_RAD
+            ):
+                continue
+            if grid is None or not is_transverse_wall(
+                grid,
+                path_distance,
+                float(landmark.get("min_span_m", 0.3)),
+            ):
+                continue
+
+            corrected_pose = RobotPose(
+                x=pose.x + longitudinal_error * unit_x,
+                y=pose.y + longitudinal_error * unit_y,
+                yaw=pose.yaw,
+                timestamp=time.time(),
+            )
+            self._odometry.set_pose(
+                corrected_pose.x,
+                corrected_pose.y,
+                corrected_pose.yaw,
+            )
+            advanced = self._global_planner.advance_current_waypoint(
+                on_advance=self._notify_waypoint_advance,
+            )
+            upcoming = advanced[1] if advanced is not None else None
+            self._path_obstacle_active = False
+            self._reset_progress_tracker()
+            logger.info(
+                "NavCore: accepted mapped wall landmark at '%s' from '%s' "
+                "(longitudinal correction %.2fm)",
+                target.name,
+                start.name,
+                longitudinal_error,
+            )
+            return corrected_pose, upcoming, True
+
+        return pose, target, False
+
     def _update_path_obstacle_event(self, path_distance_m: float, goal: NavGoal) -> None:
         """Publish confirmed obstacle enter/clear transitions once each."""
         in_avoidance_band = (
@@ -1656,6 +1764,22 @@ class NavCore:
         logger.warning("NavCore: %s", reason)
         self._notify_status_change(message)
         self._stop_depth_when_idle()
+
+    def _complete_navigation(self, goal: NavGoal, distance_m: Optional[float] = None) -> None:
+        """Stop motion and consistently close a successful navigation action."""
+        self._ensure_go2()
+        if self._go2 and getattr(self._go2, "available", False):
+            self._go2.stop_move()
+        with self._state_lock:
+            self._state = NavState.IDLE
+            self._goal = None
+            self._last_stop_reason = None
+            self._clear_planner_and_obstacle_state()
+        if distance_m is not None:
+            logger.info("NavCore: goal reached (dist=%.2fm)", distance_m)
+        self._stop_depth_when_idle()
+        if goal.goal_type == "semantic":
+            self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
 
     def _send_motion_command(self, cmd: VelocityCommand, goal: NavGoal) -> bool:
         """Send a Go2 velocity command and fail loudly if motors are unavailable."""
@@ -2245,24 +2369,12 @@ class NavCore:
         # 2. Check if goal reached
         dist_to_goal = math.hypot(goal.x - pose.x, goal.y - pose.y)
         if dist_to_goal < self.GOAL_TOLERANCE_M:
-            self._ensure_go2()
-            if self._go2 and getattr(self._go2, "available", False):
-                self._go2.stop_move()
-            with self._state_lock:
-                self._state = NavState.IDLE
-                self._goal = None
-                self._last_stop_reason = None
-                self._clear_planner_and_obstacle_state()
-            logger.info("NavCore: goal reached (dist=%.2fm)", dist_to_goal)
-            self._stop_depth_when_idle()
-            if goal.goal_type == "semantic":
-                self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
+            self._complete_navigation(goal, dist_to_goal)
             return
-
-        self._update_path_obstacle_event(path_dist, goal)
 
         # 3. Compute velocity command
         if state == NavState.NAVIGATING:
+            accepted_landmark = False
             if goal.goal_type == "semantic":
                 waypoint = self._global_planner.get_next_waypoint(
                     pose,
@@ -2270,18 +2382,22 @@ class NavCore:
                     on_advance=self._notify_waypoint_advance,
                 )
                 if waypoint is None:
-                    # Global path complete
-                    with self._state_lock:
-                        self._state = NavState.IDLE
-                        self._goal = None
-                        self._last_stop_reason = None
-                        self._clear_planner_and_obstacle_state()
-                    self._stop_depth_when_idle()
-                    self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
+                    self._complete_navigation(goal)
+                    return
+                pose, waypoint, accepted_landmark = self._accept_expected_landmark(
+                    pose,
+                    grid,
+                    waypoint,
+                )
+                if accepted_landmark and waypoint is None:
+                    self._complete_navigation(goal)
                     return
                 target_x, target_y = waypoint.x, waypoint.y
             else:
                 target_x, target_y = goal.x, goal.y
+
+            if not accepted_landmark:
+                self._update_path_obstacle_event(path_dist, goal)
 
             goal_dir = math.atan2(target_y - pose.y, target_x - pose.x) - pose.yaw
             # Normalize to [-pi, pi]
@@ -2536,11 +2652,7 @@ class NavCore:
 
         path_dist = grid.path_obstacle_m
         path_bearing = grid.path_obstacle_bearing
-        if path_dist >= self.AVOIDANCE_DISTANCE_M:
-            self._reset_path_obstacle_confirmation()
-            return grid
-
-        if path_dist <= self.SAFETY_DISTANCE_M:
+        if path_dist > self.AVOIDANCE_DISTANCE_M:
             self._reset_path_obstacle_confirmation()
             return grid
 

@@ -142,6 +142,19 @@
         "waypoint",
         "red_marker"
       ],
+      "arrival_landmarks": [
+        {
+          "type": "wall",
+          "approach_from": [
+            "ristos_desk",
+            "charging_station"
+          ],
+          "max_pose_error_m": 1.0,
+          "max_lateral_error_m": 0.5,
+          "max_detection_distance_m": 0.3,
+          "min_span_m": 0.3
+        }
+      ],
       "source_pixel": {
         "x": 2562.5,
         "y": 1725.0

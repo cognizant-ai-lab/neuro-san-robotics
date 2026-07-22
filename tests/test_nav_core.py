@@ -33,6 +33,7 @@ from coded_tools.unigo2.nav_core import (
     _create_odometry_provider,
 )
 from coded_tools.unigo2.obstacle_confirmation import ObstacleConfirmationTracker
+from coded_tools.unigo2.obstacle_grid_utils import is_transverse_wall
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +388,26 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertGreater(cmd.vx, 0.0, "Should keep moving while circumnavigating")
         self.assertNotAlmostEqual(cmd.vyaw, 0.0, msg="Should steer around the block")
 
+    def test_pivots_toward_free_space_when_obstacle_is_inside_safety_distance(self):
+        planner = LocalPlanner(
+            max_linear_speed=0.3,
+            safety_distance=0.1,
+            avoidance_distance=0.3,
+        )
+        grid = _grid_with_center_block_ahead(distance_m=0.08)
+
+        cmd = planner.compute_velocity(grid, goal_direction=0.0, goal_distance=2.0)
+
+        self.assertAlmostEqual(cmd.vx, 0.0)
+        self.assertNotAlmostEqual(cmd.vyaw, 0.0)
+
+    def test_transverse_wall_requires_broad_geometry_across_path(self):
+        wall = _grid_with_wall_ahead(distance_m=0.25)
+        block = _grid_with_center_block_ahead(distance_m=0.25)
+
+        self.assertTrue(is_transverse_wall(wall, 0.25, 0.5))
+        self.assertFalse(is_transverse_wall(block, 0.25, 0.5))
+
     def test_drives_when_only_side_obstacle_is_close(self):
         planner = LocalPlanner(max_linear_speed=0.3, safety_distance=0.4, avoidance_distance=0.8)
         grid = _grid_with_side_obstacle(distance_m=0.37)
@@ -645,6 +666,26 @@ class TestTopologicalMap(unittest.TestCase):
         self.assertTrue(topo.is_loaded)
         self.assertEqual(len(topo.nodes), 3)
         self.assertEqual(len(topo.edges), 2)
+
+    def test_loads_map_declared_arrival_landmark(self):
+        topo = TopologicalMap()
+        topo.load_from_dict({
+            "nodes": [{
+                "name": "turn",
+                "x": 1.0,
+                "y": 0.0,
+                "arrival_landmarks": [{
+                    "type": "wall",
+                    "approach_from": ["start"],
+                    "max_pose_error_m": 0.8,
+                }],
+            }],
+        })
+
+        landmark = topo.nodes["turn"].arrival_landmarks[0]
+        self.assertEqual(landmark["type"], "wall")
+        self.assertEqual(landmark["approach_from"], ["start"])
+        self.assertAlmostEqual(landmark["max_pose_error_m"], 0.8)
 
     def test_find_nearest_node(self):
         topo = _create_test_map()
@@ -1577,6 +1618,136 @@ class TestNavCoreStatus(unittest.TestCase):
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_mapped_wall_landmark_corrects_pose_and_pivots_to_next_waypoint(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+
+        original_confirm_s = NavCore.PATH_OBSTACLE_CONFIRM_S
+        original_confirm_readings = NavCore.PATH_OBSTACLE_CONFIRM_READINGS
+        NavCore.PATH_OBSTACLE_CONFIRM_S = 0.0
+        NavCore.PATH_OBSTACLE_CONFIRM_READINGS = 1
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            nav._topo_map.load_from_dict({
+                "name": "landmark route",
+                "nodes": [
+                    {"name": "start", "x": 0.0, "y": 0.0},
+                    {
+                        "name": "turn",
+                        "x": 3.0,
+                        "y": 0.0,
+                        "arrival_landmarks": [{
+                            "type": "wall",
+                            "approach_from": ["start"],
+                            "max_pose_error_m": 1.0,
+                            "max_lateral_error_m": 0.5,
+                            "max_detection_distance_m": 0.3,
+                            "min_span_m": 0.5,
+                        }],
+                    },
+                    {"name": "goal", "x": 3.0, "y": 4.0},
+                ],
+                "edges": [
+                    {"from": "start", "to": "turn", "distance": 3.0},
+                    {"from": "turn", "to": "goal", "distance": 4.0},
+                ],
+            })
+            path = nav._global_planner.plan_path(RobotPose(0.0, 0.0, 0.0), "goal")
+            nav._odometry.set_pose(2.3, 0.2, 0.0)
+
+            wall = _grid_with_wall_ahead(distance_m=0.25)
+            fake_depth = MagicMock(supports_center_depth=True)
+            fake_depth.get_obstacle_grid.return_value = wall
+            fake_depth.get_center_depth_reading.return_value = CenterDepthReading(
+                distance_m=0.25,
+                coverage=0.5,
+            )
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(
+                goal_type="semantic",
+                x=path[-1].x,
+                y=path[-1].y,
+                label="goal",
+            )
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            pose = nav._odometry.get_pose()
+            self.assertAlmostEqual(pose.x, 3.0, places=2)
+            self.assertAlmostEqual(pose.y, 0.2, places=2)
+            self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
+            self.assertGreater(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
+            self.assertTrue(any("reached turn" in event for event in events))
+            self.assertEqual(nav._global_planner.current_segment()[1].name, "goal")
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore.PATH_OBSTACLE_CONFIRM_S = original_confirm_s
+            NavCore.PATH_OBSTACLE_CONFIRM_READINGS = original_confirm_readings
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_mapped_wall_outside_correction_bound_remains_an_obstacle(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            nav._topo_map.load_from_dict({
+                "nodes": [
+                    {"name": "start", "x": 0.0, "y": 0.0},
+                    {
+                        "name": "turn",
+                        "x": 3.0,
+                        "y": 0.0,
+                        "arrival_landmarks": [{
+                            "type": "wall",
+                            "approach_from": ["start"],
+                            "max_pose_error_m": 1.0,
+                        }],
+                    },
+                    {"name": "goal", "x": 3.0, "y": 4.0},
+                ],
+                "edges": [
+                    {"from": "start", "to": "turn", "distance": 3.0},
+                    {"from": "turn", "to": "goal", "distance": 4.0},
+                ],
+            })
+            pose = RobotPose(1.5, 0.0, 0.0)
+            nav._odometry.set_pose(pose.x, pose.y, pose.yaw)
+            nav._global_planner.plan_path(RobotPose(0.0, 0.0, 0.0), "goal")
+            waypoint = nav._global_planner.get_next_waypoint(pose)
+
+            corrected, upcoming, accepted = nav._accept_expected_landmark(
+                pose,
+                _grid_with_wall_ahead(distance_m=0.25),
+                waypoint,
+            )
+
+            self.assertFalse(accepted)
+            self.assertEqual(upcoming.name, "turn")
+            self.assertEqual(corrected, pose)
+            self.assertEqual(nav._global_planner.current_segment()[1].name, "turn")
+            nav.shutdown()
+        finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
