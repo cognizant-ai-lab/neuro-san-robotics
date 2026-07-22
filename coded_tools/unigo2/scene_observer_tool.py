@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 from typing import Dict
 
@@ -10,6 +11,7 @@ from neuro_san.interfaces.coded_tool import CodedTool
 
 from apps.conscious_assistant.scene_observer import SceneObserver
 from coded_tools.unigo2.agent_events import publish_observation
+from coded_tools.unigo2.agent_events import queue_agent_event
 
 
 _OBSERVER = SceneObserver()
@@ -23,6 +25,14 @@ class SceneObserverTool(CodedTool):
         if observation is None:
             return {"available": False, "summary": "No camera observation is available."}
         await asyncio.to_thread(publish_observation, observation)
+        event = json.dumps(
+            {
+                "summary": observation.get("summary", "No detections"),
+                "entities": observation.get("objects", []),
+            },
+            separators=(",", ":"),
+        )
+        queue_agent_event(event, source="observation")
         return {
             "available": True,
             "summary": observation.get("summary", "No detections"),

@@ -242,9 +242,9 @@ class SceneObserver:
         """
         Eagerly initialize the observer so heavy imports can happen on the main thread.
 
-        The Flask app later uses a background task for periodic observations. On
-        some deployments, importing the YOLO stack from that worker thread is less
-        reliable than doing it once during startup.
+        The native observer agent invokes captures periodically. On some deployments,
+        importing the YOLO stack from that worker thread is less reliable than doing
+        it once during startup.
         """
         if not self.enabled:
             return False
