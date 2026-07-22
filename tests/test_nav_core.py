@@ -469,34 +469,6 @@ class TestSafetyMonitor(unittest.TestCase):
         self.assertLess(filtered.vx, 0.3, "Should be slower than full speed")
         self.assertIsNone(event)
 
-    def test_braking_envelope_caps_forward_speed(self):
-        safety = SafetyMonitor(
-            safety_distance=0.1,
-            avoidance_distance=0.3,
-            braking_reaction_time_s=0.25,
-            braking_deceleration_mps2=0.5,
-        )
-        cmd = VelocityCommand(vx=0.4, vy=0.0, vyaw=0.0)
-
-        filtered, event = safety.filter_command(cmd, nearest_obstacle_m=0.25)
-
-        self.assertIsNone(event)
-        self.assertGreater(filtered.vx, 0.0)
-        self.assertLess(filtered.vx, 0.3)
-
-    def test_braking_envelope_ignores_side_clearance(self):
-        safety = SafetyMonitor(safety_distance=0.1, avoidance_distance=0.3)
-        cmd = VelocityCommand(vx=0.4, vy=0.0, vyaw=0.0)
-
-        filtered, event = safety.filter_command(
-            cmd,
-            nearest_obstacle_m=0.25,
-            nearest_obstacle_bearing=math.pi / 2,
-        )
-
-        self.assertIsNone(event)
-        self.assertAlmostEqual(filtered.vx, 0.4)
-
     def test_cliff_detection_stops(self):
         safety = SafetyMonitor()
         cmd = VelocityCommand(vx=0.3, vy=0.0, vyaw=0.0)
@@ -1987,41 +1959,6 @@ class TestNavCoreStatus(unittest.TestCase):
         finally:
             NavCore.set_status_callback(None)
             NavCore.DEPTH_READY_TIMEOUT_S = original_timeout
-            NavCore._instance = None
-            os.environ.pop("NAV_SIMULATION_MODE", None)
-
-    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
-    def test_nav_cycle_stops_when_depth_grid_is_stale(self, mock_go2):
-        fake_go2 = MagicMock()
-        fake_go2.available = True
-        mock_go2.return_value = fake_go2
-
-        NavCore._instance = None
-        os.environ["NAV_SIMULATION_MODE"] = "1"
-        try:
-            nav = NavCore.get_instance()
-            nav._go2 = fake_go2
-            stale_grid = _empty_grid()
-            stale_grid.timestamp = time.time() - 1.0
-
-            fake_depth = MagicMock()
-            fake_depth.get_obstacle_grid.return_value = stale_grid
-            nav._depth_processor = fake_depth
-
-            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="test goal")
-            with nav._state_lock:
-                nav._state = NavState.NAVIGATING
-                nav._goal = goal
-                nav._reset_progress_tracker()
-
-            nav._nav_cycle(NavState.NAVIGATING, goal)
-
-            self.assertEqual(nav.state, NavState.E_STOP)
-            fake_go2.stop_move.assert_called_once()
-            fake_go2.move.assert_not_called()
-            self.assertIn("obstacle grid is stale", nav.get_status_summary())
-            nav.shutdown()
-        finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 

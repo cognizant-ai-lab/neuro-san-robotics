@@ -471,17 +471,6 @@ h2 {
     line-height: 1.6;
 }
 
-.navigation-status-msg {
-    background: rgba(255, 215, 0, 0.08);
-    color: #ffe4a0;
-    padding: 10px 14px;
-    border-left: 3px solid #ffd700;
-    margin-bottom: 10px;
-    max-width: 90%;
-    line-height: 1.5;
-    font-size: 0.92em;
-}
-
 .thought-msg {
     background: linear-gradient(135deg, rgba(255, 215, 0, 0.1), rgba(255, 165, 0, 0.1));
     color: #ffe4a0;
@@ -837,7 +826,7 @@ footer {
         margin-bottom: 20px;
     }
     
-    .speech-msg, .user-msg, .navigation-status-msg, .thought-msg {
+    .speech-msg, .user-msg, .thought-msg {
         padding: 10px 14px;
         font-size: 0.95em;
     }

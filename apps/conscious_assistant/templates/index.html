@@ -594,16 +594,6 @@
             );
         });
 
-        socket.on('update_navigation_status', function(data) {
-            appendTextEntry(
-                'chat-history',
-                'navigation-status-msg',
-                data.data,
-                '.speech-msg, .user-msg, .navigation-status-msg',
-                MAX_CHAT_HISTORY,
-            );
-        });
-
         // Track current streaming speech message for progressive text display
         var currentStreamingMsg = null;
         var currentStreamingText = '';

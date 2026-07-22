@@ -655,8 +655,8 @@ def get_camera_candidates(
 
     Priority:
     1. Explicit source override (`VISION_CAMERA_SOURCE`, `unitree:eth0`, `/dev/videoN`, index, or pipeline)
-    2. Unitree front camera via SDK
-    3. Intel RealSense color camera via stable `/dev/v4l/by-id` link
+    2. Intel RealSense color camera via stable `/dev/v4l/by-id` link
+    3. Unitree front camera via SDK as a robot fallback
     4. Jetson CSI sensors via GStreamer
     5. Present V4L2 devices under `/dev/video*`
     6. Plain OpenCV camera indices for laptop/desktop webcams
@@ -705,14 +705,14 @@ def get_camera_candidates(
             "ifname": interface_name,
         })
 
-    add_unitree_candidate()
-
     for device_path in _discover_realsense_color_devices():
         add_candidate(
             _v4l2_capture_source(device_path),
             getattr(cv2, "CAP_V4L2", None),
             f"Intel RealSense color camera ({Path(device_path).name})",
         )
+
+    add_unitree_candidate()
 
     if _is_jetson_platform():
         for sensor_id in range(2):

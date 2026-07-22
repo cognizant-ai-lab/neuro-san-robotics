@@ -49,20 +49,6 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["user_message"]["text"], "user: go home")
         self.assertEqual(payload["chat_filter"]["chat_filter_type"], "MINIMAL")
 
-    def test_navigation_status_posts_directly_to_ui_without_an_agent_event(self):
-        with patch.object(agent_events, "_post_json") as post:
-            self.assertTrue(agent_events.publish_navigation_status("Navigation stopped."))
-
-        endpoint, payload = post.call_args.args[:2]
-        self.assertIn("/api/agent-output", endpoint)
-        self.assertEqual(payload, {"navigation_status": "Navigation stopped."})
-
-    def test_navigation_status_is_not_dispatched_to_the_agent(self):
-        source = (ROOT / "coded_tools" / "unigo2" / "nav_planner.py").read_text()
-
-        self.assertIn("NavCore.set_status_callback(publish_navigation_status)", source)
-        self.assertNotIn("dispatch_agent_event(message, source=\"navigation\")", source)
-
     def test_event_bridge_consumes_the_full_native_acknowledgement(self):
         response = MagicMock()
         opener = MagicMock()

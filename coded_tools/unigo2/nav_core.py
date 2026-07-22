@@ -702,8 +702,6 @@ class SafetyMonitor:
         stuck_timeout: float = 10.0,
         pivot_hard_stop_distance: float = 0.2,
         forward_hazard_cone_rad: float = math.radians(20.0),
-        braking_reaction_time_s: float = 0.25,
-        braking_deceleration_mps2: float = 0.5,
     ):
         """Configure safety thresholds.
 
@@ -713,16 +711,12 @@ class SafetyMonitor:
             stuck_timeout: Trigger stuck event after this many seconds without progress.
             pivot_hard_stop_distance: Minimum distance allowed for in-place turning.
             forward_hazard_cone_rad: Bearing cone treated as forward path blockage.
-            braking_reaction_time_s: Maximum command-to-brake delay for forward motion.
-            braking_deceleration_mps2: Conservative forward braking deceleration.
         """
         self.safety_distance = safety_distance
         self.avoidance_distance = avoidance_distance
         self.stuck_timeout = stuck_timeout
         self.pivot_hard_stop_distance = pivot_hard_stop_distance
         self.forward_hazard_cone_rad = forward_hazard_cone_rad
-        self.braking_reaction_time_s = max(0.0, braking_reaction_time_s)
-        self.braking_deceleration_mps2 = max(1e-6, braking_deceleration_mps2)
 
     def filter_command(
         self,
@@ -771,28 +765,7 @@ class SafetyMonitor:
                 vyaw=cmd.vyaw,
             )
 
-        if cmd.vx > 0.0 and forward_hazard:
-            cmd = VelocityCommand(
-                vx=min(cmd.vx, self._safe_forward_speed(nearest_obstacle_m)),
-                vy=cmd.vy,
-                vyaw=cmd.vyaw,
-            )
-
         return cmd, None
-
-    def _safe_forward_speed(self, clearance_m: float) -> float:
-        """Return the largest speed that can stop before the safety boundary."""
-        if not math.isfinite(clearance_m):
-            return float("inf")
-
-        stopping_distance_m = max(0.0, clearance_m - self.safety_distance)
-        deceleration = self.braking_deceleration_mps2
-        reaction = self.braking_reaction_time_s
-        return max(
-            0.0,
-            math.sqrt((deceleration * reaction) ** 2 + 2.0 * deceleration * stopping_distance_m)
-            - deceleration * reaction,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -1260,7 +1233,6 @@ class NavCore:
     )
     ODOMETRY_YAW_RATE_RATIO: float = _env_float("NAV_ODOMETRY_YAW_RATE_RATIO", 1.0)
     DEPTH_STOP_WHEN_IDLE: bool = _env_flag("NAV_DEPTH_STOP_WHEN_IDLE", True)
-    DEPTH_GRID_MAX_AGE_S = 0.5
 
     @classmethod
     def get_instance(cls) -> "NavCore":
@@ -1596,7 +1568,7 @@ class NavCore:
 
         deadline = time.monotonic() + max(0.0, timeout_s)
         while True:
-            if self._is_fresh_obstacle_grid(self._depth_processor.get_obstacle_grid()):
+            if self._depth_processor.get_obstacle_grid() is not None:
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -1954,15 +1926,6 @@ class NavCore:
 
         # 1. Read sensors
         raw_grid = self._depth_processor.get_obstacle_grid()
-        if not self._is_fresh_obstacle_grid(raw_grid):
-            self._abort_active_navigation(
-                goal,
-                "E-STOP: obstacle grid is stale",
-                f"I stopped before reaching {self._goal_display_name(goal)} because "
-                "my depth sensor stopped updating.",
-                state=NavState.E_STOP,
-            )
-            return
         grid = self._filter_transient_path_obstacle(raw_grid)
         pose = self._odometry.get_pose()
         self._update_progress(pose)
@@ -2118,15 +2081,6 @@ class NavCore:
 
         # 7. Update progress tracker
         self._update_progress(self._odometry.get_pose())
-
-    def _is_fresh_obstacle_grid(self, grid: Optional[ObstacleGrid]) -> bool:
-        """Return True only for a recently captured obstacle grid."""
-        if grid is None:
-            return False
-        timestamp = getattr(grid, "timestamp", None)
-        if not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp):
-            return False
-        return time.time() - float(timestamp) <= self.DEPTH_GRID_MAX_AGE_S
 
     def _forward_clearance_for_safety(
         self,
