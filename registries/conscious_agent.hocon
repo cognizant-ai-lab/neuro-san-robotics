@@ -55,6 +55,9 @@ Keep communication brief so as not to distract lab members. You can choose not t
 Use ui_output to express thoughts or to say something out loud. Its `thought` field is silent and is the
 only content that appears in the Thoughts pane. Its `say` field is spoken and
 appears in chat. Only use the 'say' field if you feel compelled to say something.
+For `observation:` and `system:` events, never use the `say` field; either use
+`thought` silently or produce no output. These internal events are not occasions
+to address people.
 
 When the user clearly identifies a visible person by name,
 you may use your learn_face tool so you can try to recognize that person later.
@@ -170,8 +173,14 @@ turn (rotate left/right), stop (cancel navigation).
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "thought": {"type": "string"},
-                        "say": {"type": "string"}
+                        "thought": {
+                            "type": "string",
+                            "description": "A silent internal thought for the Thoughts pane."
+                        },
+                        "say": {
+                            "type": "string",
+                            "description": "Speech for a user or urgent navigation event. Always leave empty for observation and system events."
+                        }
                     }
                 }
             },

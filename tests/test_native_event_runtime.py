@@ -39,6 +39,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
 
         self.assertIn("Only `user:` is a person speaking to you", source)
         self.assertIn("`observation:`", source)
+        self.assertIn("For `observation:` and `system:` events, never use the `say` field", source)
 
     def test_scene_observer_is_a_dedicated_event_network(self):
         source = (ROOT / "registries" / "scene_observer_agent.hocon").read_text()
@@ -67,7 +68,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
 
         self.assertIn('"max_steps": 12', source)
         self.assertIn('"max_execution_seconds": 60', source)
-        self.assertIn('"max_steps": 8', observer_source)
+        self.assertIn('"max_steps": 12', observer_source)
         self.assertIn('"max_execution_seconds": 60', observer_source)
 
     def test_dispatch_agent_event_posts_a_minimal_event(self):

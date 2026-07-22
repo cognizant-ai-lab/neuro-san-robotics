@@ -7,7 +7,7 @@
         "class": "openai",
         "model_name": "gpt-5-mini"
     },
-    "max_steps": 8,
+    "max_steps": 12,
     "max_execution_seconds": 60,
     "tools": [
         {
