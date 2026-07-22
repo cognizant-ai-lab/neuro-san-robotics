@@ -31,10 +31,15 @@ class NativeEventRuntimeTests(unittest.TestCase):
     def test_navigation_has_one_event_aware_agent_tool(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
 
-        self.assertIn("Navigation runs asynchronously", source)
-        self.assertIn("encounters or clears an obstacle", source)
         self.assertIn('"name": "nav_planner"', source)
         self.assertNotIn('"name": "nav_status"', source)
+
+    def test_internal_events_are_not_treated_as_user_speech(self):
+        source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
+
+        self.assertIn("Only `user:` is a person speaking to you", source)
+        self.assertIn("For `navigation:`\nevents, remain silent by default", source)
+        self.assertIn("Do not speak\nroutine waypoints", source)
 
     def test_scene_observer_has_a_valid_native_function_schema(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
@@ -46,7 +51,14 @@ class NativeEventRuntimeTests(unittest.TestCase):
         source = (ROOT / "registries" / "manifest.hocon").read_text()
 
         self.assertIn('"periodic"', source)
+        self.assertIn('"cron_schedule": "* * * * * 0"', source)
         self.assertIn('"text": "system: [Silence]"', source)
+
+    def test_native_event_turns_have_bounded_execution(self):
+        source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
+
+        self.assertIn('"max_steps": 12', source)
+        self.assertIn('"max_execution_seconds": 60', source)
 
     def test_dispatch_agent_event_posts_a_minimal_event(self):
         with patch.object(agent_events, "_post_json") as post:
