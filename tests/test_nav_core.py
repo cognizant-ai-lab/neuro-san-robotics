@@ -1845,7 +1845,66 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
-    def test_nav_cycle_stuck_is_terminal_and_clears_goal(self, mock_go2):
+    def test_nav_cycle_stuck_replans_and_keeps_goal(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
+            nav._local_planner.apply_corridor_course_correction.side_effect = (
+                lambda cmd, _grid: cmd
+            )
+            waypoint = MapNode(name="kitchen", x=2.0, y=0.0)
+            nav._global_planner = MagicMock()
+            nav._global_planner.get_next_waypoint.return_value = waypoint
+            nav._global_planner.current_segment.return_value = None
+            nav._global_planner.plan_path.return_value = [waypoint]
+
+            goal = NavGoal(goal_type="semantic", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._last_progress_pose = nav._odometry.get_pose()
+                nav._last_progress_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            self.assertIs(nav._goal, goal)
+            self.assertEqual(
+                events,
+                [
+                    "I stalled while heading to Kitchen. I replanned from my current "
+                    "position and am continuing."
+                ],
+            )
+            fake_go2.stop_move.assert_called()
+            fake_go2.move.assert_not_called()
+            fake_depth.stop.assert_not_called()
+            nav._global_planner.plan_path.assert_called_once_with(
+                nav._odometry.get_pose(),
+                "Kitchen",
+            )
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_stuck_aborts_after_recovery_limit(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
         mock_go2.return_value = fake_go2
@@ -1868,6 +1927,7 @@ class TestNavCoreStatus(unittest.TestCase):
             with nav._state_lock:
                 nav._state = NavState.NAVIGATING
                 nav._goal = goal
+                nav._stuck_recovery_attempts = nav.MAX_STUCK_RECOVERY_ATTEMPTS
                 nav._last_progress_pose = nav._odometry.get_pose()
                 nav._last_progress_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
 
@@ -1879,15 +1939,7 @@ class TestNavCoreStatus(unittest.TestCase):
                 events,
                 ["I stopped before reaching Kitchen because I was not making progress."],
             )
-            fake_go2.stop_move.assert_called()
-            fake_go2.move.assert_not_called()
             fake_depth.stop.assert_called()
-
-            nav._nav_cycle(NavState.STUCK, goal)
-            self.assertEqual(
-                events,
-                ["I stopped before reaching Kitchen because I was not making progress."],
-            )
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)

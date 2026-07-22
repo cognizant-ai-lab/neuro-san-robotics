@@ -23,7 +23,7 @@ class _VisionCtorResult:
 
 
 class SceneObserverTests(unittest.TestCase):
-    def test_scene_observer_requires_realsense_for_automatic_face_capture(self):
+    def test_scene_observer_prefers_realsense_but_allows_robot_camera_fallback(self):
         capture = MagicMock()
         capture.isOpened.return_value = True
         with patch.dict(
@@ -46,7 +46,7 @@ class SceneObserverTests(unittest.TestCase):
         camera.assert_called_once_with(
             camera_source=None,
             verbose=False,
-            allow_fallbacks=False,
+            allow_fallbacks=True,
         )
 
     def test_observer_service_forwards_successful_capture_as_agent_event(self):

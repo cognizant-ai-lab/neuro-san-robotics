@@ -221,7 +221,7 @@ class SceneObserver:
         capture, camera_info = open_camera(
             camera_source=self.camera_source,
             verbose=False,
-            allow_fallbacks=False,
+            allow_fallbacks=True,
         )
         if capture is None:
             logging.warning(

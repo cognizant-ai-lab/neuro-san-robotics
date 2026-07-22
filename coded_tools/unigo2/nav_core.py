@@ -1425,6 +1425,7 @@ class NavCore:
     )
     GOAL_TOLERANCE_M: float = _env_float("NAV_GOAL_TOLERANCE", 0.15)
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 10.0)
+    MAX_STUCK_RECOVERY_ATTEMPTS: int = 2
     PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.0)
     FORWARD_HAZARD_CONE_RAD: float = _env_float(
         "NAV_FORWARD_HAZARD_CONE_RAD",
@@ -1516,6 +1517,7 @@ class NavCore:
         # Progress tracking
         self._last_progress_pose = RobotPose()
         self._last_progress_time = time.monotonic()
+        self._stuck_recovery_attempts = 0
         self._close_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
             min_readings=self.CLOSE_OBSTACLE_CONFIRM_READINGS,
@@ -1764,6 +1766,43 @@ class NavCore:
         logger.warning("NavCore: %s", reason)
         self._notify_status_change(message)
         self._stop_depth_when_idle()
+
+    def _recover_from_stall(self, goal: NavGoal, pose: RobotPose) -> bool:
+        """Replan in place after a transient stall while preserving the destination."""
+        if self._stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
+            return False
+
+        if goal.goal_type == "semantic":
+            path = self._global_planner.plan_path(pose, goal.label or "")
+            if path is None:
+                return False
+
+        self._ensure_go2()
+        if self._go2 and getattr(self._go2, "available", False):
+            try:
+                self._go2.stop_move()
+            except Exception:
+                logger.debug("NavCore: stop_move failed during stall recovery", exc_info=True)
+
+        with self._state_lock:
+            self._stuck_recovery_attempts += 1
+            attempt = self._stuck_recovery_attempts
+            self._state = NavState.NAVIGATING
+            self._last_stop_reason = None
+            self._path_obstacle_active = False
+            self._reset_progress_tracker(reset_recovery_attempts=False)
+
+        logger.warning(
+            "NavCore: no-progress recovery %d/%d toward '%s'",
+            attempt,
+            self.MAX_STUCK_RECOVERY_ATTEMPTS,
+            self._goal_display_name(goal),
+        )
+        self._notify_status_change(
+            f"I stalled while heading to {self._goal_display_name(goal)}. "
+            "I replanned from my current position and am continuing."
+        )
+        return True
 
     def _complete_navigation(self, goal: NavGoal, distance_m: Optional[float] = None) -> None:
         """Stop motion and consistently close a successful navigation action."""
@@ -2477,6 +2516,8 @@ class NavCore:
                 self._abort_active_navigation(goal, reason, message, state=NavState.E_STOP)
                 return
             elif event.startswith("stuck"):
+                if self._recover_from_stall(goal, pose):
+                    return
                 reason = "Stuck: no progress toward the goal"
                 self._abort_active_navigation(
                     goal,
@@ -2710,10 +2751,12 @@ class NavCore:
         """Clear transient avoidance-band path-obstacle confirmation state."""
         self._path_obstacle_confirmation.reset()
 
-    def _reset_progress_tracker(self):
+    def _reset_progress_tracker(self, *, reset_recovery_attempts: bool = True):
         """Reset the stuck-detection timer to now."""
         self._last_progress_pose = self._odometry.get_pose()
         self._last_progress_time = time.monotonic()
+        if reset_recovery_attempts:
+            self._stuck_recovery_attempts = 0
         self._reset_close_obstacle_confirmation()
         self._reset_path_obstacle_confirmation()
 
@@ -2732,6 +2775,7 @@ class NavCore:
         if dist_moved > 0.1 or yaw_moved > self.YAW_PROGRESS_TOLERANCE_RAD:
             self._last_progress_pose = current_pose
             self._last_progress_time = time.monotonic()
+            self._stuck_recovery_attempts = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
