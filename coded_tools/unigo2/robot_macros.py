@@ -27,6 +27,7 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
         go2.damp()
         logging.info("===== GO2 damp...")
     elif action == "balance_stand":
+        go2.stand_up()
         go2.balance_stand()
         logging.info("===== GO2 balance stand...")
     elif action == "stop_move":
@@ -36,15 +37,18 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
         go2.stand_up()
         logging.info("===== GO2 standing up...")
     elif action == "lie_down":
+        go2.stand_up()
         go2.lie_down()
         logging.info("===== GO2 lying down...")
     elif action == "recovery_stand":
         go2.recovery_stand()
         logging.info("===== GO2 recovery stand...")
     elif action == "sit":
+        go2.stand_up()
         go2.sit()
         logging.info("===== GO2 sitting...")
     elif action == "sit_rise":
+        go2.stand_up()
         go2.sit()
         logging.info("===== GO2 sitting...")
     elif action == "rise_sit":
@@ -89,84 +93,107 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
 
     # Special motions / Expressions
     elif action in ("shake", "hello"):
+        go2.stand_up()
         go2.shake()
         logging.info("===== GO2 shaking/hello...")
     elif action == "stretch":
+        go2.stand_up()
         go2.stretch()
         logging.info("===== GO2 stretching...")
     elif action == "content":
+        go2.stand_up()
         go2.content()
         logging.info("===== GO2 content...")
     elif action in ("dance", "dance1"):
+        go2.stand_up()
         go2.dance1()
         logging.info("===== GO2 dance 1...")
     elif action == "dance2":
+        go2.stand_up()
         go2.dance2()
         logging.info("===== GO2 dance 2...")
     elif action == "pose":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.pose(flag)
         logging.info("===== GO2 pose (flag=%s)...", flag)
     elif action == "scrape":
+        go2.stand_up()
         go2.scrape()
         logging.info("===== GO2 scrape...")
     elif action in ("heart_pose", "heart"):
+        go2.stand_up()
         go2.heart_pose()
         logging.info("===== GO2 heart pose...")
 
     # Flips and acrobatics
     elif action == "front_flip":
+        go2.stand_up()
         go2.front_flip()
         logging.info("===== GO2 front flip...")
     elif action == "front_jump":
+        go2.stand_up()
         go2.front_jump()
         logging.info("===== GO2 front jump...")
     elif action == "front_pounce":
+        go2.stand_up()
         go2.front_pounce()
         logging.info("===== GO2 front pounce...")
     elif action == "left_flip":
+        go2.stand_up()
         go2.left_flip()
         logging.info("===== GO2 left flip...")
     elif action in ("backflip", "back_flip"):
+        go2.stand_up()
         go2.backflip()
         logging.info("===== GO2 backflip...")
     elif action == "hand_stand":
+        go2.stand_up()
         flag = args.get("flag", True)
         go2.hand_stand(flag)
         logging.info("===== GO2 hand stand (flag=%s)...", flag)
 
     # Gait and walking modes
     elif action == "static_walk":
+        go2.stand_up()
         go2.static_walk()
         logging.info("===== GO2 static walk...")
     elif action == "trot_run":
+        go2.stand_up()
         go2.trot_run()
         logging.info("===== GO2 trot run...")
     elif action == "free_walk":
+        go2.stand_up()
         go2.free_walk()
         logging.info("===== GO2 free walk...")
     elif action == "free_bound":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.free_bound(flag)
         logging.info("===== GO2 free bound (flag=%s)...", flag)
     elif action == "free_jump":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.free_jump(flag)
         logging.info("===== GO2 free jump (flag=%s)...", flag)
     elif action == "free_avoid":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.free_avoid(flag)
         logging.info("===== GO2 free avoid (flag=%s)...", flag)
     elif action == "classic_walk":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.classic_walk(flag)
         logging.info("===== GO2 classic walk (flag=%s)...", flag)
     elif action == "walk_upright":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.walk_upright(flag)
         logging.info("===== GO2 walk upright (flag=%s)...", flag)
     elif action == "cross_step":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.cross_step(flag)
         logging.info("===== GO2 cross step (flag=%s)...", flag)
 
