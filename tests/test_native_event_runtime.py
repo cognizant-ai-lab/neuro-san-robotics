@@ -111,6 +111,13 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertNotIn("user_input_queue", source)
         self.assertNotIn("THINKING_INTERVAL", source)
 
+    def test_microphone_is_locked_only_during_tts(self):
+        source = (ROOT / "apps" / "conscious_assistant" / "templates" / "index.html").read_text()
+
+        self.assertIn("function isVoiceInputLocked()", source)
+        self.assertIn("return isSpeaking;", source)
+        self.assertNotIn("return isProcessing || isSpeaking;", source)
+
     def test_flask_owns_the_native_ui_callback_url(self):
         source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()
 
