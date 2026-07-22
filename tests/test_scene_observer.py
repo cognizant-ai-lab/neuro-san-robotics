@@ -1,4 +1,6 @@
 import unittest
+import asyncio
+import json
 from unittest.mock import patch
 
 import numpy as np
@@ -10,6 +12,7 @@ from apps.conscious_assistant.scene_observer import build_scene_input
 from apps.conscious_assistant.scene_observer import observation_signature
 from apps.conscious_assistant.scene_observer import summarize_observed_entities
 from apps.conscious_assistant.scene_observer import summarize_observed_objects
+from coded_tools.unigo2 import scene_observer_tool
 
 
 class _VisionCtorResult:
@@ -19,6 +22,29 @@ class _VisionCtorResult:
 
 
 class SceneObserverTests(unittest.TestCase):
+    def test_observer_tool_forwards_successful_capture_as_agent_event(self):
+        observation = {
+            "summary": "Recognized: Alice",
+            "objects": ["Alice", "chair"],
+            "faces": [{"name": "Alice"}],
+        }
+
+        with (
+            patch.object(scene_observer_tool._OBSERVER, "observe", return_value=observation),
+            patch.object(scene_observer_tool, "publish_observation", return_value=True) as publish,
+            patch.object(scene_observer_tool, "queue_agent_event") as queue_event,
+        ):
+            result = asyncio.run(scene_observer_tool.SceneObserverTool().async_invoke({"capture": True}, {}))
+
+        publish.assert_called_once_with(observation)
+        event_text = queue_event.call_args.args[0]
+        self.assertEqual(queue_event.call_args.kwargs, {"source": "observation"})
+        self.assertEqual(
+            json.loads(event_text),
+            {"summary": "Recognized: Alice", "entities": ["Alice", "chair"]},
+        )
+        self.assertTrue(result["available"])
+
     def test_resolve_repo_relative_path_uses_repo_copy_when_present(self):
         resolved = _resolve_repo_relative_path("yolov8n.pt")
 

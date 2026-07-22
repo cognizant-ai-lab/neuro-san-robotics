@@ -11,6 +11,10 @@
 "unigo2.hocon" = {"serve": True, "public": True}
 "conscious_agent.hocon" = {
     "serve": True,
+    "public": False
+}
+"scene_observer_agent.hocon" = {
+    "serve": True,
     "public": False,
     "periodic": {
         "interactions": [

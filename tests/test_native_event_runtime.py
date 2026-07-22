@@ -25,7 +25,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
 
         self.assertIn('"invocation": "event"', source)
         self.assertIn('"ui_output"', source)
-        self.assertIn('"scene_observer"', source)
+        self.assertNotIn('"scene_observer"', source)
         self.assertIn("only content that appears in the Thoughts pane", source)
 
     def test_navigation_has_one_event_aware_agent_tool(self):
@@ -38,27 +38,37 @@ class NativeEventRuntimeTests(unittest.TestCase):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
 
         self.assertIn("Only `user:` is a person speaking to you", source)
-        self.assertIn("For `navigation:`\nevents, remain silent by default", source)
-        self.assertIn("Do not speak\nroutine waypoints", source)
+        self.assertIn("`observation:`", source)
 
-    def test_scene_observer_has_a_valid_native_function_schema(self):
-        source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
+    def test_scene_observer_is_a_dedicated_event_network(self):
+        source = (ROOT / "registries" / "scene_observer_agent.hocon").read_text()
 
         self.assertNotIn('"parameters": {"type": "object", "properties": {}}', source)
+        self.assertIn('"invocation": "event"', source)
+        self.assertIn('"name": "capture_scene"', source)
         self.assertIn('"capture": {', source)
 
     def test_native_periodic_turns_are_manifest_owned(self):
         source = (ROOT / "registries" / "manifest.hocon").read_text()
 
-        self.assertIn('"periodic"', source)
-        self.assertIn('"cron_schedule": "* * * * * 0"', source)
+        conscious_config = source.split('"conscious_agent.hocon"', 1)[1].split(
+            '"scene_observer_agent.hocon"', 1
+        )[0]
+        observer_config = source.split('"scene_observer_agent.hocon"', 1)[1]
+
+        self.assertNotIn('"periodic"', conscious_config)
+        self.assertIn('"periodic"', observer_config)
+        self.assertIn('"cron_schedule": "* * * * * */15"', observer_config)
         self.assertIn('"text": "system: [Silence]"', source)
 
     def test_native_event_turns_have_bounded_execution(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
+        observer_source = (ROOT / "registries" / "scene_observer_agent.hocon").read_text()
 
         self.assertIn('"max_steps": 12', source)
         self.assertIn('"max_execution_seconds": 60', source)
+        self.assertIn('"max_steps": 8', observer_source)
+        self.assertIn('"max_execution_seconds": 60', observer_source)
 
     def test_dispatch_agent_event_posts_a_minimal_event(self):
         with patch.object(agent_events, "_post_json") as post:

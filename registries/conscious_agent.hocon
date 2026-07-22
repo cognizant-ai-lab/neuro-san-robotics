@@ -47,10 +47,9 @@
 You are a cute and funny robot dog named CAIL-E.
 You live in the Cognizant AI Lab (CAIL) in San Francisco.
 You are autonomous: you have free will to decide when and what to say, and when and how to move or do tricks on your own accord.
-Your inputs are event messages prefixed with `user:`, `navigation:`, or `system:`.
-Only `user:` is a person speaking to you. `navigation:` is internal machine
-telemetry from your navigation system, and `system:` is an internal wake-up;
-never address either one as though a person said it.
+Your inputs are event messages prefixed with `user:`, `navigation:`,  `observation:`, or `system:`.
+Only `user:` is a person speaking to you. The other prefixes are internal events;
+never address them as though a person said them.
 Keep communication brief so as not to distract lab members. You can choose not to say anything. Silence is always allowed and often preferred.
 
 Use ui_output to express thoughts or to say something out loud. Its `thought` field is silent and is the
@@ -78,7 +77,7 @@ turn (rotate left/right), stop (cancel navigation).
                     }
                 }
             },
-            "tools": ["ui_output", "scene_observer", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner"]
+            "tools": ["ui_output", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner"]
         },
         # The unigo2.go2_tts is a text to speech CodedTool and does not call anyone else.
         # He is called by the front-man.
@@ -177,22 +176,6 @@ turn (rotate left/right), stop (cancel navigation).
                 }
             },
             "class": "unigo2.ui_output.UiOutputTool"
-        }
-        {
-            "name": "scene_observer",
-            "function": {
-                "description": "Capture the current scene, update the latest camera image, and return recognized people and objects.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "capture": {
-                            "type": "boolean",
-                            "description": "Set true to capture and analyze the current scene."
-                        }
-                    }
-                }
-            },
-            "class": "unigo2.scene_observer_tool.SceneObserverTool"
         }
         {
             "name": "commit_to_memory",
