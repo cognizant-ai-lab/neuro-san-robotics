@@ -89,7 +89,7 @@ specific robot really needs a temporary override.
 | `GO2_MOVE_LOG_INTERVAL_SECONDS` | `-1` | Suppresses repeated raw `Move(vx, vy, vyaw)` logs. |
 | `GO2_USE_SDK_SPECIAL_MOTIONS` | `1` | Uses Unitree SDK special motions when available. |
 | `GO2_NETWORK_INTERFACE` / `CYCLONEDDS_NETWORK_INTERFACE` | `eth0` | Unitree SDK communication interface. Override only if the robot network is not on `eth0`. |
-| `VISION_CAMERA_SOURCE` | auto RealSense color camera by stable `/dev/v4l/by-id` link | Camera source for visual observation and face detection. Override only for a different camera, for example `unitree:eth0`. |
+| `VISION_CAMERA_SOURCE` | auto RealSense color camera by stable `/dev/v4l/by-id` link | Camera source for visual observation and face detection. Automatic face capture does not silently switch cameras; set an explicit source such as `unitree:eth0` only when intended. |
 | `NAV_MAP_FILE` | repo `maps/cail_lab.json` on robot, none in simulation | Topological map for named destinations. Override only for a different map, or set empty to disable map loading. |
 | `NAV_DEPTH_CAMERA_SOURCE` | `auto` | Tries RealSense first, then OpenCV depth sources. |
 | `NAV_DEPTH_PROCESS_WIDTH` | `640` | Depth-frame processing width. The robot default uses the full RealSense depth width for denser obstacle sampling. |

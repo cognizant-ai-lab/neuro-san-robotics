@@ -560,10 +560,7 @@ def _v4l2_capture_source(device_path: str) -> CameraSource:
 def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[Dict[str, Any]]:
     """Normalize a camera source override into a single candidate descriptor."""
     if camera_source is None:
-        camera_source = (
-            os.environ.get("VISION_CAMERA_SOURCE")
-            or os.environ.get("GO2_CAMERA_SOURCE")
-        )
+        camera_source = os.environ.get("VISION_CAMERA_SOURCE")
         if not camera_source:
             return None
 
@@ -649,6 +646,7 @@ def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[
 def get_camera_candidates(
     camera_source: Optional[CameraSource] = None,
     max_indices: Optional[int] = None,
+    allow_fallbacks: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Build camera candidates in a robot-friendly order.
@@ -712,6 +710,9 @@ def get_camera_candidates(
             f"Intel RealSense color camera ({Path(device_path).name})",
         )
 
+    if not allow_fallbacks:
+        return candidates
+
     add_unitree_candidate()
 
     if _is_jetson_platform():
@@ -742,6 +743,7 @@ def open_camera(
     frame_height: Optional[int] = None,
     warmup_reads: int = 3,
     verbose: bool = True,
+    allow_fallbacks: bool = True,
 ) -> Tuple[Optional[cv2.VideoCapture], Dict[str, Any]]:
     """
     Open the first camera candidate that produces a real frame.
@@ -751,7 +753,14 @@ def open_camera(
     """
     attempts: List[str] = []
 
-    for candidate in get_camera_candidates(camera_source):
+    candidates = get_camera_candidates(
+        camera_source,
+        allow_fallbacks=allow_fallbacks,
+    )
+    if not candidates and camera_source is None and not allow_fallbacks:
+        attempts.append("No Intel RealSense color camera was discovered")
+
+    for candidate in candidates:
         kind = candidate.get("kind", "opencv")
         source = candidate["source"]
         backend = candidate["backend"]
@@ -1971,10 +1980,7 @@ if __name__ == "__main__":
     # WEBCAM CAPTURE
     # Use default webcam resolution (driver-optimized)
     # ============================================================
-    requested_camera_source = (
-        os.environ.get("VISION_CAMERA_SOURCE")
-        or os.environ.get("GO2_CAMERA_SOURCE")
-    )
+    requested_camera_source = os.environ.get("VISION_CAMERA_SOURCE")
     cap, camera_info = open_camera(
         camera_source=requested_camera_source,
         verbose=True,

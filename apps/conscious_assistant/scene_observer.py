@@ -154,7 +154,6 @@ class SceneObserver:
         self.camera_source = (
             camera_source
             or os.environ.get("VISION_CAMERA_SOURCE")
-            or os.environ.get("GO2_CAMERA_SOURCE")
         )
         self.public_image_url = public_image_url
         self.image_dir = Path(tempfile.gettempdir()) / "neuro_san_conscious_assistant"
@@ -222,6 +221,7 @@ class SceneObserver:
         capture, camera_info = open_camera(
             camera_source=self.camera_source,
             verbose=False,
+            allow_fallbacks=False,
         )
         if capture is None:
             logging.warning(

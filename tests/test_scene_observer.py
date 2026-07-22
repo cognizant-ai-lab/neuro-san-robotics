@@ -1,5 +1,6 @@
-import unittest
 import json
+import os
+import unittest
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -22,6 +23,32 @@ class _VisionCtorResult:
 
 
 class SceneObserverTests(unittest.TestCase):
+    def test_scene_observer_requires_realsense_for_automatic_face_capture(self):
+        capture = MagicMock()
+        capture.isOpened.return_value = True
+        with patch.dict(
+            os.environ,
+            {"GO2_CAMERA_SOURCE": "unitree:eth0"},
+            clear=True,
+        ):
+            observer = SceneObserver(enabled=True)
+
+        with patch(
+            "apps.conscious_assistant.scene_observer.open_camera",
+            return_value=(
+                capture,
+                {"description": "Intel RealSense color camera", "backend": "V4L2"},
+            ),
+        ) as camera:
+            self.assertTrue(observer._ensure_camera())
+
+        self.assertIsNone(observer.camera_source)
+        camera.assert_called_once_with(
+            camera_source=None,
+            verbose=False,
+            allow_fallbacks=False,
+        )
+
     def test_observer_service_forwards_successful_capture_as_agent_event(self):
         observation = {
             "summary": "Recognized: Alice",

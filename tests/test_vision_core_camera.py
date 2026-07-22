@@ -256,6 +256,38 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertEqual(candidates[0]["kind"], "unitree")
         self.assertEqual(candidates[0]["description"], "Unitree Go2 front camera via eth0")
 
+    @patch.object(vision_core, "_discover_realsense_color_devices", return_value=["/dev/video4"])
+    @patch.object(vision_core, "_unitree_camera_available", return_value=True)
+    def test_strict_camera_candidates_stop_after_realsense(self, *_):
+        candidates = vision_core.get_camera_candidates(
+            max_indices=3,
+            allow_fallbacks=False,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertIn("RealSense", candidates[0]["description"])
+
+    def test_legacy_go2_camera_source_does_not_override_vision_camera(self):
+        with patch.dict(
+            vision_core.os.environ,
+            {"GO2_CAMERA_SOURCE": "unitree:eth0"},
+            clear=True,
+        ):
+            self.assertIsNone(vision_core._normalize_camera_source(None))
+
+    @patch.object(vision_core, "get_camera_candidates", return_value=[])
+    def test_strict_open_reports_missing_realsense(self, _):
+        capture, info = vision_core.open_camera(
+            verbose=False,
+            allow_fallbacks=False,
+        )
+
+        self.assertIsNone(capture)
+        self.assertEqual(
+            info["attempts"],
+            ["No Intel RealSense color camera was discovered"],
+        )
+
     def test_open_camera_falls_back_until_frame_is_available(self):
         first = _FakeCapture(opened=False)
         second = _FakeCapture(opened=True, frames=[(False, None)])
