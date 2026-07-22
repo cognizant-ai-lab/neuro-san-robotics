@@ -11,9 +11,9 @@
 # END COPYRIGHT
 
 """
-NavPlannerTool - Neuro SAN CodedTool for navigation commands.
+NavPlannerTool - Neuro SAN CodedTool for navigation commands and queries.
 
-This is a thin command interface to NavCore. It sets goals and queries status
+This is the single agent interface to NavCore. It sets goals and answers queries
 but does NOT participate in real-time navigation decisions.
 
 Once a goal is set, the NavCore background loop (10 Hz) handles all
@@ -42,6 +42,8 @@ class NavPlannerTool(CodedTool):
     - turn: Rotate by a specified angle in degrees
     - stop: Cancel current navigation
     - status: Get navigation state summary
+    - destinations: List known map destinations
+    - obstacles: Describe current obstacle sensing
     """
 
     async def async_invoke(self, args: Dict[str, Any], sly_data: Dict[str, Any]) -> Any:
@@ -56,11 +58,11 @@ class NavPlannerTool(CodedTool):
         Returns:
             Human-readable status string for the conscious agent.
         """
-        from coded_tools.unigo2.agent_events import dispatch_agent_event
+        from coded_tools.unigo2.agent_events import queue_agent_event
         from coded_tools.unigo2.nav_core import NavCore, NavState
 
         NavCore.set_status_callback(
-            lambda message: dispatch_agent_event(message, source="navigation"),
+            lambda message: queue_agent_event(message, source="navigation"),
         )
 
         command = args.get("command", "").lower().strip()
@@ -140,7 +142,14 @@ class NavPlannerTool(CodedTool):
         elif command == "status":
             return nav.get_status_summary()
 
+        elif command == "destinations":
+            return nav.list_destinations()
+
+        elif command == "obstacles":
+            return nav.get_obstacle_summary()
+
         return (
             f"Unknown navigation command: '{command}'. Use: navigate_to, "
-            "set_location, move_forward, turn, stop, or status."
+            "set_location, move_forward, move_until_obstacle, turn, stop, "
+            "status, destinations, or obstacles."
         )

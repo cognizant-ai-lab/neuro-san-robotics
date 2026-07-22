@@ -28,6 +28,14 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn('"scene_observer"', source)
         self.assertIn("only content that appears in the Thoughts pane", source)
 
+    def test_navigation_has_one_event_aware_agent_tool(self):
+        source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
+
+        self.assertIn("Navigation runs asynchronously", source)
+        self.assertIn("encounters or clears an obstacle", source)
+        self.assertIn('"name": "nav_planner"', source)
+        self.assertNotIn('"name": "nav_status"', source)
+
     def test_scene_observer_has_a_valid_native_function_schema(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
 
@@ -48,6 +56,16 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn("/conscious_agent/streaming_chat", endpoint)
         self.assertEqual(payload["user_message"]["text"], "user: go home")
         self.assertEqual(payload["chat_filter"]["chat_filter_type"], "MINIMAL")
+
+    def test_navigation_events_are_queued_off_the_control_loop(self):
+        with patch.object(agent_events._EVENT_DISPATCHER, "submit") as submit:
+            agent_events.queue_agent_event("waypoint reached", source="navigation")
+
+        submit.assert_called_once_with(
+            agent_events.dispatch_agent_event,
+            "waypoint reached",
+            source="navigation",
+        )
 
     def test_event_bridge_consumes_the_full_native_acknowledgement(self):
         response = MagicMock()

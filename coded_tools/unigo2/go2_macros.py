@@ -26,6 +26,17 @@ except Exception:
     sport_client = None
     ChannelFactoryInitialize = None
 
+try:
+    if USE_REAL_ROBOT:
+        from unitree_sdk2_python.unitree_sdk2py.go2.obstacles_avoid import (
+            obstacles_avoid_client,
+        )
+except Exception:
+    try:
+        from unitree_sdk2py.go2.obstacles_avoid import obstacles_avoid_client
+    except Exception:
+        obstacles_avoid_client = None
+
 
 _ROBOT_INIT_STATE = {
     "attempted": False,
@@ -33,6 +44,7 @@ _ROBOT_INIT_STATE = {
     "error": None,
     "reported_disabled": False,
     "client": None,
+    "avoidance_client": None,
     "channel_initialized": False,
     "last_failure_at": 0.0,
 }
@@ -71,6 +83,7 @@ class Go2Macros:
         self.use_robot = use_robot
         self.ifname = ifname
         self.cli = None
+        self.avoidance_cli = None
         self.available = False
         self._move_log_interval_s = _env_float("GO2_MOVE_LOG_INTERVAL_SECONDS", -1.0)
         self._last_move_log_at = 0.0
@@ -83,6 +96,7 @@ class Go2Macros:
             cached_client = _ROBOT_INIT_STATE.get("client")
             if cached_client is not None and _ROBOT_INIT_STATE["available"]:
                 self.cli = cached_client
+                self.avoidance_cli = _ROBOT_INIT_STATE.get("avoidance_client")
                 self.available = True
                 return
 
@@ -128,6 +142,7 @@ class Go2Macros:
                         "error": None,
                         "reported_disabled": False,
                         "client": self.cli,
+                        "avoidance_client": self.avoidance_cli,
                         "channel_initialized": True,
                         "last_failure_at": 0.0,
                     }
@@ -142,6 +157,7 @@ class Go2Macros:
                         "error": str(e),
                         "reported_disabled": False,
                         "client": None,
+                        "avoidance_client": None,
                         "last_failure_at": time.monotonic(),
                     }
                 )
@@ -149,17 +165,39 @@ class Go2Macros:
                 traceback.print_exc()
 
     def _configure_startup_motion_modes(self):
-        """Put SDK locomotion in the mode expected by app-level navigation."""
+        """Disable firmware avoidance so app-level navigation owns locomotion."""
         if not self.cli:
             return
 
-        if _env_flag("GO2_DISABLE_FREE_AVOID_ON_INIT", True):
-            free_avoid = getattr(self.cli, "FreeAvoid", None)
-            if callable(free_avoid):
-                self._call("FreeAvoid", free_avoid, False)
-                self._log("Free avoid disabled on init")
-            else:
-                self._log("Free avoid startup disable skipped: SDK method unavailable")
+        free_avoid = getattr(self.cli, "FreeAvoid", None)
+        if callable(free_avoid):
+            self._call("FreeAvoid", free_avoid, False)
+        else:
+            self._log("Free avoid startup disable skipped: SDK method unavailable")
+
+        if obstacles_avoid_client is not None:
+            try:
+                self.avoidance_cli = obstacles_avoid_client.ObstaclesAvoidClient()
+                self.avoidance_cli.SetTimeout(3.0)
+                self.avoidance_cli.Init()
+                self._call(
+                    "ObstaclesAvoid.SwitchSet",
+                    self.avoidance_cli.SwitchSet,
+                    False,
+                )
+                _code, enabled = _coerce_status(self.avoidance_cli.SwitchGet())
+                if enabled in (False, 0, "0", "false", "False"):
+                    self._log("Onboard obstacle avoidance disabled on init")
+                else:
+                    self._log(
+                        "⚠️ Onboard obstacle avoidance disable could not be verified: "
+                        f"{enabled!r}"
+                    )
+            except Exception as exc:
+                self.avoidance_cli = None
+                self._log(f"⚠️ Onboard obstacle avoidance disable failed: {exc}")
+        else:
+            self._log("Onboard obstacle avoidance service unavailable in SDK")
 
     def _log(self, msg: str):
         print(f"[{time.strftime('%H:%M:%S')}] {msg}")

@@ -56,13 +56,28 @@ NavCore runs a **background thread at 10 Hz**. Each cycle:
 
 1. Read obstacle grid from depth camera
 2. Get robot pose from odometry
-3. Safety pre-check (confirmed stop if a path-corridor obstacle is <= 0.20 m)
+3. Safety pre-check (confirmed stop if a path-corridor obstacle is <= 0.10 m)
 4. Local planner computes velocity (VFH+ algorithm)
 5. Safety monitor filters the command
 6. Send velocity to Go2Macros
 
 The agent only sets goals ("go to kitchen"). All real-time obstacle avoidance
 happens autonomously in the nav loop -- no LLM round-trips in the control path.
+
+Unitree SportModeState translation and heading are aligned to the map and used
+as the authoritative pose. Wireless-controller input pauses autonomous motion;
+when control is released, NavCore projects the corrected pose onto the current
+route edge, preserves waypoint progress, and continues. `set_location` is only
+for unmeasured moves, such as physically carrying the robot to a known place.
+
+The filtered obstacle grid guides local planning, while raw fresh path clearance
+independently gates every autonomous motion command. Stale depth data cannot
+authorize movement. When two sufficiently long, parallel corridor walls are
+visible, their heading and center offset add a small bounded steering correction;
+one-sided or inconsistent geometry is ignored.
+
+Robot initialization disables both SportClient `FreeAvoid` and the Unitree
+obstacle-avoidance service so firmware steering cannot conflict with NavCore.
 
 ```
 Agent says "go to kitchen"
@@ -160,7 +175,7 @@ charging_station, main_desk_area, kitchen, entrance, demo_area.
 
 ## Agent Integration (Neuro SAN)
 
-Two CodedTools expose navigation to the conscious agent:
+One CodedTool exposes navigation to the conscious agent:
 
 ### nav_planner
 
@@ -173,19 +188,12 @@ Commands the robot to navigate.
 | `move_until_obstacle` | `distance`: stop distance in meters | "Move forward until something is 0.75 meters ahead" |
 | `turn` | `target`: left/right/around, `distance`: degrees | "Turn left 90 degrees" |
 | `stop` | — | "Stop moving" |
-| `status` | — | "Where are you?" |
+| `status` | — | State, position, heading, goal, and obstacle summary |
+| `destinations` | — | List of mapped locations |
+| `obstacles` | — | Current obstacle-sensor summary |
 
-### nav_status
-
-Read-only queries about navigation state.
-
-| Query | Returns |
-|-------|---------|
-| `status` | State, position, heading, distance to goal, nearest obstacle |
-| `destinations` | List of map locations |
-| `obstacles` | Obstacle grid summary from depth camera |
-
-Both tools are registered in `registries/conscious_agent.hocon`.
+`NavCore` also pushes waypoint, obstacle, arrival, and failure events to the
+agent. Queries are intended for explicit questions and diagnostics, not progress polling.
 
 ---
 
@@ -236,8 +244,7 @@ To resume after e-stop: `nav.resume()` or send a new navigation command.
 coded_tools/unigo2/
   depth_processor.py    # Depth camera -> ObstacleGrid pipeline
   nav_core.py           # Navigation engine (singleton, background thread)
-  nav_planner.py        # CodedTool: navigation commands
-  nav_status.py         # CodedTool: status queries
+  nav_planner.py        # CodedTool: navigation commands and queries
 
 maps/
   cail_lab.json         # CAIL Lab topological map

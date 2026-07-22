@@ -444,9 +444,8 @@ Nav_core is **CPU-only**. It leaves the GPU entirely available for vision_core's
                                     |
               +----------+----------+----------+----------+
               |          |          |          |          |
-         robot_macros  learn_face  memory   nav_planner  nav_status
-              |                               |           |
-              |                    +----------+-----------+
+         robot_macros  learn_face  memory   nav_planner
+              |                               |
               |                    |
               |              NavCore (singleton, background thread)
               |                    |
@@ -488,8 +487,7 @@ Nav_core is **CPU-only**. It leaves the GPU entirely available for vision_core's
 |------|---------|-----------|
 | `coded_tools/unigo2/nav_core.py` | Main navigation engine: state machine, nav loop, LocalPlanner (VFH+), GlobalPlanner (Dijkstra), SafetyMonitor, OdometryProvider | ~1500-2000 |
 | `coded_tools/unigo2/depth_processor.py` | Depth camera access (pyrealsense2), obstacle grid generation, LiDAR processing, ground plane detection | ~600-800 |
-| `coded_tools/unigo2/nav_planner.py` | Neuro SAN CodedTool wrapper for agent-initiated navigation commands | ~150-200 |
-| `coded_tools/unigo2/nav_status.py` | Neuro SAN CodedTool wrapper for querying navigation state | ~80-120 |
+| `coded_tools/unigo2/nav_planner.py` | Neuro SAN CodedTool wrapper for navigation commands and queries | ~150-200 |
 | `maps/cail_lab.json` | Initial topological map for the CAIL lab | ~50 |
 | `tests/test_nav_core.py` | Unit tests: local planner, global planner, state machine, safety monitor | ~400-600 |
 | `tests/test_depth_processor.py` | Unit tests: depth frame processing, obstacle grid generation | ~200-300 |
@@ -498,7 +496,7 @@ Nav_core is **CPU-only**. It leaves the GPU entirely available for vision_core's
 
 | File | Change |
 |------|--------|
-| `registries/conscious_agent.hocon` | Add `nav_planner` and `nav_status` tool registrations, update agent instructions |
+| `registries/conscious_agent.hocon` | Add the `nav_planner` tool registration and navigation-event instructions |
 | `requirements.txt` | Add `pyrealsense2>=2.50` (Linux only) and `scipy>=1.10` |
 | `apps/conscious_assistant/scene_observer.py` | Optional: enrich observations with navigation spatial data |
 
@@ -717,45 +715,22 @@ Add to `registries/conscious_agent.hocon`:
 }
 ```
 
-### NavStatus Tool Registration
-
-```hocon
-{
-    "name": "nav_status",
-    "function": {
-        "description": "Query the robot's navigation state, available destinations, and obstacle information.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "What to query: 'status', 'destinations', 'obstacles'"
-                }
-            },
-            "required": ["query"]
-        }
-    },
-    "class": "unigo2.nav_status.NavStatusTool"
-}
-```
-
 ### Agent Instructions Addition
 
 Add to the conscious_agent instructions:
 
 ```
 If the user asks you to go somewhere, move to a location, or navigate, use your nav_planner tool.
-You can check your surroundings and navigation progress using nav_status.
 Available navigation commands: navigate_to (go to a named place), move_forward (go straight),
-turn (rotate), stop (cancel navigation).
-When navigating, you will be informed when you arrive or if navigation fails.
+turn (rotate), stop (cancel navigation), status, destinations, and obstacles.
+When navigating, waypoint, obstacle, arrival, and failure events are delivered automatically.
 ```
 
 ### Tools List Update
 
 ```hocon
 "tools": ["commit_to_memory", "recall_memory", "list_topics", "reorganize_memory",
-          "robot_macros", "learn_face", "nav_planner", "nav_status"]
+          "robot_macros", "learn_face", "nav_planner"]
 ```
 
 ---
@@ -843,7 +818,6 @@ scipy>=1.10                                    # Spatial algorithms (Dijkstra, K
 
 **Deliverables**:
 - `nav_planner.py`: CodedTool wrapper for navigation commands
-- `nav_status.py`: CodedTool wrapper for status queries
 - Updated `conscious_agent.hocon` with nav tools
 - Agent can say "move forward 2 meters" and it works end-to-end
 

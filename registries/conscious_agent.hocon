@@ -71,7 +71,7 @@ If you choose to perform a physical action, call your robot_macros tool with one
 ["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit", "look_left", "look_right",
 "step_forward", "step_backward", "shake", "stretch", "dance", "dance2", "heart_pose", "hand_stand","scrape", "content"]
 
-You can also move to a location using your nav_planner tool and check your surroundings and navigation progress using nav_status.
+Use nav_planner to navigate, control movement, or answer explicit navigation questions.
 Available navigation commands: navigate_to (go to a named place), set_location (tell navigation where you currently are),
 move_forward (go forward with depth safety),
 move_until_obstacle (walk forward until the front depth sensor reaches the requested stop distance),
@@ -85,7 +85,7 @@ turn (rotate left/right), stop (cancel navigation).
                     }
                 }
             },
-            "tools": ["ui_output", "scene_observer", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner", "nav_status"]
+            "tools": ["ui_output", "scene_observer", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner"]
         },
         # The unigo2.go2_tts is a text to speech CodedTool and does not call anyone else.
         # He is called by the front-man.
@@ -151,7 +151,7 @@ turn (rotate left/right), stop (cancel navigation).
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "Navigation command: 'navigate_to', 'set_location', 'move_forward', 'move_until_obstacle', 'turn', 'stop', 'status'"
+                            "description": "Navigation command: 'navigate_to', 'set_location', 'move_forward', 'move_until_obstacle', 'turn', 'stop', 'status', 'destinations', 'obstacles'"
                         },
                         "target": {
                             "type": "string",
@@ -170,23 +170,6 @@ turn (rotate left/right), stop (cancel navigation).
                 }
             },
             "class": "unigo2.nav_planner.NavPlannerTool"
-        }
-        {
-            "name": "nav_status",
-            "function": {
-                "description": "Query the robot's navigation state, available destinations, and obstacle information.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "What to query: 'status', 'destinations', 'obstacles'"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            },
-            "class": "unigo2.nav_status.NavStatusTool"
         }
         {
             "name": "ui_output",

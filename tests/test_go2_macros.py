@@ -48,6 +48,32 @@ class FakeSportClientModule:
     SportClient = FakeSportClient
 
 
+class FakeObstaclesAvoidClient:
+    instances = []
+
+    def __init__(self):
+        self.calls = []
+        FakeObstaclesAvoidClient.instances.append(self)
+
+    def SetTimeout(self, timeout):
+        self.calls.append(("SetTimeout", timeout))
+
+    def Init(self):
+        self.calls.append(("Init",))
+
+    def SwitchSet(self, enabled):
+        self.calls.append(("SwitchSet", enabled))
+        return 0
+
+    def SwitchGet(self):
+        self.calls.append(("SwitchGet",))
+        return 0, False
+
+
+class FakeObstaclesAvoidClientModule:
+    ObstaclesAvoidClient = FakeObstaclesAvoidClient
+
+
 def reset_robot_init_state():
     go2_macros._ROBOT_INIT_STATE.update(
         {
@@ -56,11 +82,13 @@ def reset_robot_init_state():
             "error": None,
             "reported_disabled": False,
             "client": None,
+            "avoidance_client": None,
             "channel_initialized": False,
             "last_failure_at": 0.0,
         }
     )
     FakeSportClient.instances.clear()
+    FakeObstaclesAvoidClient.instances.clear()
 
 
 class Go2MacrosInitializationTests(unittest.TestCase):
@@ -76,6 +104,11 @@ class Go2MacrosInitializationTests(unittest.TestCase):
         with (
             patch.object(go2_macros, "ChannelFactoryInitialize", channel_init),
             patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(
+                go2_macros,
+                "obstacles_avoid_client",
+                FakeObstaclesAvoidClientModule,
+            ),
         ):
             first = go2_macros.Go2Macros()
             second = go2_macros.Go2Macros()
@@ -88,19 +121,23 @@ class Go2MacrosInitializationTests(unittest.TestCase):
         self.assertEqual(first.cli.timeout, 10.0)
         self.assertTrue(first.cli.initialized)
         self.assertIn(("FreeAvoid", False), first.cli.calls)
+        self.assertEqual(len(FakeObstaclesAvoidClient.instances), 1)
+        self.assertIn(("SwitchSet", False), first.avoidance_cli.calls)
+        self.assertIn(("SwitchGet",), first.avoidance_cli.calls)
+        self.assertIs(first.avoidance_cli, second.avoidance_cli)
         self.assertEqual(first._move_log_interval_s, -1.0)
 
-    def test_can_skip_startup_free_avoid_configuration(self):
+    def test_missing_avoidance_service_does_not_disable_robot_control(self):
         with (
-            patch.dict(go2_macros.os.environ, {"GO2_DISABLE_FREE_AVOID_ON_INIT": "0"}),
             patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
             patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros, "obstacles_avoid_client", None),
         ):
             bot = go2_macros.Go2Macros()
 
         self.assertTrue(bot.available)
         client = FakeSportClient.instances[0]
-        self.assertNotIn(("FreeAvoid", False), client.calls)
+        self.assertIn(("FreeAvoid", False), client.calls)
 
     def test_channel_init_failure_does_not_build_client_with_none_participant(self):
         channel_init = MagicMock(side_effect=Exception("channel factory init error."))

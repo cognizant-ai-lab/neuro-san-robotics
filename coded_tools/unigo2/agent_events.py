@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import ssl
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -14,6 +15,7 @@ from urllib.request import urlopen
 
 
 logger = logging.getLogger(__name__)
+_EVENT_DISPATCHER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-events")
 
 
 def _local_ssl_context(url: str) -> ssl.SSLContext | None:
@@ -61,6 +63,11 @@ def dispatch_agent_event(text: str, *, source: str) -> bool:
     except (OSError, URLError, ValueError) as exc:
         logger.warning("Could not dispatch %s event to Neuro SAN: %s", source, exc)
         return False
+
+
+def queue_agent_event(text: str, *, source: str) -> None:
+    """Queue an agent event without blocking a real-time producer."""
+    _EVENT_DISPATCHER.submit(dispatch_agent_event, text, source=source)
 
 
 def publish_ui_output(*, thought: str = "", say: str = "") -> bool:
