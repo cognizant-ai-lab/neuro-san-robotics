@@ -16,7 +16,7 @@
         "interactions": [
             {
                 "enable": true,
-                "cron_schedule": "* * * * * 0",
+                "cron_schedule": "* * * * * */15",
                 "second_at_beginning": false,
                 "text": "system: [Silence]",
                 "metadata": {"user_id": "system"}
