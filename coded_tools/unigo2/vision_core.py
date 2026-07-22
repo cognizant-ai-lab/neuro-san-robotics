@@ -439,8 +439,8 @@ def _discover_v4l2_devices(limit: int = 6) -> List[str]:
     return [str(path) for path in devices[: max(0, limit)]]
 
 
-def _realsense_color_link_sort_key(path: Path) -> tuple[int, str]:
-    """Sort RealSense V4L links by color-video index, then by stable name."""
+def _realsense_color_link_sort_key(path: Path) -> tuple[int, int, str]:
+    """Try RealSense image endpoints before their paired metadata endpoints."""
     name = path.name.lower()
     marker = "video-index"
     index = 99
@@ -449,7 +449,7 @@ def _realsense_color_link_sort_key(path: Path) -> tuple[int, str]:
         digits = "".join(char for char in suffix if char.isdigit())
         if digits:
             index = int(digits)
-    return index, path.name
+    return index % 2, index, path.name
 
 
 def _is_realsense_color_link(path: Path) -> bool:
@@ -509,8 +509,8 @@ def _discover_realsense_video_devices(limit: int = 2) -> List[str]:
     return devices
 
 
-def _discover_realsense_color_devices(limit: int = 2) -> List[str]:
-    """Return stable RealSense color-camera device links, preferring video-index0."""
+def _discover_realsense_color_devices(limit: int = 8) -> List[str]:
+    """Return RealSense V4L streams, trying image endpoints before metadata."""
     devices = []
     seen = set()
 
@@ -525,17 +525,19 @@ def _discover_realsense_color_devices(limit: int = 2) -> List[str]:
         ]
         for path in sorted(links, key=_realsense_color_link_sort_key):
             device_path = str(path)
-            if device_path in seen:
+            device_key = str(path.resolve(strict=False))
+            if device_key in seen:
                 continue
-            seen.add(device_path)
+            seen.add(device_key)
             devices.append(device_path)
             if len(devices) >= limit:
                 return devices
 
     for device_path in _discover_realsense_video_devices(limit=limit - len(devices)):
-        if device_path in seen:
+        device_key = str(Path(device_path).resolve(strict=False))
+        if device_key in seen:
             continue
-        seen.add(device_path)
+        seen.add(device_key)
         devices.append(device_path)
         if len(devices) >= limit:
             return devices
