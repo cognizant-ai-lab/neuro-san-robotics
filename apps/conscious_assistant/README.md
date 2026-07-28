@@ -5,7 +5,7 @@ The **Conscious Agent** is a basic multi-agent system that is called from the
 
 ## Note
 
-- Running the flask app will continuously call the agents and can rack up on your token consumption.
+- The native runtime periodically captures the scene without invoking an LLM.
 - The flask app will store memory items in a file locally. You can turn this feature off by changing the flag in
  [list_topics.py](../../coded_tools/kwik_agents/list_topics.py)
 
@@ -43,4 +43,3 @@ The hocon file includes an example of calling a coded_tool in a non-default path
 which the kwik_agents coded tools are reused here.
 
 ---
-

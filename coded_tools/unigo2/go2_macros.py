@@ -2,9 +2,15 @@ import os
 import time
 import platform
 import traceback
+import threading
+import math
 
 USE_REAL_ROBOT = True
-IFNAME = "eth0"                     # "eth0" if you're on wired
+IFNAME = (
+    os.environ.get("GO2_NETWORK_INTERFACE")
+    or os.environ.get("CYCLONEDDS_NETWORK_INTERFACE")
+    or "eth0"
+)
 
 # --- Recommend setting these in your shell profile too ---
 os.environ.setdefault("CYCLONEDDS_NETWORK_INTERFACE", IFNAME)
@@ -20,13 +26,29 @@ except Exception:
     sport_client = None
     ChannelFactoryInitialize = None
 
+try:
+    if USE_REAL_ROBOT:
+        from unitree_sdk2_python.unitree_sdk2py.go2.obstacles_avoid import (
+            obstacles_avoid_client,
+        )
+except Exception:
+    try:
+        from unitree_sdk2py.go2.obstacles_avoid import obstacles_avoid_client
+    except Exception:
+        obstacles_avoid_client = None
+
 
 _ROBOT_INIT_STATE = {
     "attempted": False,
     "available": True,
     "error": None,
     "reported_disabled": False,
+    "client": None,
+    "avoidance_client": None,
+    "channel_initialized": False,
+    "last_failure_at": 0.0,
 }
+_ROBOT_INIT_LOCK = threading.Lock()
 
 
 def _coerce_status(ret):
@@ -39,61 +61,194 @@ def _coerce_status(ret):
     return ret, None
 
 
+def _env_float(name: str, default: float) -> float:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class Go2Macros:
     def __init__(self, use_robot=USE_REAL_ROBOT, ifname=IFNAME):
         self.use_robot = use_robot
         self.ifname = ifname
         self.cli = None
+        self.avoidance_cli = None
         self.available = False
+        self._move_log_interval_s = _env_float("GO2_MOVE_LOG_INTERVAL_SECONDS", -1.0)
+        self._last_move_log_at = 0.0
 
         if not self.use_robot or sport_client is None or ChannelFactoryInitialize is None:
             self._log("⚙️ Running in simulation/offline mode (no robot)")
             return
 
-        if _ROBOT_INIT_STATE["attempted"] and not _ROBOT_INIT_STATE["available"]:
-            if not _ROBOT_INIT_STATE["reported_disabled"]:
-                self._log(
-                    "⚙️ Robot control disabled after prior initialization failure: "
-                    f"{_ROBOT_INIT_STATE['error']}"
+        with _ROBOT_INIT_LOCK:
+            cached_client = _ROBOT_INIT_STATE.get("client")
+            if cached_client is not None and _ROBOT_INIT_STATE["available"]:
+                self.cli = cached_client
+                self.avoidance_cli = _ROBOT_INIT_STATE.get("avoidance_client")
+                self.available = True
+                return
+
+            if _ROBOT_INIT_STATE["attempted"] and not _ROBOT_INIT_STATE["available"]:
+                retry_after_s = max(0.0, _env_float("GO2_INIT_RETRY_SECONDS", 2.0))
+                elapsed_s = time.monotonic() - float(_ROBOT_INIT_STATE.get("last_failure_at") or 0.0)
+                if elapsed_s < retry_after_s:
+                    if not _ROBOT_INIT_STATE["reported_disabled"]:
+                        self._log(
+                            "⚙️ Robot control temporarily unavailable after prior "
+                            f"initialization failure: {_ROBOT_INIT_STATE['error']}"
+                        )
+                        _ROBOT_INIT_STATE["reported_disabled"] = True
+                    return
+
+                if _ROBOT_INIT_STATE["reported_disabled"]:
+                    self._log(
+                        "🔁 Retrying robot control initialization after prior failure"
+                    )
+
+            try:
+                if not _ROBOT_INIT_STATE["channel_initialized"]:
+                    # DDS is process-global. Initializing it more than once can fail when
+                    # Flask, vision, deferred actions, and nav all create Go2 helpers.
+                    self._log("🔍 Initializing ChannelFactory")
+                    if self.ifname:
+                        ChannelFactoryInitialize(0, self.ifname)
+                    else:
+                        ChannelFactoryInitialize(0)
+                    _ROBOT_INIT_STATE["channel_initialized"] = True
+
+                # --- Initialize Sport client (matches go2_sport_client.py) ---
+                self._log("🔍 Initializing SportClient")
+                self.cli = sport_client.SportClient()
+                self.cli.SetTimeout(10.0)
+                self.cli.Init()
+                self._configure_startup_motion_modes()
+                self.available = True
+                _ROBOT_INIT_STATE.update(
+                    {
+                        "attempted": True,
+                        "available": True,
+                        "error": None,
+                        "reported_disabled": False,
+                        "client": self.cli,
+                        "avoidance_client": self.avoidance_cli,
+                        "channel_initialized": True,
+                        "last_failure_at": 0.0,
+                    }
                 )
-                _ROBOT_INIT_STATE["reported_disabled"] = True
+                self._log("✅ SportClient initialized and ready")
+
+            except Exception as e:
+                _ROBOT_INIT_STATE.update(
+                    {
+                        "attempted": True,
+                        "available": False,
+                        "error": str(e),
+                        "reported_disabled": False,
+                        "client": None,
+                        "avoidance_client": None,
+                        "last_failure_at": time.monotonic(),
+                    }
+                )
+                self._log(f"❌ Failed to initialize: {e}")
+                traceback.print_exc()
+
+    def _configure_startup_motion_modes(self):
+        """Disable firmware avoidance so app-level navigation owns locomotion."""
+        if not self.cli:
             return
 
-        try:
-            # --- Initialize DDS channel (matches go2_sport_client.py) ---
-            self._log("🔍 Initializing ChannelFactory")
-            ChannelFactoryInitialize(0)
+        free_avoid = getattr(self.cli, "FreeAvoid", None)
+        if callable(free_avoid):
+            self._call("FreeAvoid", free_avoid, False)
+        else:
+            self._log("Free avoid startup disable skipped: SDK method unavailable")
 
-            # --- Initialize Sport client (matches go2_sport_client.py) ---
-            self._log("🔍 Initializing SportClient")
-            self.cli = sport_client.SportClient()
-            self.cli.SetTimeout(10.0)
-            self.cli.Init()
-            self.available = True
-            _ROBOT_INIT_STATE.update(
-                {
-                    "attempted": True,
-                    "available": True,
-                    "error": None,
-                    "reported_disabled": False,
-                }
-            )
-            self._log("✅ SportClient initialized and ready")
-
-        except Exception as e:
-            _ROBOT_INIT_STATE.update(
-                {
-                    "attempted": True,
-                    "available": False,
-                    "error": str(e),
-                    "reported_disabled": False,
-                }
-            )
-            self._log(f"❌ Failed to initialize: {e}")
-            traceback.print_exc()
+        if obstacles_avoid_client is not None:
+            try:
+                self.avoidance_cli = obstacles_avoid_client.ObstaclesAvoidClient()
+                self.avoidance_cli.SetTimeout(3.0)
+                self.avoidance_cli.Init()
+                self._call(
+                    "ObstaclesAvoid.SwitchSet",
+                    self.avoidance_cli.SwitchSet,
+                    False,
+                )
+                _code, enabled = _coerce_status(self.avoidance_cli.SwitchGet())
+                if enabled in (False, 0, "0", "false", "False"):
+                    self._log("Onboard obstacle avoidance disabled on init")
+                else:
+                    self._log(
+                        "⚠️ Onboard obstacle avoidance disable could not be verified: "
+                        f"{enabled!r}"
+                    )
+            except Exception as exc:
+                self.avoidance_cli = None
+                self._log(f"⚠️ Onboard obstacle avoidance disable failed: {exc}")
+        else:
+            self._log("Onboard obstacle avoidance service unavailable in SDK")
 
     def _log(self, msg: str):
         print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    def _log_move_command(self, vx: float, vy: float, vyaw: float):
+        if self._move_log_interval_s < 0.0:
+            return
+
+        now = time.monotonic()
+        if (
+            self._move_log_interval_s <= 0.0
+            or now - self._last_move_log_at >= self._move_log_interval_s
+        ):
+            self._last_move_log_at = now
+            self._log(f"Move (vx={vx:.3f}, vy={vy:.3f}, vyaw={vyaw:.3f})")
+
+    def _call(self, label: str, fn, *args, **kwargs):
+        ret = fn(*args, **kwargs)
+        code, _data = _coerce_status(ret)
+        if code not in (0, None):
+            self._log(f"⚠️ {label} returned {ret!r}")
+        return ret
+
+    def _prepare_locomotion(self):
+        if not self.cli:
+            return
+
+        self._call("RecoveryStand", self.cli.RecoveryStand)
+        time.sleep(_env_float("GO2_RECOVERY_STAND_SETTLE_SECONDS", 1.5))
+        self._call("BalanceStand", self.cli.BalanceStand)
+        time.sleep(_env_float("GO2_BALANCE_STAND_SETTLE_SECONDS", 0.5))
+
+    def _timed_move(
+        self,
+        vx: float,
+        vy: float = 0.0,
+        vyaw: float = 0.0,
+        duration_s: float = 1.0,
+        period_s: float | None = None,
+    ):
+        period_s = period_s or _env_float("GO2_MOVE_COMMAND_PERIOD", 0.2)
+        period_s = max(0.05, period_s)
+        iterations = max(1, math.ceil(max(0.0, duration_s) / period_s))
+
+        if self.cli:
+            for _ in range(iterations):
+                self._call("Move", self.cli.Move, vx=vx, vy=vy, vyaw=vyaw)
+                time.sleep(period_s)
+            self._call("StopMove", self.cli.StopMove)
+
+        self._log(f"Timed move (vx={vx}, vy={vy}, vyaw={vyaw}) for {duration_s}s")
 
     # ----------------------------
     # BASIC MOTIONS
@@ -173,21 +328,35 @@ class Go2Macros:
     def move(self, vx=0.0, vy=0.0, vyaw=0.0):
         """Continuous movement command. Call stop_move() to stop."""
         if self.cli:
-            self.cli.Move(vx=vx, vy=vy, vyaw=vyaw)
-        self._log(f"Move (vx={vx}, vy={vy}, vyaw={vyaw})")
+            self._call("Move", self.cli.Move, vx=vx, vy=vy, vyaw=vyaw)
+        self._log_move_command(vx, vy, vyaw)
 
-    def step_forward(self, vx=0.1, t=1.0):
-        if self.cli:
-            self.cli.Move(vx=vx, vy=0.0, vyaw=0.0)
-            time.sleep(t)
-            self.cli.StopMove()
+    def step_forward(self, vx=None, t=None):
+        vx = _env_float("GO2_STEP_FORWARD_SPEED", 0.45) if vx is None else vx
+        t = (
+            _env_float(
+                "GO2_STEP_FORWARD_DURATION_SECONDS",
+                _env_float("GO2_STEP_DURATION_SECONDS", 0.8),
+            )
+            if t is None
+            else t
+        )
+        self._prepare_locomotion()
+        self._timed_move(vx=vx, vy=0.0, vyaw=0.0, duration_s=t)
         self._log(f"Step forward vx={vx} for {t}s")
 
-    def step_backward(self, vx=-0.1, t=1.0):
-        if self.cli:
-            self.cli.Move(vx=vx, vy=0.0, vyaw=0.0)
-            time.sleep(t)
-            self.cli.StopMove()
+    def step_backward(self, vx=None, t=None):
+        vx = _env_float("GO2_STEP_BACKWARD_SPEED", -0.25) if vx is None else vx
+        t = (
+            _env_float(
+                "GO2_STEP_BACKWARD_DURATION_SECONDS",
+                _env_float("GO2_STEP_DURATION_SECONDS", 2.0),
+            )
+            if t is None
+            else t
+        )
+        self._prepare_locomotion()
+        self._timed_move(vx=vx, vy=0.0, vyaw=0.0, duration_s=t)
         self._log(f"Step backward vx={vx} for {t}s")
 
     def speed_level(self, level):
@@ -215,19 +384,33 @@ class Go2Macros:
         self._log("Content motion")
 
     def dance(self):
-        if self.cli:
+        if self.cli and _env_flag("GO2_USE_SDK_SPECIAL_MOTIONS", default=True):
             self.cli.Dance1()
-        self._log("Dance 1 motion")
+            self._log("Dance 1 motion")
+            return
+
+        self._prepare_locomotion()
+        self._timed_move(vx=0.35, vy=0.0, vyaw=0.45, duration_s=1.0)
+        self._timed_move(vx=-0.20, vy=0.0, vyaw=-0.45, duration_s=1.0)
+        self._timed_move(vx=0.30, vy=0.0, vyaw=-0.45, duration_s=0.9)
+        self._timed_move(vx=-0.20, vy=0.0, vyaw=0.45, duration_s=0.8)
+        self._log("Dance 1 motion via timed locomotion")
 
     def dance1(self):
-        if self.cli:
-            self.cli.Dance1()
-        self._log("Dance 1 motion")
+        self.dance()
 
     def dance2(self):
-        if self.cli:
+        if self.cli and _env_flag("GO2_USE_SDK_SPECIAL_MOTIONS", default=True):
             self.cli.Dance2()
-        self._log("Dance 2 motion")
+            self._log("Dance 2 motion")
+            return
+
+        self._prepare_locomotion()
+        self._timed_move(vx=0.0, vy=0.0, vyaw=0.6, duration_s=1.0)
+        self._timed_move(vx=0.0, vy=0.0, vyaw=-0.6, duration_s=1.0)
+        self._timed_move(vx=0.35, vy=0.0, vyaw=0.0, duration_s=0.9)
+        self._timed_move(vx=-0.25, vy=0.0, vyaw=0.0, duration_s=0.9)
+        self._log("Dance 2 motion via timed locomotion")
 
     def pose(self, flag):
         if self.cli:

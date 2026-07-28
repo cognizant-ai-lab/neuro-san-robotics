@@ -1,5 +1,7 @@
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -60,6 +62,27 @@ class _FakeVision:
 
     def visualize_detections(self, frame, results):
         return frame.copy()
+
+
+class _FakeVideoClient:
+    instances = []
+
+    def __init__(self):
+        self.timeout = None
+        self.initialized = False
+        _FakeVideoClient.instances.append(self)
+
+    def SetTimeout(self, timeout):
+        self.timeout = timeout
+
+    def Init(self):
+        self.initialized = True
+
+
+def _fake_package(name):
+    module = types.ModuleType(name)
+    module.__path__ = []
+    return module
 
 
 class _FakeILoc:
@@ -153,20 +176,135 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertEqual(candidate["ifname"], "eth0")
         self.assertIn("Unitree Go2 front camera", candidate["description"])
 
+    def test_normalize_v4l_device_uses_numeric_v4l2_source(self):
+        candidate = vision_core._normalize_camera_source("/dev/video4")
+
+        self.assertEqual(candidate["source"], 4)
+        self.assertEqual(candidate["backend"], getattr(vision_core.cv2, "CAP_V4L2", None))
+
+    def test_v4l2_capture_source_resolves_video_symlink(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "video4"
+            target.touch()
+            link = Path(temp_dir) / "camera-link"
+            link.symlink_to(target)
+
+            self.assertEqual(vision_core._v4l2_capture_source(str(link)), 4)
+
+    def test_unitree_camera_interface_defaults_to_eth0(self):
+        with patch.dict(vision_core.os.environ, {}, clear=True):
+            self.assertEqual(vision_core._unitree_camera_interface(), "eth0")
+
+    def test_realsense_link_detection_matches_robot_symlink_names(self):
+        link = Path(
+            "/dev/v4l/by-id/"
+            "usb-Intel_R__RealSense_TM__Depth_Camera_435i_"
+            "Intel_R__RealSense_TM__Depth_Camera_435i_253243060707-video-index0"
+        )
+
+        self.assertTrue(vision_core._is_realsense_color_link(link))
+        self.assertEqual(vision_core._realsense_color_link_sort_key(link)[0], 0)
+
+    def test_realsense_streams_try_image_endpoints_before_metadata(self):
+        links = [
+            Path(f"/dev/v4l/by-id/realsense-video-index{index}")
+            for index in range(4)
+        ]
+
+        ordered = sorted(links, key=vision_core._realsense_color_link_sort_key)
+
+        self.assertEqual(
+            [path.name for path in ordered],
+            [
+                "realsense-video-index0",
+                "realsense-video-index2",
+                "realsense-video-index1",
+                "realsense-video-index3",
+            ],
+        )
+
+    def test_realsense_sysfs_name_detection_matches_robot_card_name(self):
+        self.assertTrue(
+            vision_core._looks_like_realsense_device_name(
+                "Intel(R) RealSense(TM) Depth Ca"
+            )
+        )
+        self.assertLess(
+            vision_core._video_device_sort_key("/dev/video4"),
+            vision_core._video_device_sort_key("/dev/video12"),
+        )
+
     @patch.object(vision_core, "_discover_v4l2_devices", return_value=["/dev/video2", "/dev/video4"])
-    @patch.object(vision_core, "_unitree_camera_interface", return_value=None)
+    @patch.object(
+        vision_core,
+        "_discover_realsense_color_devices",
+        return_value=[
+            "/dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_435i-video-index0"
+        ],
+    )
     @patch.object(vision_core, "_unitree_camera_available", return_value=True)
+    @patch.object(vision_core, "_unitree_camera_interface", return_value="eth0")
     @patch.object(vision_core, "_is_jetson_platform", return_value=True)
-    def test_default_candidates_cover_jetson_v4l2_and_index_fallbacks(self, *_):
+    def test_default_candidates_cover_robot_v4l2_and_index_fallbacks(self, *_):
         candidates = vision_core.get_camera_candidates(max_indices=3)
         descriptions = [candidate["description"] for candidate in candidates]
 
-        self.assertEqual(descriptions[0], "Unitree Go2 front camera")
-        self.assertEqual(descriptions[1:3], ["Jetson CSI sensor 0", "Jetson CSI sensor 1"])
+        self.assertEqual(
+            descriptions[0],
+            "Intel RealSense color camera (usb-Intel_R__RealSense_TM__Depth_Camera_435i-video-index0)",
+        )
+        self.assertEqual(descriptions[1], "Unitree Go2 front camera via eth0")
+        self.assertEqual(descriptions[2:4], ["Jetson CSI sensor 0", "Jetson CSI sensor 1"])
+        self.assertEqual(candidates[1]["kind"], "unitree")
+        self.assertEqual(candidates[0]["backend"], getattr(vision_core.cv2, "CAP_V4L2", None))
         self.assertIn("/dev/video2", descriptions)
         self.assertIn("/dev/video4", descriptions)
         self.assertIn("camera index 0", descriptions)
         self.assertIn("camera index 2", descriptions)
+
+    @patch.object(vision_core, "_discover_realsense_color_devices", return_value=[])
+    @patch.object(vision_core, "_discover_v4l2_devices", return_value=[])
+    @patch.object(vision_core, "_unitree_camera_available", return_value=True)
+    @patch.object(vision_core, "_unitree_camera_interface", return_value="eth0")
+    @patch.object(vision_core, "_is_jetson_platform", return_value=False)
+    def test_unitree_front_camera_is_default_fallback_when_realsense_is_absent(self, *_):
+        candidates = vision_core.get_camera_candidates(max_indices=0)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["kind"], "unitree")
+        self.assertEqual(candidates[0]["description"], "Unitree Go2 front camera via eth0")
+
+    @patch.object(vision_core, "_discover_realsense_color_devices", return_value=["/dev/video4"])
+    @patch.object(vision_core, "_unitree_camera_available", return_value=True)
+    def test_strict_camera_candidates_stop_after_realsense(self, *_):
+        candidates = vision_core.get_camera_candidates(
+            max_indices=3,
+            allow_fallbacks=False,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertIn("RealSense", candidates[0]["description"])
+
+    def test_legacy_go2_camera_source_does_not_override_vision_camera(self):
+        with patch.dict(
+            vision_core.os.environ,
+            {"GO2_CAMERA_SOURCE": "unitree:eth0"},
+            clear=True,
+        ):
+            self.assertIsNone(vision_core._normalize_camera_source(None))
+
+    @patch.object(vision_core, "get_camera_candidates", return_value=[])
+    def test_strict_open_reports_missing_realsense(self, _):
+        capture, info = vision_core.open_camera(
+            verbose=False,
+            allow_fallbacks=False,
+        )
+
+        self.assertIsNone(capture)
+        self.assertEqual(
+            info["attempts"],
+            ["No Intel RealSense color camera was discovered"],
+        )
 
     def test_open_camera_falls_back_until_frame_is_available(self):
         first = _FakeCapture(opened=False)
@@ -218,6 +356,99 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertIs(capture, fake_capture)
         self.assertEqual(info["description"], "Unitree Go2 front camera via eth0")
         self.assertEqual(info["backend"], "Unitree SDK2")
+
+    def test_unitree_capture_reuses_go2_initialized_channel(self):
+        vision_core._UNITREE_CHANNEL_STATE.update({"initialized": False, "ifname": None})
+        _FakeVideoClient.instances.clear()
+
+        channel_factory = __import__("unittest").mock.MagicMock()
+        with (
+            patch.object(vision_core, "_go2_channel_already_initialized", return_value=(True, "eth0")),
+            patch.object(vision_core, "_load_unitree_video_sdk", return_value=(channel_factory, _FakeVideoClient)),
+        ):
+            capture = vision_core.UnitreeVideoCapture(ifname="eth0")
+
+        self.assertTrue(capture.isOpened())
+        channel_factory.assert_not_called()
+        self.assertEqual(vision_core._UNITREE_CHANNEL_STATE["ifname"], "eth0")
+        self.assertEqual(len(_FakeVideoClient.instances), 1)
+        self.assertEqual(_FakeVideoClient.instances[0].timeout, 3.0)
+        self.assertTrue(_FakeVideoClient.instances[0].initialized)
+
+    def test_unitree_video_sdk_prefers_robot_sdk_namespace(self):
+        preferred_channel = types.ModuleType("unitree_sdk2_python.unitree_sdk2py.core.channel")
+        preferred_video = types.ModuleType("unitree_sdk2_python.unitree_sdk2py.go2.video.video_client")
+        bare_channel = types.ModuleType("unitree_sdk2py.core.channel")
+        bare_video = types.ModuleType("unitree_sdk2py.go2.video.video_client")
+
+        def preferred_init():
+            return None
+
+        def bare_init():
+            return None
+
+        class PreferredVideoClient:
+            pass
+
+        class BareVideoClient:
+            pass
+
+        preferred_channel.ChannelFactoryInitialize = preferred_init
+        preferred_video.VideoClient = PreferredVideoClient
+        bare_channel.ChannelFactoryInitialize = bare_init
+        bare_video.VideoClient = BareVideoClient
+
+        fake_modules = {
+            "unitree_sdk2_python": _fake_package("unitree_sdk2_python"),
+            "unitree_sdk2_python.unitree_sdk2py": _fake_package("unitree_sdk2_python.unitree_sdk2py"),
+            "unitree_sdk2_python.unitree_sdk2py.core": _fake_package("unitree_sdk2_python.unitree_sdk2py.core"),
+            "unitree_sdk2_python.unitree_sdk2py.core.channel": preferred_channel,
+            "unitree_sdk2_python.unitree_sdk2py.go2": _fake_package("unitree_sdk2_python.unitree_sdk2py.go2"),
+            "unitree_sdk2_python.unitree_sdk2py.go2.video": _fake_package("unitree_sdk2_python.unitree_sdk2py.go2.video"),
+            "unitree_sdk2_python.unitree_sdk2py.go2.video.video_client": preferred_video,
+            "unitree_sdk2py": _fake_package("unitree_sdk2py"),
+            "unitree_sdk2py.core": _fake_package("unitree_sdk2py.core"),
+            "unitree_sdk2py.core.channel": bare_channel,
+            "unitree_sdk2py.go2": _fake_package("unitree_sdk2py.go2"),
+            "unitree_sdk2py.go2.video": _fake_package("unitree_sdk2py.go2.video"),
+            "unitree_sdk2py.go2.video.video_client": bare_video,
+        }
+
+        with patch.dict(sys.modules, fake_modules):
+            channel_init, video_client = vision_core._load_unitree_video_sdk()
+
+        self.assertIs(channel_init, preferred_init)
+        self.assertIs(video_client, PreferredVideoClient)
+
+    def test_go2_channel_reuse_requires_same_sdk_module(self):
+        from coded_tools.unigo2 import go2_macros
+
+        def go2_init():
+            return None
+
+        def matching_init():
+            return None
+
+        def different_init():
+            return None
+
+        go2_init.__module__ = "same.sdk.channel"
+        matching_init.__module__ = "same.sdk.channel"
+        different_init.__module__ = "other.sdk.channel"
+
+        with (
+            patch.object(go2_macros, "IFNAME", "eth0"),
+            patch.object(go2_macros, "ChannelFactoryInitialize", go2_init),
+            patch.dict(go2_macros._ROBOT_INIT_STATE, {"channel_initialized": True}),
+        ):
+            self.assertEqual(
+                vision_core._go2_channel_already_initialized(matching_init),
+                (True, "eth0"),
+            )
+            self.assertEqual(
+                vision_core._go2_channel_already_initialized(different_init),
+                (False, None),
+            )
 
     def test_detect_camera_snapshot_reuses_headless_detection_flow(self):
         cap = _FakeCapture(
@@ -274,6 +505,38 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertEqual(len(faces), 1)
         self.assertEqual(faces[0]["name"], "Alice")
         self.assertEqual(faces[0]["bbox"], [11, 22, 33, 44])
+        self.assertNotIn("refresh_database", vision.deepface.find_kwargs)
+
+    def test_recognize_faces_can_force_database_refresh_via_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_image = Path(temp_dir) / "Alice" / "alice.jpg"
+            db_image.parent.mkdir(parents=True, exist_ok=True)
+            db_image.write_bytes(b"fake")
+
+            vision = vision_core.VisionCore(
+                face_db_path=temp_dir,
+                initialize_yolo=False,
+            )
+            vision._face_detection_enabled = True
+            vision.deepface = _FakeDeepFace(
+                result=_FakeDataFrame(
+                    {
+                        "identity": str(db_image),
+                        "distance": 0.18,
+                    }
+                ),
+                extracted_faces=[
+                    {
+                        "facial_area": {"x": 11, "y": 22, "w": 33, "h": 44},
+                        "confidence": 0.99,
+                    }
+                ],
+            )
+
+            with patch.dict(os.environ, {"VISION_FACE_REFRESH_DATABASE_ON_LOOKUP": "1"}):
+                faces = vision.recognize_faces(np.zeros((96, 96, 3), dtype=np.uint8))
+
+        self.assertEqual(len(faces), 1)
         self.assertTrue(vision.deepface.find_kwargs["refresh_database"])
 
     def test_recognize_faces_does_not_guess_when_no_face_is_detected(self):

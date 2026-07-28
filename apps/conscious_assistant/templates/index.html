@@ -42,12 +42,12 @@
             </div>
             <div id="observation-panel" class="observation-panel">
                 <div class="observation-meta">
-                    <span class="observation-title">Recent Views</span>
-                    <span class="observation-timestamp">Client-side history</span>
+                    <span class="observation-title">Latest View</span>
+                    <span class="observation-timestamp">Live snapshot</span>
                 </div>
                 <div id="observation-history" class="observation-history">
                     <div id="observation-placeholder" class="observation-placeholder">
-                        Timestamped camera captures will appear here.
+                        The latest camera capture will appear here.
                     </div>
                 </div>
             </div>
@@ -73,9 +73,9 @@
         // var socket = io.connect('http://' + document.domain + ':' + location.port + '/chat');
         const socket = io("/chat", {
             path: "/socket.io",
-            transports: ["websocket", "polling"],
+            transports: ["polling"],
+            upgrade: false,
         });
-        const MAX_OBSERVATION_HISTORY = 20;
         const MAX_CHAT_HISTORY = 120;
         const MAX_THOUGHT_HISTORY = 120;
         var thoughtsInitialized = false;
@@ -83,6 +83,7 @@
         var isRecording = false;
         var micPermissionGranted = false;
         var isProcessing = false;  // Track when robot is processing a response
+        var isSpeaking = false;  // Track when robot audio playback is active
         
         // Whisper (OpenAI) speech recognition variables
         var mediaRecorder = null;
@@ -146,6 +147,11 @@
 
         // Start recording with MediaRecorder (OpenAI Whisper)
         async function startWhisperRecording() {
+            if (isVoiceInputLocked()) {
+                console.log('Cannot record while robot is processing or speaking');
+                return;
+            }
+
             if (isRecording || isTranscribing) {
                 console.log('Already recording or transcribing, ignoring start request');
                 return;
@@ -275,7 +281,11 @@
                         
                         if (text) {
                             // Show user's text in chat immediately (before sending to server)
-                            chatElement.innerHTML += '<div class="user-msg">' + text.replace(/\n/g, '<br>') + '</div>';
+                            var userMessage = document.createElement('div');
+                            userMessage.className = 'user-msg';
+                            userMessage.innerHTML = escapeHtml(text).replace(/\n/g, '<br>');
+                            chatElement.appendChild(userMessage);
+                            pruneEntries(chatElement, '.speech-msg, .user-msg', MAX_CHAT_HISTORY);
                             chatElement.scrollTop = chatElement.scrollHeight;
                             
                             document.getElementById('user-input').value = text;
@@ -286,6 +296,10 @@
                                 // Send to server with skip_echo flag since we already displayed the text
                                 var userInput = document.getElementById('user-input').value.trim();
                                 if (userInput) {
+                                    if (!socket.connected) {
+                                        alert('Connection to CAIL-E is not ready yet. Refresh the page and try again.');
+                                        return;
+                                    }
                                     socket.emit('user_input', {data: userInput, skip_echo: true});
                                     document.getElementById('user-input').value = '';
                                     setInputDisabled(true);
@@ -344,8 +358,8 @@
                 spacebarPressed = true;
                 spacebarStartTime = Date.now();
                 
-                if (isProcessing) {
-                    console.log('Cannot record while robot is processing');
+                if (isVoiceInputLocked()) {
+                    console.log('Cannot record while robot is processing or speaking');
                     return;
                 }
                 
@@ -380,28 +394,60 @@
         });
 
         socket.on('connect', function() {
-            console.log('Websocket connected!');
+            console.log('Socket.IO connected');
         });
 
-        // Functions to enable/disable input controls during robot processing
-        function setInputDisabled(disabled) {
-            isProcessing = disabled;
+        socket.on('connect_error', function(error) {
+            console.error('Socket.IO connection failed:', error);
+            setInputDisabled(false);
+        });
+
+        // Functions to enable/disable input controls during robot processing/speech
+        function isTextInputLocked() {
+            return isProcessing;
+        }
+
+        function isVoiceInputLocked() {
+            return isSpeaking;
+        }
+
+        function refreshInputControls() {
+            var textDisabled = isTextInputLocked();
+            var voiceDisabled = isVoiceInputLocked();
             var textarea = document.getElementById('user-input');
             var sendButton = document.getElementById('send-button');
             var floatingMicButton = document.getElementById('floating-mic-button');
-            
-            textarea.disabled = disabled;
-            sendButton.disabled = disabled;
-            
-            if (disabled) {
+
+            textarea.disabled = textDisabled;
+            sendButton.disabled = textDisabled;
+
+            if (textDisabled) {
                 textarea.classList.add('disabled');
                 sendButton.classList.add('disabled');
-                floatingMicButton.classList.add('disabled');
             } else {
                 textarea.classList.remove('disabled');
                 sendButton.classList.remove('disabled');
+            }
+
+            if (voiceDisabled) {
+                floatingMicButton.classList.add('disabled');
+            } else {
                 floatingMicButton.classList.remove('disabled');
             }
+        }
+
+        function setProcessingState(active) {
+            isProcessing = active;
+            refreshInputControls();
+        }
+
+        function setSpeakingState(active) {
+            isSpeaking = active;
+            refreshInputControls();
+        }
+
+        function setInputDisabled(disabled) {
+            setProcessingState(disabled);
         }
 
         function escapeHtml(text) {
@@ -448,17 +494,36 @@
 
             pruneEntries(element, selector, maxEntries);
             element.scrollTop = element.scrollHeight;
+            requestAnimationFrame(function() {
+                element.scrollTop = element.scrollHeight;
+            });
         }
 
         // Listen for processing state changes from server
-        socket.on('processing_started', function() {
+        socket.on('processing_started', function(data) {
+            if (data && data.interactive === false) {
+                return;
+            }
             console.log('Robot is processing...');
-            setInputDisabled(true);
+            setProcessingState(true);
         });
 
-        socket.on('processing_complete', function() {
+        socket.on('processing_complete', function(data) {
+            if (data && data.interactive === false) {
+                return;
+            }
             console.log('Robot finished processing');
-            setInputDisabled(false);
+            setProcessingState(false);
+        });
+
+        socket.on('speech_started', function() {
+            console.log('Robot is speaking...');
+            setSpeakingState(true);
+        });
+
+        socket.on('speech_complete', function() {
+            console.log('Robot finished speaking');
+            setSpeakingState(false);
         });
 
         socket.on('update_thoughts', function(data) {
@@ -516,15 +581,7 @@
             entry.appendChild(meta);
             entry.appendChild(image);
             entry.appendChild(caption);
-            history.appendChild(entry);
-
-            var entries = history.querySelectorAll('.observation-entry');
-            while (entries.length > MAX_OBSERVATION_HISTORY) {
-                history.removeChild(entries[0]);
-                entries = history.querySelectorAll('.observation-entry');
-            }
-
-            history.scrollTop = history.scrollHeight;
+            history.replaceChildren(entry);
         });
 
         socket.on('update_speech', function(data) {
@@ -589,12 +646,16 @@
         });
 
         function sendUserInput() {
-            if (isProcessing) {
+            if (isTextInputLocked()) {
                 console.log('Cannot send input while robot is processing');
                 return;
             }
             var userInput = document.getElementById('user-input').value.trim();
             if (userInput) {
+                if (!socket.connected) {
+                    alert('Connection to CAIL-E is not ready yet. Refresh the page and try again.');
+                    return;
+                }
                 socket.emit('user_input', {data: userInput});
                 document.getElementById('user-input').value = '';
                 // Disable input immediately after sending
@@ -626,8 +687,8 @@
 
         document.getElementById('floating-mic-button').addEventListener('mousedown', async function(e) {
             e.preventDefault();
-            if (isProcessing) {
-                console.log('Cannot record while robot is processing');
+            if (isVoiceInputLocked()) {
+                console.log('Cannot record while robot is processing or speaking');
                 return;
             }
             if (!isRecording && !isTranscribing) {
@@ -656,8 +717,8 @@
 
         document.getElementById('floating-mic-button').addEventListener('touchstart', async function(e) {
             e.preventDefault();
-            if (isProcessing) {
-                console.log('Cannot record while robot is processing');
+            if (isVoiceInputLocked()) {
+                console.log('Cannot record while robot is processing or speaking');
                 return;
             }
             if (!isRecording && !isTranscribing) {

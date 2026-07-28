@@ -1,4 +1,7 @@
+import json
+import os
 import unittest
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import numpy as np
@@ -7,8 +10,10 @@ from apps.conscious_assistant.scene_observer import SceneObserver
 from apps.conscious_assistant.scene_observer import REPO_ROOT
 from apps.conscious_assistant.scene_observer import _resolve_repo_relative_path
 from apps.conscious_assistant.scene_observer import build_scene_input
+from apps.conscious_assistant.scene_observer import observation_signature
 from apps.conscious_assistant.scene_observer import summarize_observed_entities
 from apps.conscious_assistant.scene_observer import summarize_observed_objects
+from apps.conscious_assistant import scene_observer_service
 
 
 class _VisionCtorResult:
@@ -18,6 +23,57 @@ class _VisionCtorResult:
 
 
 class SceneObserverTests(unittest.TestCase):
+    def test_scene_observer_prefers_realsense_but_allows_robot_camera_fallback(self):
+        capture = MagicMock()
+        capture.isOpened.return_value = True
+        with patch.dict(
+            os.environ,
+            {"GO2_CAMERA_SOURCE": "unitree:eth0"},
+            clear=True,
+        ):
+            observer = SceneObserver(enabled=True)
+
+        with patch(
+            "apps.conscious_assistant.scene_observer.open_camera",
+            return_value=(
+                capture,
+                {"description": "Intel RealSense color camera", "backend": "V4L2"},
+            ),
+        ) as camera:
+            self.assertTrue(observer._ensure_camera())
+
+        self.assertIsNone(observer.camera_source)
+        camera.assert_called_once_with(
+            camera_source=None,
+            verbose=False,
+            allow_fallbacks=True,
+        )
+
+    def test_observer_service_forwards_successful_capture_as_agent_event(self):
+        observation = {
+            "summary": "Recognized: Alice",
+            "objects": ["Alice", "chair"],
+            "faces": [{"name": "Alice"}],
+        }
+        observer = MagicMock(enabled=True)
+        observer.observe.return_value = observation
+        service = scene_observer_service.SceneObserverService(observer=observer)
+
+        with (
+            patch.object(scene_observer_service, "publish_observation", return_value=True) as publish,
+            patch.object(scene_observer_service, "queue_agent_event") as queue_event,
+        ):
+            captured = service.capture_once()
+
+        publish.assert_called_once_with(observation)
+        event_text = queue_event.call_args.args[0]
+        self.assertEqual(queue_event.call_args.kwargs, {"source": "observation"})
+        self.assertEqual(
+            json.loads(event_text),
+            {"summary": "Recognized: Alice", "entities": ["Alice", "chair"]},
+        )
+        self.assertTrue(captured)
+
     def test_resolve_repo_relative_path_uses_repo_copy_when_present(self):
         resolved = _resolve_repo_relative_path("yolov8n.pt")
 
@@ -43,6 +99,19 @@ class SceneObserverTests(unittest.TestCase):
             "\n[04:20:00pm] user: [Silence]\n[04:20:00pm] saw: person\n[04:20:00pm] saw: chair",
         )
 
+    def test_observation_signature_returns_stable_object_tuple(self):
+        signature = observation_signature(
+            {
+                "objects": ["Alice", "chair", "Alice", " "],
+                "summary": "Objects: 1 chair(s) | Recognized: Alice",
+            }
+        )
+
+        self.assertEqual(signature, ("Alice", "chair", "Alice"))
+
+    def test_observation_signature_handles_missing_observation(self):
+        self.assertEqual(observation_signature(None), ())
+
     def test_summarize_observed_entities_prefers_known_face_names_over_person(self):
         results = {
             "objects": [
@@ -60,7 +129,7 @@ class SceneObserverTests(unittest.TestCase):
         )
 
     def test_ensure_vision_uses_shared_defaults_helper(self):
-        observer = SceneObserver()
+        observer = SceneObserver(enabled=True)
         captured_kwargs = {}
 
         def fake_defaults(**kwargs):
@@ -76,9 +145,14 @@ class SceneObserverTests(unittest.TestCase):
                 "half_precision": False,
             }
 
-        with patch("apps.conscious_assistant.scene_observer.get_default_vision_core_settings", side_effect=fake_defaults):
-            with patch("apps.conscious_assistant.scene_observer.VisionCore", side_effect=lambda **kwargs: _VisionCtorResult(**kwargs)) as ctor:
-                vision = observer._ensure_vision()
+        with (
+            patch("apps.conscious_assistant.scene_observer.cv2", object()),
+            patch("apps.conscious_assistant.scene_observer.detect_camera_snapshot", object()),
+            patch("apps.conscious_assistant.scene_observer.open_camera", object()),
+            patch("apps.conscious_assistant.scene_observer.get_default_vision_core_settings", side_effect=fake_defaults),
+            patch("apps.conscious_assistant.scene_observer.VisionCore", side_effect=lambda **kwargs: _VisionCtorResult(**kwargs)) as ctor,
+        ):
+            vision = observer._ensure_vision()
 
         self.assertIsNotNone(vision)
         self.assertEqual(
@@ -92,7 +166,7 @@ class SceneObserverTests(unittest.TestCase):
         ctor.assert_called_once()
 
     def test_observe_returns_latest_image_payload_from_shared_snapshot_helper(self):
-        observer = SceneObserver(public_image_url="/api/observation/latest.jpg")
+        observer = SceneObserver(public_image_url="/api/observation/latest.jpg", enabled=True)
         frame = np.ones((16, 16, 3), dtype=np.uint8)
         vision = object()
         results = {
@@ -133,7 +207,7 @@ class SceneObserverTests(unittest.TestCase):
         self.assertTrue(observation["timestamp"].startswith("["))
 
     def test_observe_releases_capture_when_shared_snapshot_fails(self):
-        observer = SceneObserver()
+        observer = SceneObserver(enabled=True)
 
         class _FakeCapture:
             def __init__(self):
@@ -156,7 +230,7 @@ class SceneObserverTests(unittest.TestCase):
         self.assertIsNone(observer._capture)
 
     def test_initialize_eagerly_loads_vision_backend(self):
-        observer = SceneObserver()
+        observer = SceneObserver(enabled=True)
 
         with patch.object(observer, "_ensure_vision", return_value=object()) as ensure_vision:
             with patch.object(observer, "_ensure_camera") as ensure_camera:

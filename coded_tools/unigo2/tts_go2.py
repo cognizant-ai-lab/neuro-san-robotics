@@ -27,6 +27,7 @@ Environment Variables:
 - GO2_OPENAI_VOICE: OpenAI voice (default: "coral")
 - GO2_OPENAI_MODEL: OpenAI model (default: "gpt-4o-mini-tts")
 - GO2_OPENAI_VOLUME_GAIN: Volume amplification factor (default: "2.0" for 2x louder)
+- GO2_OPENAI_TIMEOUT_SECONDS: Max seconds to wait for an OpenAI TTS request
 """
 
 import argparse
@@ -85,6 +86,20 @@ DEFAULT_VOLUME_PERCENT = int(os.environ.get("GO2_TTS_VOLUME", "100"))
 
 # Lock file for TTS to prevent audio overlap
 TTS_LOCK_FILE = "/tmp/go2_tts.lock"
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse float environment variables with a safe fallback."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        return default
+
+
+OPENAI_TIMEOUT_SECONDS = _env_float("GO2_OPENAI_TIMEOUT_SECONDS", 20.0)
 
 
 # ---------------------------------------------------------------------
@@ -154,7 +169,7 @@ def _openai_say_streaming(
     except ImportError:
         raise RuntimeError("openai package not installed. Run: pip install openai")
 
-    client = OpenAI()
+    client = OpenAI(timeout=OPENAI_TIMEOUT_SECONDS, max_retries=0)
     system = platform.system()
     device = alsa_device or _RESOLVED_ALSA_DEVICE
 
@@ -292,7 +307,7 @@ async def _openai_say_streaming_async(
     except ImportError:
         raise RuntimeError("openai package not installed. Run: pip install openai")
 
-    client = AsyncOpenAI()
+    client = AsyncOpenAI(timeout=OPENAI_TIMEOUT_SECONDS, max_retries=0)
     system = platform.system()
     device = alsa_device or _RESOLVED_ALSA_DEVICE
 
@@ -424,6 +439,17 @@ def _should_use_openai() -> bool:
     if TTS_ENGINE == "auto" and _is_openai_available():
         return True
     return False
+
+
+def _should_runtime_fallback_to_offline_tts() -> bool:
+    """
+    Return whether runtime OpenAI failures should fall back to offline TTS.
+
+    In `auto` mode we prefer OpenAI when it is healthy, but we do not want a
+    timeout or transient network issue to silently drop speech. In explicit
+    `openai` mode we preserve the failure so the caller can notice it.
+    """
+    return TTS_ENGINE == "auto"
 
 
 # ---------------------------------------------------------------------
@@ -1016,12 +1042,20 @@ def say_streaming(
                 logging.info("TTS: Using OpenAI streaming")
                 if on_chunk_start:
                     on_chunk_start(clean_text, 0, 1)
-                _openai_say_streaming(
-                    clean_text,
-                    volume=volume,
-                    alsa_device=alsa_device,
-                )
-                return
+                try:
+                    _openai_say_streaming(
+                        clean_text,
+                        volume=volume,
+                        alsa_device=alsa_device,
+                    )
+                    return
+                except Exception as exc:
+                    if not _should_runtime_fallback_to_offline_tts():
+                        raise
+                    logging.warning(
+                        "OpenAI TTS failed (%s), falling back to offline TTS",
+                        exc,
+                    )
 
             # Fall back to chunked Piper/espeak
             chunks = split_into_chunks(clean_text, max_chunk_size)
@@ -1172,11 +1206,26 @@ def say(
             try:
                 # Use OpenAI if available
                 if _should_use_openai():
-                    _openai_say_streaming(
-                        clean_text,
-                        volume=volume,
-                        alsa_device=alsa_device,
-                    )
+                    try:
+                        _openai_say_streaming(
+                            clean_text,
+                            volume=volume,
+                            alsa_device=alsa_device,
+                        )
+                    except Exception as exc:
+                        if not _should_runtime_fallback_to_offline_tts():
+                            raise
+                        logging.warning(
+                            "OpenAI TTS failed (%s), falling back to offline TTS",
+                            exc,
+                        )
+                        _say_single_chunk(
+                            clean_text,
+                            rate=rate,
+                            volume=volume,
+                            voice=voice,
+                            alsa_device=alsa_device,
+                        )
                 else:
                     _say_single_chunk(
                         clean_text,
@@ -1214,11 +1263,28 @@ async def say_async(
         return
 
     if _should_use_openai():
-        await _openai_say_streaming_async(
-            clean_text,
-            volume=volume,
-            alsa_device=alsa_device,
-        )
+        try:
+            await _openai_say_streaming_async(
+                clean_text,
+                volume=volume,
+                alsa_device=alsa_device,
+            )
+        except Exception as exc:
+            if not _should_runtime_fallback_to_offline_tts():
+                raise
+            logging.warning(
+                "OpenAI async TTS failed (%s), falling back to offline TTS",
+                exc,
+            )
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: _say_single_chunk(
+                    clean_text,
+                    volume=volume,
+                    alsa_device=alsa_device,
+                ),
+            )
     else:
         # Fall back to sync version in thread pool
         loop = asyncio.get_event_loop()

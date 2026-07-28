@@ -12,56 +12,10 @@
 
 from typing import Any
 from typing import Dict
-from typing import List
-from typing import Tuple
 import logging
-import threading
+import asyncio
 from neuro_san.interfaces.coded_tool import CodedTool
 from coded_tools.unigo2.go2_macros import Go2Macros
-
-
-# Global deferred action queue - actions are queued here and executed later
-# This allows speech to complete before robot performs physical actions
-_deferred_actions: List[Tuple[str, Dict[str, Any]]] = []
-_deferred_actions_lock = threading.Lock()
-
-
-def queue_deferred_action(action: str, args: Dict[str, Any]) -> None:
-    """Queue an action to be executed later."""
-    with _deferred_actions_lock:
-        _deferred_actions.append((action, args))
-        logging.info("Queued deferred action: %s", action)
-
-
-def execute_deferred_actions() -> List[str]:
-    """
-    Execute all queued deferred actions and clear the queue.
-
-    Returns a list of results from each action execution.
-    This should be called after speech completes to ensure proper ordering.
-    """
-    with _deferred_actions_lock:
-        actions_to_execute = list(_deferred_actions)
-        _deferred_actions.clear()
-
-    if not actions_to_execute:
-        return []
-
-    results = []
-    go2 = Go2Macros()
-    if not getattr(go2, "available", False):
-        logging.warning("Robot control unavailable; skipping %d deferred actions", len(actions_to_execute))
-        return [
-            f"Skipped action '{action}' because robot control is unavailable"
-            for action, _args in actions_to_execute
-        ]
-
-    for action, args in actions_to_execute:
-        logging.info("Executing deferred action: %s", action)
-        result = _execute_single_action(go2, action, args)
-        results.append(result)
-
-    return results
 
 
 def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) -> str:
@@ -73,6 +27,7 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
         go2.damp()
         logging.info("===== GO2 damp...")
     elif action == "balance_stand":
+        go2.stand_up()
         go2.balance_stand()
         logging.info("===== GO2 balance stand...")
     elif action == "stop_move":
@@ -82,15 +37,18 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
         go2.stand_up()
         logging.info("===== GO2 standing up...")
     elif action == "lie_down":
+        go2.stand_up()
         go2.lie_down()
         logging.info("===== GO2 lying down...")
     elif action == "recovery_stand":
         go2.recovery_stand()
         logging.info("===== GO2 recovery stand...")
     elif action == "sit":
+        go2.stand_up()
         go2.sit()
         logging.info("===== GO2 sitting...")
     elif action == "sit_rise":
+        go2.stand_up()
         go2.sit()
         logging.info("===== GO2 sitting...")
     elif action == "rise_sit":
@@ -119,13 +77,13 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
         go2.move(vx=vx, vy=vy, vyaw=vyaw)
         logging.info("===== GO2 move (vx=%s, vy=%s, vyaw=%s)...", vx, vy, vyaw)
     elif action == "step_forward":
-        vx = args.get("vx", 0.3)
-        t = args.get("t", 3.0)
+        vx = args.get("vx")
+        t = args.get("t")
         go2.step_forward(vx=vx, t=t)
         logging.info("===== GO2 stepping forward (vx=%s, t=%s)...", vx, t)
     elif action == "step_backward":
-        vx = args.get("vx", -0.3)
-        t = args.get("t", 3.0)
+        vx = args.get("vx")
+        t = args.get("t")
         go2.step_backward(vx=vx, t=t)
         logging.info("===== GO2 stepping backward (vx=%s, t=%s)...", vx, t)
     elif action == "speed_level":
@@ -135,84 +93,107 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
 
     # Special motions / Expressions
     elif action in ("shake", "hello"):
+        go2.stand_up()
         go2.shake()
         logging.info("===== GO2 shaking/hello...")
     elif action == "stretch":
+        go2.stand_up()
         go2.stretch()
         logging.info("===== GO2 stretching...")
     elif action == "content":
+        go2.stand_up()
         go2.content()
         logging.info("===== GO2 content...")
     elif action in ("dance", "dance1"):
+        go2.stand_up()
         go2.dance1()
         logging.info("===== GO2 dance 1...")
     elif action == "dance2":
+        go2.stand_up()
         go2.dance2()
         logging.info("===== GO2 dance 2...")
     elif action == "pose":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.pose(flag)
         logging.info("===== GO2 pose (flag=%s)...", flag)
     elif action == "scrape":
+        go2.stand_up()
         go2.scrape()
         logging.info("===== GO2 scrape...")
     elif action in ("heart_pose", "heart"):
+        go2.stand_up()
         go2.heart_pose()
         logging.info("===== GO2 heart pose...")
 
     # Flips and acrobatics
     elif action == "front_flip":
+        go2.stand_up()
         go2.front_flip()
         logging.info("===== GO2 front flip...")
     elif action == "front_jump":
+        go2.stand_up()
         go2.front_jump()
         logging.info("===== GO2 front jump...")
     elif action == "front_pounce":
+        go2.stand_up()
         go2.front_pounce()
         logging.info("===== GO2 front pounce...")
     elif action == "left_flip":
+        go2.stand_up()
         go2.left_flip()
         logging.info("===== GO2 left flip...")
     elif action in ("backflip", "back_flip"):
+        go2.stand_up()
         go2.backflip()
         logging.info("===== GO2 backflip...")
     elif action == "hand_stand":
+        go2.stand_up()
         flag = args.get("flag", True)
         go2.hand_stand(flag)
         logging.info("===== GO2 hand stand (flag=%s)...", flag)
 
     # Gait and walking modes
     elif action == "static_walk":
+        go2.stand_up()
         go2.static_walk()
         logging.info("===== GO2 static walk...")
     elif action == "trot_run":
+        go2.stand_up()
         go2.trot_run()
         logging.info("===== GO2 trot run...")
     elif action == "free_walk":
+        go2.stand_up()
         go2.free_walk()
         logging.info("===== GO2 free walk...")
     elif action == "free_bound":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.free_bound(flag)
         logging.info("===== GO2 free bound (flag=%s)...", flag)
     elif action == "free_jump":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.free_jump(flag)
         logging.info("===== GO2 free jump (flag=%s)...", flag)
     elif action == "free_avoid":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.free_avoid(flag)
         logging.info("===== GO2 free avoid (flag=%s)...", flag)
     elif action == "classic_walk":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.classic_walk(flag)
         logging.info("===== GO2 classic walk (flag=%s)...", flag)
     elif action == "walk_upright":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.walk_upright(flag)
         logging.info("===== GO2 walk upright (flag=%s)...", flag)
     elif action == "cross_step":
         flag = args.get("flag", True)
+        go2.stand_up()
         go2.cross_step(flag)
         logging.info("===== GO2 cross step (flag=%s)...", flag)
 
@@ -247,10 +228,9 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
 class RobotMacros(CodedTool):
     """
     CodedTool implementation of robot macros.
-    
-    Actions are queued for deferred execution to ensure speech completes
-    before physical robot actions are performed. Call execute_deferred_actions()
-    after speech to execute the queued actions.
+
+    Event-invoked agents execute actions in the native Neuro SAN process. A
+    Flask-owned deferred queue would be isolated in a different process.
     """
 
     async def async_invoke(self, args: Dict[str, Any], sly_data: Dict[str, Any]) -> Any:
@@ -261,7 +241,7 @@ class RobotMacros(CodedTool):
 
         action_lower = action.lower()
 
-        # Validate the action is known before queueing
+        # Validate the action before touching robot control.
         known_actions = {
             "damp", "balance_stand", "stop_move", "stand_up", "lie_down",
             "recovery_stand", "sit", "rise_sit", "euler", "look_left",
@@ -278,7 +258,11 @@ class RobotMacros(CodedTool):
         if action_lower not in known_actions:
             return f"Unknown action: {action}"
 
-        # Queue the action for deferred execution (after speech completes)
-        queue_deferred_action(action_lower, dict(args))
+        return await asyncio.to_thread(self._execute, action_lower, dict(args))
 
-        return f"Action '{action}' queued for execution after speech"
+    @staticmethod
+    def _execute(action: str, args: Dict[str, Any]) -> str:
+        go2 = Go2Macros()
+        if not getattr(go2, "available", False):
+            return f"Skipped action '{action}' because robot control is unavailable"
+        return _execute_single_action(go2, action, args)

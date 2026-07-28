@@ -5,108 +5,23 @@ import os
 import queue
 import random
 import re
-import site
+import signal
 import sys
 import tempfile
 import threading
-import time
-from datetime import datetime
 
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+CODED_TOOLS_ROOT = REPO_ROOT / "coded_tools"
+if str(CODED_TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODED_TOOLS_ROOT))
 
-
-def _should_enable_vision_runtime_prime() -> bool:
-    raw_value = os.environ.get("VISION_SKIP_EARLY_IMPORT")
-    if raw_value is None:
-        return sys.platform.startswith("linux")
-    return raw_value.strip().lower() not in {"1", "true", "yes", "on"}
-
-
-def _candidate_libgomp_paths() -> list[Path]:
-    candidates = []
-
-    override_path = os.environ.get("VISION_LIBGOMP_PATH")
-    if override_path:
-        candidates.append(Path(override_path))
-
-    for site_dir in site.getsitepackages():
-        candidates.append(Path(site_dir) / "torch" / "lib" / "libgomp.so.1")
-
-    common_system_paths = [
-        "/usr/lib/aarch64-linux-gnu/libgomp.so.1",
-        "/usr/lib/x86_64-linux-gnu/libgomp.so.1",
-        "/lib/aarch64-linux-gnu/libgomp.so.1",
-        "/lib/x86_64-linux-gnu/libgomp.so.1",
-    ]
-    candidates.extend(Path(path) for path in common_system_paths)
-
-    unique_candidates = []
-    seen = set()
-    for candidate in candidates:
-        candidate_text = str(candidate)
-        if candidate_text in seen:
-            continue
-        seen.add(candidate_text)
-        unique_candidates.append(candidate)
-
-    return unique_candidates
-
-
-def _env_float(name: str, default: float) -> float:
-    """Parse float environment variables with a safe fallback."""
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    try:
-        return float(raw_value)
-    except ValueError:
-        return default
-
-
-def _prime_vision_runtime_imports() -> None:
-    """
-    Prime YOLO dependencies before Flask imports on Linux.
-
-    On some Jetson/ARM environments, importing torch/ultralytics later in the
-    Flask startup path can fail with `libgomp.so.1: cannot allocate memory in
-    static TLS block`, even though the same environment works in a simpler
-    standalone process. Preloading libgomp and importing ultralytics early keeps
-    the app closer to that standalone import order.
-    """
-    if not _should_enable_vision_runtime_prime():
-        return
-
-    try:
-        import ctypes
-
-        rtld_global = getattr(ctypes, "RTLD_GLOBAL", None)
-        for candidate in _candidate_libgomp_paths():
-            if not candidate.exists():
-                continue
-            try:
-                if rtld_global is None:
-                    ctypes.CDLL(str(candidate))
-                else:
-                    ctypes.CDLL(str(candidate), mode=rtld_global)
-                print(f"[VisionCore] Preloaded libgomp: {candidate}")
-                break
-            except OSError:
-                continue
-    except Exception as exc:
-        print(f"[VisionCore] libgomp preload skipped: {exc}")
-
-    try:
-        from ultralytics import YOLO as _EarlyYOLO  # noqa: F401
-        print("[VisionCore] Early ultralytics import succeeded for Flask startup")
-    except Exception as exc:
-        print(f"[VisionCore] Early ultralytics import failed during Flask startup: {exc}")
-
-
-_prime_vision_runtime_imports()
+logging.basicConfig(
+    level=getattr(logging, os.environ.get("CONSCIOUS_LOG_LEVEL", "INFO").upper(), logging.INFO)
+)
 
 # pylint: disable=import-error
 from flask import Flask
@@ -116,19 +31,22 @@ from flask import request
 from flask import send_file
 from flask_socketio import SocketIO
 
-from apps.conscious_assistant.conscious_assistant import conscious_thinker
-from apps.conscious_assistant.conscious_assistant import set_up_conscious_assistant
+from apps.conscious_assistant.agent_runtime import AgentRuntime
 from apps.conscious_assistant.scene_observer import SceneObserver
-from apps.conscious_assistant.scene_observer import build_scene_input
-from apps.conscious_assistant.conscious_assistant import tear_down_conscious_assistant
+from coded_tools.unigo2.agent_events import dispatch_agent_event
 
 
-# SSL certificate paths
-BASE_DIR = Path(__file__).resolve().parent
-CERT = BASE_DIR / "certs" / "cert.pem"
-KEY  = BASE_DIR / "certs" / "key.pem"
+# TLS certificate paths used by both Flask and the native runtime callback.
+TLS_CERT = Path("/home/unitree/certs/cert.pem")
+TLS_KEY = Path("/home/unitree/certs/key.pem")
 
-# Import TTS function for hardwired speech
+
+def _ui_event_endpoint() -> str:
+    """Return the local callback URL using the same transport as Flask."""
+    scheme = "https" if TLS_CERT.exists() and TLS_KEY.exists() else "http"
+    return f"{scheme}://127.0.0.1:5001/api/agent-output"
+
+# Import TTS function used when the agent emits a say: block.
 try:
     from coded_tools.unigo2.tts_go2 import say as tts_say
     TTS_AVAILABLE = True
@@ -137,101 +55,84 @@ except ImportError:
     TTS_AVAILABLE = False
     tts_say = None
 
-# Import robot macros for motion during acknowledgment
-try:
-    from coded_tools.unigo2.go2_macros import Go2Macros
-    ROBOT_AVAILABLE = True
-except ImportError:
-    logging.warning("Go2Macros not available - robot motions disabled")
-    ROBOT_AVAILABLE = False
-    Go2Macros = None
-
-# Import deferred action executor for robot actions after speech
-try:
-    from coded_tools.unigo2.robot_macros import execute_deferred_actions
-    DEFERRED_ACTIONS_AVAILABLE = True
-except ImportError:
-    logging.warning("execute_deferred_actions not available - deferred robot actions disabled")
-    DEFERRED_ACTIONS_AVAILABLE = False
-    execute_deferred_actions = None
-
-THINKING_INTERVAL = _env_float("CONSCIOUS_THINKING_INTERVAL_SECONDS", 10.0)
-
-# Robot motion configuration
-ROBOT_MOTION_PROBABILITY = 0.5  # 50% chance of performing robot motion
-ALLOWED_ROBOT_ACTIONS = [
-    "sit_rise",
-    "step_backward",
-    "step_forward",
-    "stretch",
-    "content"
-]
-
-# Acknowledgment phrases to speak immediately when user input is received
 ACKNOWLEDGMENT_PHRASES = [
     "Got it",
-    "I'm on it...",
-    "Let me check",
-    "One moment...",
-    "Sure thing",
     "Okay",
-    "Understood",
-    "Working on it...",
-    "Let me see...",
-    "Give me a second",
-    "Right away",
     "On it",
-    "You got it",
-    "Absolutely...",
-    "Let me think...",
-    "Hold on...",
-    "Just a sec...",
-    "Coming right up...",
-    "Perfect",
-    "I hear you",
-    "Hmm...",
-    "Uh-huh",
-    "Oh - okay",
-    "Alright",
-    "Thinking...",
-    "Give me a sec...",
-    "Um...",
-    "Let me check with my agents...",
-    "One minute please...",
-    "I'm a bit hungry",
-    "Haven't had my coffee yet today",
-    "Just a moment please...",
-    "Let me grab my thinking cap...",
-    "My LLM is warming up...",
-    "Loading neural pathways...",
-    "Let me consult my artificial brain for a sec...",
-    "I'm just a dog, but ok.",
+    "Sure",
+    "Right away",
+    "Coming right up",
+    "Let me check",
+    "One moment",
+    "Give me a second",
+    "Let me think",
+    "Hold on",
     "Beep boop beep",
-    "Bark",
-    "Woof woof",
-    "Bark bark",
 ]
 
 os.environ.setdefault("AGENT_MANIFEST_FILE", str(REPO_ROOT / "registries" / "manifest.hocon"))
 os.environ.setdefault("AGENT_TOOL_PATH", str(REPO_ROOT / "coded_tools"))
 os.environ.setdefault("VISION_FACE_DB_PATH", str(REPO_ROOT / "face_database"))
+# Flask owns this local callback; an inherited value can use the wrong scheme.
+os.environ["CONSCIOUS_UI_EVENT_ENDPOINT"] = _ui_event_endpoint()
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
-thread_started = False  # pylint: disable=invalid-name
-
-user_input_queue = queue.Queue()
+shutdown_event = threading.Event()
 
 # Speech queue for TTS - allows non-blocking speech processing
 speech_queue = queue.Queue()
-scene_observer = SceneObserver()
-os.environ.setdefault("VISION_LATEST_IMAGE_PATH", str(scene_observer.latest_image_path()))
+latest_observation = None
+scene_image_path = SceneObserver(enabled=False).latest_image_path()
+os.environ.setdefault("VISION_LATEST_IMAGE_PATH", str(scene_image_path))
 os.environ.setdefault("VISION_LATEST_IMAGE_MAX_AGE_SECONDS", "0")
+agent_runtime = AgentRuntime()
+
+
+@app.before_request
+def log_request_start():
+    """Log incoming requests before route handlers can block."""
+    logging.info("HTTP request started: %s %s", request.method, request.path)
+
+
+@app.route("/api/health")
+def health():
+    """Lightweight readiness probe for browser/server connectivity checks."""
+    return jsonify({"ok": True})
+
+
+@app.route("/api/agent-output", methods=["POST"])
+def receive_agent_output():
+    """Receive explicit event-agent output from the local Neuro SAN process."""
+    expected_token = os.environ.get("CONSCIOUS_UI_EVENT_TOKEN", "")
+    if expected_token and request.headers.get("X-Conscious-Bridge-Token") != expected_token:
+        return jsonify({"error": "unauthorized"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "expected JSON object"}), 400
+
+    thought = payload.get("thought", "")
+    say = payload.get("say", "")
+    observation = payload.get("observation")
+    if not isinstance(thought, str) or not isinstance(say, str):
+        return jsonify({"error": "thought and say must be strings"}), 400
+
+    if thought.strip():
+        socketio.emit("update_thoughts", {"data": thought.strip()}, namespace="/chat")
+    if say.strip():
+        enqueue_speech(say.strip(), emit_to_ui=True)
+    if isinstance(observation, dict):
+        global latest_observation  # pylint: disable=global-statement
+        latest_observation = observation
+        emit_observation_update(observation)
+
+    return jsonify({"ok": True})
 
 
 def emit_observation_update(observation=None, sid=None):
     """Send the latest observation image and caption data to clients."""
-    payload = observation or scene_observer.latest_observation()
+    payload = observation or latest_observation
     if not payload:
         return
 
@@ -269,48 +170,6 @@ def sanitize_speech_text(text: str) -> str:
     return '\n'.join(clean_lines).strip()
 
 
-def normalize_agent_output(output) -> str:
-    """Normalize agent responses so the Flask loop can parse them safely."""
-    if output is None:
-        return ""
-
-    if isinstance(output, str):
-        return output
-
-    if isinstance(output, dict):
-        candidate = output.get("last_chat_response") or output.get("data") or ""
-        normalized = candidate if isinstance(candidate, str) else str(candidate)
-        logging.warning(
-            "Conscious thinker returned dict output; normalized to string (%d chars)",
-            len(normalized),
-        )
-        return normalized
-
-    if isinstance(output, (list, tuple)):
-        parts = []
-        for item in output:
-            if item is None:
-                continue
-            text = str(item).strip()
-            if text:
-                parts.append(text)
-        normalized = "\n".join(parts)
-        logging.warning(
-            "Conscious thinker returned %s output; normalized to string (%d chars)",
-            type(output).__name__,
-            len(normalized),
-        )
-        return normalized
-
-    normalized = str(output)
-    logging.warning(
-        "Conscious thinker returned unexpected %s output; normalized to string (%d chars)",
-        type(output).__name__,
-        len(normalized),
-    )
-    return normalized
-
-
 def speak_text_streaming(
     text: str,
     on_speech_complete=None,
@@ -335,10 +194,8 @@ def speak_text_streaming(
         return
 
     try:
-        logging.info("Speaking: %s", clean_text[:50])
-        # Speak without chunking for better prosody
+        logging.info("Speaking TTS utterance (%d chars)", len(clean_text))
         tts_say(clean_text, chunked=False)
-        # Call callback AFTER speech completes to update UI
         if on_speech_complete:
             on_speech_complete(clean_text)
     except Exception:
@@ -347,246 +204,118 @@ def speak_text_streaming(
 
 def speak_text(text: str) -> None:
     """
-    Speak the given text using TTS.
+    Speak an agent-authored say: payload using TTS.
 
-    This is the hardwired TTS function that gets called automatically
-    whenever a 'say:' block is detected, ensuring speech always happens
-    regardless of whether the agent's tool call worked.
-
-    Speaks full text at once for better prosody.
+    Speaks the full text at once for better prosody.
     """
     speak_text_streaming(text, on_speech_complete=None)
 
 
-def perform_random_robot_motion() -> None:
-    """
-    Perform 1 or 2 random robot motions from the allowed actions list.
-
-    This function is called during user input acknowledgment to make the robot
-    appear more engaged and responsive while the agent is processing.
-    """
-    if not ROBOT_AVAILABLE or Go2Macros is None:
-        logging.info("Robot not available, skipping motion")
-        return
-
-    # Check probability - only perform motion 50% of the time (or as configured)
-    if random.random() > ROBOT_MOTION_PROBABILITY:
-        logging.info("Skipping robot motion this time (probability check)")
-        return
-
+def emit_speech_state(active: bool) -> None:
+    """Notify the client that robot speech playback started or stopped."""
+    event_name = "speech_started" if active else "speech_complete"
     try:
-        go2 = Go2Macros()
-        if not getattr(go2, "available", False):
-            logging.info("Robot motion unavailable, skipping")
-            return
-
-        # Randomly select 1 action
-        action = random.choice(ALLOWED_ROBOT_ACTIONS)
-
-        logging.info("Performing robot motion: %s", action)
-
-        if action == "look_left":
-            go2.look_left()
-        elif action == "look_right":
-            go2.look_right()
-        elif action == "sit":
-            go2.sit()
-        elif action == "rise_sit":
-            go2.rise_sit()
-        elif action == "step_backward":
-            go2.step_backward()
-        elif action == "step_forward":
-            go2.step_forward()
-        elif action == "stretch":
-            go2.stretch()
-
-        logging.info("Robot motion completed")
-
-    except Exception as e:
-        logging.exception("Robot motion failed")
+        socketio.emit(
+            event_name,
+            {"active": active},
+            namespace="/chat",
+        )
+    except Exception:
+        logging.exception("Failed to emit %s", event_name)
 
 
 def speech_worker():
     """Background worker that processes the speech queue."""
     while True:
         got_item = False
+        speech_active = False
         try:
-            text = speech_queue.get(timeout=1.0)
+            job = speech_queue.get(timeout=1.0)
             got_item = True
-            if text is None:
+            if job is None:
                 break
-            logging.info("Speech worker: starting TTS for text: %s...", text[:50] if text else "")
-            speak_text(text)
-            logging.info("Speech worker: TTS completed")
+            if isinstance(job, dict):
+                text = str(job.get("text", ""))
+                emit_to_ui = bool(job.get("emit_to_ui", False))
+                ui_text = str(job.get("ui_text", text))
+            else:
+                text = str(job)
+                emit_to_ui = False
+                ui_text = text
+
+            if text:
+                speech_active = True
+                emit_speech_state(True)
+
+            logging.info("Speech worker: starting TTS job (%d chars)", len(text) if text else 0)
+            if text:
+                speak_text(text)
+                logging.info("Speech worker: TTS completed")
+                if emit_to_ui:
+                    socketio.emit(
+                        "update_speech",
+                        {"data": ui_text},
+                        namespace="/chat",
+                    )
+            else:
+                logging.info("Speech worker: skipped empty TTS job")
         except queue.Empty:
+            if shutdown_event.is_set():
+                break
             continue
         except Exception:
             logging.exception("Speech worker error")
         finally:
+            if speech_active:
+                emit_speech_state(False)
             if got_item:
                 speech_queue.task_done()
                 logging.info("Speech worker: task_done() called")
 
 
+def enqueue_speech(
+    text: str,
+    *,
+    emit_to_ui: bool = False,
+    ui_text: str | None = None,
+) -> None:
+    """Queue speech playback, optionally syncing the UI to speech start."""
+    if shutdown_event.is_set():
+        logging.debug("Skipping speech enqueue during shutdown")
+        return
+
+    speech_queue.put(
+        {
+            "text": text,
+            "emit_to_ui": emit_to_ui,
+            "ui_text": text if ui_text is None else ui_text,
+        }
+    )
+
+
 # Start speech worker thread
 speech_thread = threading.Thread(target=speech_worker, daemon=True)
 speech_thread.start()
-
-conscious_session, conscious_thread = set_up_conscious_assistant()
-
-
-def conscious_thinking_process():
-    """Main permanent agent-calling loop."""
-    with app.app_context():  # Manually push the application context
-        global conscious_thread  # pylint: disable=global-statement
-        thoughts = None  # Start with no initial thought - wait for user input
-        while True:
-            processing_started = False
-            try:
-                timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
-                # Wait up to the configured interval for user input
-                user_input = user_input_queue.get(timeout=THINKING_INTERVAL)
-                if user_input == "exit":
-                    break
-                thoughts = f"\n{timestamp} user: " + user_input
-                socketio.emit("processing_started", namespace="/chat")
-                processing_started = True
-
-                # Speak acknowledgment immediately to fill the gap
-                acknowledgment = random.choice(ACKNOWLEDGMENT_PHRASES)
-                logging.info("Speaking acknowledgment: %s", acknowledgment)
-                speech_queue.put(acknowledgment)
-                # Emit to UI as well
-                socketio.emit(
-                    "update_speech",
-                    {"data": acknowledgment},
-                    namespace="/chat",
-                )
-
-                # Perform robot motion during the waiting time (50% chance)
-                # This happens while the speech is playing, filling the gap
-                perform_random_robot_motion()
-
-                # Wait for acknowledgment to finish speaking
-                speech_queue.join()
-                logging.info("Acknowledgment speech complete, proceeding with agent")
-
-            except queue.Empty:
-                observation = scene_observer.observe()
-                if observation is not None:
-                    emit_observation_update(observation)
-
-                scene_input = None
-                if observation and observation.get("objects"):
-                    scene_input = build_scene_input(timestamp, observation["objects"])
-                    logging.info("Scene observer detected objects: %s", ", ".join(observation["objects"]))
-
-                if scene_input is None and thoughts is None:
-                    continue
-
-                thoughts = scene_input or (f"\n{timestamp} user: " + "[Silence]")
-                # Emit processing_started for silence-triggered processing
-                socketio.emit("processing_started", namespace="/chat")
-                processing_started = True
-
-            try:
-                raw_output, conscious_thread = conscious_thinker(
-                    conscious_session,
-                    conscious_thread,
-                    thoughts,
-                )
-                thoughts = normalize_agent_output(raw_output)
-                print(thoughts)
-
-                if not thoughts:
-                    logging.info("Conscious thinker returned no output")
-                    continue
-
-                # Separating thoughts and speeches
-                thoughts_to_emit = []
-                speeches_to_emit = []
-
-                # --- 1.  Slice the input into blocks ------------------------------------
-                pattern = re.compile(
-                    r"(?m)^(thought|say):[ \t]*(.*?)(?=^\s*(?:thought|say):|\Z)",
-                    re.S,
-                )
-
-                for kind, raw in pattern.findall(thoughts):
-                    content = raw.lstrip()
-                    if not content:
-                        continue
-
-                    if kind == "thought":
-                        timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
-                        thoughts_to_emit.append(f"{timestamp} thought: {content}")
-                    else:
-                        speeches_to_emit.append(content)
-
-                # --- 2.  Emit the blocks ------------------------------------------------
-                if thoughts_to_emit:
-                    socketio.emit(
-                        "update_thoughts",
-                        {"data": "\n".join(thoughts_to_emit)},
-                        namespace="/chat",
-                    )
-
-                if speeches_to_emit:
-                    logging.info("Starting TTS for %d speech blocks", len(speeches_to_emit))
-
-                    def emit_speech_to_ui(speech_text):
-                        """Callback after speech completes to update UI."""
-                        logging.debug("Emitting speech to UI: %s...", speech_text[:30])
-                        socketio.emit(
-                            "update_speech",
-                            {"data": speech_text},
-                            namespace="/chat",
-                        )
-
-                    for speech_text in speeches_to_emit:
-                        speak_text_streaming(speech_text, on_speech_complete=emit_speech_to_ui)
-
-                    logging.info("TTS complete")
-
-                # Execute any deferred robot actions AFTER speech and UI update
-                if DEFERRED_ACTIONS_AVAILABLE and execute_deferred_actions is not None:
-                    try:
-                        results = execute_deferred_actions()
-                        if results:
-                            logging.info("Executed %d deferred robot actions", len(results))
-                    except Exception:
-                        logging.exception("Failed to execute deferred robot actions")
-            except Exception:
-                logging.exception("Conscious thinking loop iteration failed")
-            finally:
-                if processing_started:
-                    socketio.emit("processing_complete", namespace="/chat")
-
-
 @socketio.on("connect", namespace="/chat")
 def on_connect():
-    """Start background task on connect."""
-    global thread_started  # pylint: disable=global-statement
+    """Send the retained observation without creating a second control loop."""
+    logging.info("Socket client connected: %s", request.sid)
     emit_observation_update(sid=request.sid)
-    if not thread_started:
-        thread_started = True
-        # let socketio manage the green-thread
-        socketio.start_background_task(conscious_thinking_process)
 
 
 @app.route("/")
 def index():
     """Return the html."""
+    logging.info("Serving conscious assistant UI")
     return render_template("index.html")
 
 
 @app.route("/api/observation/latest.jpg")
 def latest_observation_image():
     """Return the latest retained observation image, if available."""
-    image_path = scene_observer.latest_image_path()
-    if not image_path.exists():
+    if not scene_image_path.exists():
         return "", 404
-    return send_file(image_path, mimetype="image/jpeg", conditional=False, max_age=0)
+    return send_file(scene_image_path, mimetype="image/jpeg", conditional=False, max_age=0)
 
 
 @app.route("/api/transcribe", methods=["POST"])
@@ -677,12 +406,23 @@ def handle_user_input(json, *_):
         - skip_echo: Optional boolean to skip echoing back to chat (used when
                      client has already displayed the text, e.g., from voice input)
     """
-    user_input = json["data"]
+    user_input = str(json.get("data", "")).strip()
+    if not user_input:
+        return
     skip_echo = json.get("skip_echo", False)
-    user_input_queue.put(user_input)
     # Only emit update_user_input if client hasn't already displayed it
     if not skip_echo:
         socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
+    socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
+    enqueue_speech(random.choice(ACKNOWLEDGMENT_PHRASES), emit_to_ui=True)
+
+    def submit() -> None:
+        accepted = dispatch_agent_event(user_input, source="user")
+        if not accepted:
+            logging.error("User event was not accepted by the Neuro SAN runtime")
+        socketio.emit("processing_complete", {"interactive": True}, namespace="/chat")
+
+    socketio.start_background_task(submit)
 
 
 cleaned_up = False
@@ -696,8 +436,13 @@ def cleanup(from_request=False):
     cleaned_up = True
 
     print("Bye!")
-    scene_observer.cleanup()
-    tear_down_conscious_assistant(conscious_session)
+    shutdown_event.set()
+    speech_queue.put(None)
+
+    if threading.current_thread() is not speech_thread:
+        speech_thread.join(timeout=3.0)
+
+    agent_runtime.stop()
 
     if from_request:
         try:
@@ -729,31 +474,37 @@ def add_header(response):
 # Register the cleanup function
 atexit.register(cleanup)
 
+
+def handle_shutdown_signal(signum, _frame):
+    """Make terminal interrupts leave the Werkzeug loop and run bounded cleanup."""
+    logging.info("Received signal %s; shutting down", signum)
+    raise KeyboardInterrupt
+
 if __name__ == "__main__":
     import ssl
 
-    CERT = "/home/unitree/certs/cert.pem"
-    KEY = "/home/unitree/certs/key.pem"
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
-    if scene_observer.available():
-        logging.info("Pre-initializing scene observer on the main thread")
-        if scene_observer.initialize():
-            logging.info("Scene observer vision backend is ready")
-        else:
-            logging.warning("Scene observer vision backend did not initialize during startup")
+    try:
+        agent_runtime.start()
 
-    ssl_ctx = None
-    if os.path.exists(CERT) and os.path.exists(KEY):
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_ctx.load_cert_chain(CERT, KEY)
+        ssl_ctx = None
+        if TLS_CERT.exists() and TLS_KEY.exists():
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_ctx.load_cert_chain(TLS_CERT, TLS_KEY)
 
-    socketio.run(
-        app,
-        host="0.0.0.0",
-        port=5001,
-        debug=False,
-        ssl_context=ssl_ctx,
-        allow_unsafe_werkzeug=True,
-        log_output=True,
-        use_reloader=False
-    )
+        socketio.run(
+            app,
+            host="0.0.0.0",
+            port=5001,
+            debug=False,
+            ssl_context=ssl_ctx,
+            allow_unsafe_werkzeug=True,
+            log_output=True,
+            use_reloader=False
+        )
+    except KeyboardInterrupt:
+        logging.info("Terminal interrupt received")
+    finally:
+        cleanup()

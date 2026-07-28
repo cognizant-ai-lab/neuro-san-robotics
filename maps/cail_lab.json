@@ -1,0 +1,524 @@
+{
+  "name": "535 Mission - Suite 21 Red Marker Graph",
+  "version": "1.1",
+  "coordinate_system": {
+    "origin": "SW corner of marked floor-plan content bbox",
+    "x_axis": "East (up on source image/PDF)",
+    "y_axis": "North (left on source image/PDF)",
+    "units": "meters",
+    "floor_dimensions_m": {
+      "east_west": 26.58,
+      "north_south": 43.76
+    },
+    "source_image_size_px": {
+      "width": 3804,
+      "height": 2479
+    },
+    "source_floor_bbox_px": {
+      "left": 119,
+      "top": 100,
+      "right": 3713,
+      "bottom": 2283
+    },
+    "scale_m_per_px": 0.01217524,
+    "notes": "Coordinates derived from red dot centers on the annotated PNG. Source image/PDF orientation matches the sample note: Up=East, Left=North. A uniform scale is used; east_west is anchored to 22.0m from the sample map, giving north_south=36.22m for this wider floor-plan crop. Runtime calibration: scaled map distances by 1.208116 so Risto's desk to Wellness Room is 13.0 ft; charging/Risto startup heading is 26.0 deg."
+  },
+  "floor_boundary": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      26.58,
+      0.0
+    ],
+    [
+      26.58,
+      43.76
+    ],
+    [
+      0.0,
+      43.76
+    ]
+  ],
+  "nodes": [
+    {
+      "name": "kitchen_entrance",
+      "x": 6.79,
+      "y": 5.58,
+      "description": "Kitchen entrance, red marker 0 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "aliases": [
+        "kitchen"
+      ],
+      "arrival_tolerance_m": 0.65,
+      "pass_through_tolerance_m": 0.75,
+      "source_pixel": {
+        "x": 3305.0,
+        "y": 1725.0
+      }
+    },
+    {
+      "name": "charging_station",
+      "x": 2.85,
+      "y": 13.57,
+      "description": "Charging station now located at Risto's desk, red marker 7 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 2599.0,
+        "y": 2049.0
+      },
+      "heading_degrees": 26.0
+    },
+    {
+      "name": "shrushtis_desk",
+      "x": 6.79,
+      "y": 18.97,
+      "description": "Shrushti's desk, red marker 2 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "aliases": [
+        "Shrushti desk",
+        "Shushti's desk",
+        "Shushti desk",
+        "Srushti's desk",
+        "Srushti desk",
+        "Srishti's desk",
+        "Srishti desk",
+        "Shush desk",
+        "Shush this desk",
+        "Shushdi desk",
+        "Shushdi Fest"
+      ],
+      "source_pixel": {
+        "x": 2155.5,
+        "y": 1725.0
+      }
+    },
+    {
+      "name": "ai_hall_of_fame",
+      "x": 9.41,
+      "y": 18.97,
+      "description": "AI hall of fame, red marker 3 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 2155.5,
+        "y": 1510.0
+      }
+    },
+    {
+      "name": "entrance",
+      "x": 9.41,
+      "y": 27.27,
+      "description": "Entrance, red marker 4 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 1473.0,
+        "y": 1510.0
+      }
+    },
+    {
+      "name": "legacy_marker_5",
+      "x": 6.86,
+      "y": 27.27,
+      "description": "Legacy marker 5, former Roberto's desk location from the earlier 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 1473.0,
+        "y": 1719.5
+      }
+    },
+    {
+      "name": "wellness_room",
+      "x": 6.79,
+      "y": 14.0,
+      "description": "Wellness Room, red marker 6 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "arrival_tolerance_m": 0.5,
+      "pass_through_tolerance_m": 0.75,
+      "arrival_landmarks": [
+        {
+          "type": "wall",
+          "approach_from": [
+            "ristos_desk",
+            "charging_station"
+          ],
+          "max_pose_error_m": 1.0,
+          "max_lateral_error_m": 0.5,
+          "max_detection_distance_m": 0.55,
+          "min_span_m": 0.3
+        }
+      ],
+      "source_pixel": {
+        "x": 2562.5,
+        "y": 1725.0
+      }
+    },
+    {
+      "name": "ristos_desk",
+      "x": 2.85,
+      "y": 13.57,
+      "description": "Risto's desk, red marker 7 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 2599.0,
+        "y": 2049.0
+      },
+      "heading_degrees": 26.0
+    },
+    {
+      "name": "jamies_desk",
+      "x": 6.79,
+      "y": 7.89,
+      "description": "Jamie's desk, red marker 8 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 3065.0,
+        "y": 1725.0
+      }
+    },
+    {
+      "name": "oliviers_desk",
+      "x": 2.88,
+      "y": 7.89,
+      "description": "Olivier's desk, red marker 9 from annotated 535 Mission map",
+      "tags": [
+        "waypoint",
+        "red_marker"
+      ],
+      "source_pixel": {
+        "x": 3065.0,
+        "y": 2046.5
+      }
+    },
+    {
+      "name": "coffee_station", "x": 10.34, "y": 2.59,
+      "description": "Coffee station, marker A from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point a", "marker a", "waypoint a"],
+      "source_pixel": {"x": 3500, "y": 1434}
+    },
+    {
+      "name": "dishwasher", "x": 13.22, "y": 2.45,
+      "description": "Dishwasher, marker B from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point b", "marker b", "waypoint b"],
+      "source_pixel": {"x": 3512, "y": 1197}
+    },
+    {
+      "name": "ping_pong_table", "x": 17.12, "y": 7.88,
+      "description": "Ping pong table, marker C from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point c", "marker c", "waypoint c"],
+      "source_pixel": {"x": 3066, "y": 877}
+    },
+    {
+      "name": "immersive_room", "x": 22.37, "y": 18.52,
+      "description": "Immersive room, marker D from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point d", "marker d", "waypoint d"],
+      "source_pixel": {"x": 2192, "y": 446}
+    },
+    {
+      "name": "lobby", "x": 20.98, "y": 26.38,
+      "description": "Lobby, marker E from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point e", "marker e", "waypoint e"],
+      "source_pixel": {"x": 1546, "y": 560}
+    },
+    {
+      "name": "lobby_entrance", "x": 17.53, "y": 25.95,
+      "description": "Lobby entrance, marker F from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point f", "marker f", "waypoint f"],
+      "source_pixel": {"x": 1582, "y": 843}
+    },
+    {
+      "name": "patent_wall", "x": 21.95, "y": 29.32,
+      "description": "Patent wall, marker G from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point g", "marker g", "waypoint g"],
+      "source_pixel": {"x": 1305, "y": 480}
+    },
+    {
+      "name": "big_conference_room", "x": 20.08, "y": 36.44,
+      "description": "Big conference room, marker H from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point h", "marker h", "waypoint h"],
+      "source_pixel": {"x": 720, "y": 634}
+    },
+    {
+      "name": "studio", "x": 21.85, "y": 35.24,
+      "description": "Studio, marker I from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point i", "marker i", "waypoint i"],
+      "source_pixel": {"x": 819, "y": 488}
+    },
+    {
+      "name": "small_conference_room", "x": 18.43, "y": 39.03,
+      "description": "Small conference room, marker J from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point j", "marker j", "waypoint j"],
+      "source_pixel": {"x": 507, "y": 769}
+    },
+    {
+      "name": "middle_office", "x": 12.82, "y": 38.88,
+      "description": "Middle office, marker K from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point k", "marker k", "waypoint k"],
+      "source_pixel": {"x": 520, "y": 1230}
+    },
+    {
+      "name": "side_office", "x": 7.93, "y": 39.03,
+      "description": "Side office, marker L from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point l", "marker l", "waypoint l"],
+      "source_pixel": {"x": 507, "y": 1632}
+    },
+    {
+      "name": "gathering_area", "x": 5.82, "y": 37.51,
+      "description": "Gathering area, marker M from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point m", "marker m", "waypoint m"],
+      "source_pixel": {"x": 632, "y": 1805}
+    },
+    {
+      "name": "printer", "x": 6.21, "y": 37.48,
+      "description": "Printer, marker N from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point n", "marker n", "waypoint n"],
+      "source_pixel": {"x": 635, "y": 1773}
+    },
+    {
+      "name": "robertos_desk", "x": 7.40, "y": 29.38,
+      "description": "Roberto's desk, marker O from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["Roberto desk", "point o", "marker o", "waypoint o"],
+      "source_pixel": {"x": 1300, "y": 1675}
+    },
+    {
+      "name": "mens_room", "x": 9.47, "y": 30.96,
+      "description": "Mens room, marker P from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point p", "marker p", "waypoint p"],
+      "source_pixel": {"x": 1170, "y": 1505}
+    },
+    {
+      "name": "ladies_room", "x": 17.15, "y": 18.23,
+      "description": "Ladies room, marker Q from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point q", "marker q", "waypoint q"],
+      "source_pixel": {"x": 2216, "y": 874}
+    }
+  ],
+  "edges": [
+    {
+      "from": "charging_station",
+      "to": "ristos_desk",
+      "distance": 0.0,
+      "traversable": true,
+      "description": "charging station is colocated with Risto's desk"
+    },
+    {
+      "from": "shrushtis_desk",
+      "to": "ai_hall_of_fame",
+      "distance": 2.62,
+      "traversable": true,
+      "description": "annotated edge from Shrushti's desk to AI hall of fame"
+    },
+    {
+      "from": "ai_hall_of_fame",
+      "to": "entrance",
+      "distance": 8.3,
+      "traversable": true,
+      "description": "annotated edge from AI hall of fame to entrance"
+    },
+    {
+      "from": "entrance",
+      "to": "legacy_marker_5",
+      "distance": 2.55,
+      "traversable": true,
+      "description": "annotated edge from entrance to Roberto's desk"
+    },
+    {
+      "from": "shrushtis_desk",
+      "to": "wellness_room",
+      "distance": 4.97,
+      "traversable": true,
+      "description": "annotated edge from Shrushti's desk to Wellness Room"
+    },
+    {
+      "from": "wellness_room",
+      "to": "ristos_desk",
+      "distance": 3.96,
+      "traversable": true,
+      "description": "annotated edge from Wellness Room to Risto's desk"
+    },
+    {
+      "from": "wellness_room",
+      "to": "jamies_desk",
+      "distance": 6.11,
+      "traversable": true,
+      "description": "annotated edge from Wellness Room to Jamie's desk"
+    },
+    {
+      "from": "jamies_desk",
+      "to": "oliviers_desk",
+      "distance": 3.91,
+      "traversable": true,
+      "description": "annotated edge from Jamie's desk to Olivier's desk"
+    },
+    {
+      "from": "jamies_desk",
+      "to": "kitchen_entrance",
+      "distance": 2.31,
+      "traversable": true,
+      "description": "annotated edge from Jamie's desk to kitchen entrance"
+    },
+    {
+      "from": "studio", "to": "big_conference_room", "distance": 2.14, "traversable": true,
+      "description": "marked corridor link I to H"
+    },
+    {
+      "from": "big_conference_room", "to": "small_conference_room", "distance": 3.07, "traversable": true,
+      "description": "marked corridor link H to J"
+    },
+    {
+      "from": "small_conference_room", "to": "middle_office", "distance": 5.61, "traversable": true,
+      "description": "marked corridor link J to K"
+    },
+    {
+      "from": "middle_office", "to": "side_office", "distance": 4.89, "traversable": true,
+      "description": "marked corridor link K to L"
+    },
+    {
+      "from": "side_office", "to": "printer", "distance": 2.32, "traversable": true,
+      "description": "marked corridor link L to N"
+    },
+    {
+      "from": "printer", "to": "gathering_area", "distance": 0.39, "traversable": true,
+      "description": "marked corridor link N to M"
+    },
+    {
+      "from": "printer", "to": "robertos_desk", "distance": 8.19, "traversable": true,
+      "description": "marked corridor link N to O"
+    },
+    {
+      "from": "robertos_desk", "to": "mens_room", "distance": 2.60, "traversable": true,
+      "description": "marked corridor link O to P"
+    },
+    {
+      "from": "mens_room", "to": "entrance", "distance": 3.69, "traversable": true,
+      "description": "marked corridor link P to entrance"
+    },
+    {
+      "from": "studio", "to": "patent_wall", "distance": 5.92, "traversable": true,
+      "description": "marked corridor link I to G"
+    },
+    {
+      "from": "patent_wall", "to": "lobby", "distance": 3.10, "traversable": true,
+      "description": "marked corridor link G to E"
+    },
+    {
+      "from": "lobby", "to": "lobby_entrance", "distance": 3.48, "traversable": true,
+      "description": "marked corridor link E to F"
+    },
+    {
+      "from": "lobby_entrance", "to": "ladies_room", "distance": 7.73, "traversable": true,
+      "description": "marked corridor link F to Q"
+    },
+    {
+      "from": "ladies_room", "to": "immersive_room", "distance": 5.23, "traversable": true,
+      "description": "marked corridor link Q to D"
+    },
+    {
+      "from": "ladies_room", "to": "ping_pong_table", "distance": 10.35, "traversable": true,
+      "description": "marked corridor link Q to C"
+    },
+    {
+      "from": "ping_pong_table", "to": "dishwasher", "distance": 6.69, "traversable": true,
+      "description": "marked corridor link C to B"
+    },
+    {
+      "from": "dishwasher", "to": "coffee_station", "distance": 2.88, "traversable": true,
+      "description": "marked corridor link B to A"
+    },
+    {
+      "from": "coffee_station", "to": "kitchen_entrance", "distance": 4.64, "traversable": true,
+      "description": "marked corridor link A to kitchen entrance"
+    }
+  ],
+  "exclusion_zones": [
+    {
+      "name": "glass_enclosure_21_002_21_018",
+      "type": "polygon",
+      "reason": "Glass enclosure around 21-002 and 21-018 - robot cannot detect transparent barriers",
+      "tags": ["transparent_wall", "glass_enclosure", "no_bot_zone"],
+      "points": [
+        [
+          7.65,
+          24.01
+        ],
+        [
+          7.97,
+          21.02
+        ],
+        [
+          2.28,
+          20.2
+        ],
+        [
+          1.86,
+          22.98
+        ]
+      ],
+      "source_pixels": [
+        {
+          "x": 1741,
+          "y": 1655
+        },
+        {
+          "x": 1986,
+          "y": 1628
+        },
+        {
+          "x": 2054,
+          "y": 2095
+        },
+        {
+          "x": 1826,
+          "y": 2130
+        }
+      ],
+      "buffer_m": 0.0
+    }
+  ],
+  "transparent_barriers": [
+    {
+      "name": "glass_enclosure_21_002_21_018",
+      "material": "glass",
+      "navigation_policy": "do_not_cross; use the perimeter marker graph"
+    },
+    {
+      "name": "conference_rooms",
+      "areas": ["21-007", "21-CRC-01", "21-CRC-02", "21-CRC-03"],
+      "material": "matted_glass",
+      "navigation_policy": "treat room perimeters as transparent barriers; route through marked corridor waypoints and doors only"
+    },
+    {
+      "name": "side_offices",
+      "areas": ["21-003", "21-004", "21-005", "21-006", "21-008", "21-009", "21-010", "21-011", "21-013", "21-014", "21-017", "21-018"],
+      "material": "matted_glass",
+      "navigation_policy": "treat office perimeters as transparent barriers; route through marked corridor waypoints and doors only"
+    }
+  ]
+}

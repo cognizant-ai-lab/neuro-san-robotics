@@ -15,6 +15,7 @@ Performance optimizations:
 - IoU-based NMS for better accuracy
 """
 
+import importlib
 import os
 import platform
 import time
@@ -122,19 +123,24 @@ def _load_unitree_video_sdk():
     """Load the Unitree camera client from whichever package layout is installed."""
     import_errors = []
 
-    try:
-        from unitree_sdk2py.core.channel import ChannelFactoryInitialize
-        from unitree_sdk2py.go2.video.video_client import VideoClient
-        return ChannelFactoryInitialize, VideoClient
-    except Exception as exc:
-        import_errors.append(exc)
+    sdk_layouts = [
+        (
+            "unitree_sdk2_python.unitree_sdk2py.core.channel",
+            "unitree_sdk2_python.unitree_sdk2py.go2.video.video_client",
+        ),
+        (
+            "unitree_sdk2py.core.channel",
+            "unitree_sdk2py.go2.video.video_client",
+        ),
+    ]
 
-    try:
-        from unitree_sdk2_python.unitree_sdk2py.core.channel import ChannelFactoryInitialize
-        from unitree_sdk2_python.unitree_sdk2py.go2.video.video_client import VideoClient
-        return ChannelFactoryInitialize, VideoClient
-    except Exception as exc:
-        import_errors.append(exc)
+    for channel_module_name, video_module_name in sdk_layouts:
+        try:
+            channel_module = importlib.import_module(channel_module_name)
+            video_module = importlib.import_module(video_module_name)
+            return channel_module.ChannelFactoryInitialize, video_module.VideoClient
+        except Exception as exc:
+            import_errors.append(exc)
 
     error_messages = ", ".join(str(exc) for exc in import_errors if str(exc))
     raise ImportError(
@@ -149,8 +155,10 @@ def _unitree_camera_interface(default_ifname: Optional[str] = None) -> Optional[
         default_ifname
         or os.environ.get("VISION_CAMERA_INTERFACE")
         or os.environ.get("GO2_CAMERA_INTERFACE")
+        or os.environ.get("GO2_NETWORK_INTERFACE")
         or os.environ.get("CYCLONEDDS_NETWORK_INTERFACE")
         or os.environ.get("IFNAME")
+        or "eth0"
     )
 
 
@@ -161,6 +169,28 @@ def _unitree_camera_available() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _go2_channel_already_initialized(channel_factory_initialize=None) -> tuple[bool, Optional[str]]:
+    """Detect DDS initialization done by Go2Macros in the same process."""
+    try:
+        from coded_tools.unigo2 import go2_macros
+    except Exception:
+        return False, None
+
+    state = getattr(go2_macros, "_ROBOT_INIT_STATE", {})
+    if not state.get("channel_initialized"):
+        return False, None
+
+    go2_channel_init = getattr(go2_macros, "ChannelFactoryInitialize", None)
+    if channel_factory_initialize is not None and go2_channel_init is not None:
+        if (
+            getattr(go2_channel_init, "__module__", None)
+            != getattr(channel_factory_initialize, "__module__", None)
+        ):
+            return False, None
+
+    return True, getattr(go2_macros, "IFNAME", None)
 
 
 class UnitreeVideoCapture:
@@ -178,12 +208,19 @@ class UnitreeVideoCapture:
 
         channel_ifname = self.ifname
         if not _UNITREE_CHANNEL_STATE["initialized"]:
-            if channel_ifname:
-                channel_factory_initialize(0, channel_ifname)
+            go2_initialized, go2_ifname = _go2_channel_already_initialized(
+                channel_factory_initialize
+            )
+            if go2_initialized:
+                _UNITREE_CHANNEL_STATE["initialized"] = True
+                _UNITREE_CHANNEL_STATE["ifname"] = go2_ifname or channel_ifname
             else:
-                channel_factory_initialize(0)
-            _UNITREE_CHANNEL_STATE["initialized"] = True
-            _UNITREE_CHANNEL_STATE["ifname"] = channel_ifname
+                if channel_ifname:
+                    channel_factory_initialize(0, channel_ifname)
+                else:
+                    channel_factory_initialize(0)
+                _UNITREE_CHANNEL_STATE["initialized"] = True
+                _UNITREE_CHANNEL_STATE["ifname"] = channel_ifname
 
         self._client = video_client_cls()
         self._client.SetTimeout(self.timeout)
@@ -402,13 +439,130 @@ def _discover_v4l2_devices(limit: int = 6) -> List[str]:
     return [str(path) for path in devices[: max(0, limit)]]
 
 
+def _realsense_color_link_sort_key(path: Path) -> tuple[int, int, str]:
+    """Try RealSense image endpoints before their paired metadata endpoints."""
+    name = path.name.lower()
+    marker = "video-index"
+    index = 99
+    if marker in name:
+        suffix = name.rsplit(marker, 1)[-1]
+        digits = "".join(char for char in suffix if char.isdigit())
+        if digits:
+            index = int(digits)
+    return index % 2, index, path.name
+
+
+def _is_realsense_color_link(path: Path) -> bool:
+    """Return True for stable V4L links that look like RealSense video streams."""
+    name = path.name.lower()
+    if "video-index" not in name:
+        return False
+    return (
+        "realsense" in name
+        or "depth_camera" in name
+        or "depth-ca" in name
+        or "intel" in name
+    )
+
+
+def _looks_like_realsense_device_name(device_name: str) -> bool:
+    """Return True when a V4L2 device name looks like an Intel RealSense camera."""
+    normalized = device_name.lower()
+    return (
+        "realsense" in normalized
+        or "intel(r) realsense" in normalized
+        or "depth camera" in normalized
+    )
+
+
+def _video_device_sort_key(device_path: str) -> tuple[int, str]:
+    """Sort /dev/videoN devices numerically when possible."""
+    name = Path(device_path).name
+    if name.startswith("video") and name.removeprefix("video").isdigit():
+        return int(name.removeprefix("video")), name
+    return 99, name
+
+
+def _discover_realsense_video_devices(limit: int = 2) -> List[str]:
+    """Return /dev/videoN RealSense devices from Linux V4L2 sysfs metadata."""
+    sysfs_dir = Path("/sys/class/video4linux")
+    if not sysfs_dir.exists():
+        return []
+
+    devices = []
+    for entry in sorted(sysfs_dir.iterdir(), key=lambda path: _video_device_sort_key(path.name)):
+        name_file = entry / "name"
+        try:
+            device_name = name_file.read_text(encoding="utf-8", errors="ignore").strip()
+        except OSError:
+            continue
+
+        if not _looks_like_realsense_device_name(device_name):
+            continue
+
+        device_path = f"/dev/{entry.name}"
+        if Path(device_path).exists():
+            devices.append(device_path)
+            if len(devices) >= limit:
+                return devices
+
+    return devices
+
+
+def _discover_realsense_color_devices(limit: int = 8) -> List[str]:
+    """Return RealSense V4L streams, trying image endpoints before metadata."""
+    devices = []
+    seen = set()
+
+    for link_dir in (Path("/dev/v4l/by-id"), Path("/dev/v4l/by-path")):
+        if not link_dir.exists():
+            continue
+
+        links = [
+            path
+            for path in link_dir.iterdir()
+            if _is_realsense_color_link(path)
+        ]
+        for path in sorted(links, key=_realsense_color_link_sort_key):
+            device_path = str(path)
+            device_key = str(path.resolve(strict=False))
+            if device_key in seen:
+                continue
+            seen.add(device_key)
+            devices.append(device_path)
+            if len(devices) >= limit:
+                return devices
+
+    for device_path in _discover_realsense_video_devices(limit=limit - len(devices)):
+        device_key = str(Path(device_path).resolve(strict=False))
+        if device_key in seen:
+            continue
+        seen.add(device_key)
+        devices.append(device_path)
+        if len(devices) >= limit:
+            return devices
+
+    return devices
+
+
+def _v4l2_capture_source(device_path: str) -> CameraSource:
+    """Return the numeric OpenCV V4L2 source for a /dev/videoN path or symlink."""
+    try:
+        resolved_path = Path(device_path).resolve(strict=False)
+    except OSError:
+        resolved_path = Path(device_path)
+
+    for name in (resolved_path.name, Path(device_path).name):
+        if name.startswith("video") and name.removeprefix("video").isdigit():
+            return int(name.removeprefix("video"))
+
+    return device_path
+
+
 def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[Dict[str, Any]]:
     """Normalize a camera source override into a single candidate descriptor."""
     if camera_source is None:
-        camera_source = (
-            os.environ.get("VISION_CAMERA_SOURCE")
-            or os.environ.get("GO2_CAMERA_SOURCE")
-        )
+        camera_source = os.environ.get("VISION_CAMERA_SOURCE")
         if not camera_source:
             return None
 
@@ -475,10 +629,10 @@ def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[
             "description": "inline GStreamer pipeline",
         }
 
-    if raw_source.startswith("/dev/video"):
+    if raw_source.startswith(("/dev/video", "/dev/v4l/")):
         return {
             "kind": "opencv",
-            "source": raw_source,
+            "source": _v4l2_capture_source(raw_source),
             "backend": getattr(cv2, "CAP_V4L2", None),
             "description": raw_source,
         }
@@ -494,16 +648,18 @@ def _normalize_camera_source(camera_source: Optional[CameraSource]) -> Optional[
 def get_camera_candidates(
     camera_source: Optional[CameraSource] = None,
     max_indices: Optional[int] = None,
+    allow_fallbacks: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Build camera candidates in a robot-friendly order.
 
     Priority:
     1. Explicit source override (`VISION_CAMERA_SOURCE`, `unitree:eth0`, `/dev/videoN`, index, or pipeline)
-    2. Unitree Go2 front camera via SDK2 (on Jetson/robot installs)
-    3. Jetson CSI sensors via GStreamer
-    4. Present V4L2 devices under `/dev/video*`
-    5. Plain OpenCV camera indices for laptop/desktop webcams
+    2. Intel RealSense color camera via stable `/dev/v4l/by-id` link
+    3. Unitree front camera via SDK as a robot fallback
+    4. Jetson CSI sensors via GStreamer
+    5. Present V4L2 devices under `/dev/video*`
+    6. Plain OpenCV camera indices for laptop/desktop webcams
     """
     normalized = _normalize_camera_source(camera_source)
     if normalized is not None:
@@ -527,19 +683,39 @@ def get_camera_candidates(
             "description": description,
         })
 
-    if _is_jetson_platform() and _unitree_camera_available():
-        unitree_ifname = _unitree_camera_interface()
-        unitree_description = "Unitree Go2 front camera"
-        if unitree_ifname:
-            unitree_description += f" via {unitree_ifname}"
+    def add_unitree_candidate() -> None:
+        if not _unitree_camera_available():
+            return
+
+        interface_name = _unitree_camera_interface()
+        source = f"unitree:{interface_name}" if interface_name else "unitree"
+        key = (source, "unitree")
+        if key in seen:
+            return
+        seen.add(key)
+
+        description = "Unitree Go2 front camera"
+        if interface_name:
+            description += f" via {interface_name}"
         candidates.append({
             "kind": "unitree",
-            "source": "unitree",
+            "source": source,
             "backend": None,
-            "description": unitree_description,
-            "ifname": unitree_ifname,
+            "description": description,
+            "ifname": interface_name,
         })
-        seen.add(("unitree", None))
+
+    for device_path in _discover_realsense_color_devices():
+        add_candidate(
+            _v4l2_capture_source(device_path),
+            getattr(cv2, "CAP_V4L2", None),
+            f"Intel RealSense color camera ({Path(device_path).name})",
+        )
+
+    if not allow_fallbacks:
+        return candidates
+
+    add_unitree_candidate()
 
     if _is_jetson_platform():
         for sensor_id in range(2):
@@ -550,7 +726,11 @@ def get_camera_candidates(
             )
 
     for device_path in _discover_v4l2_devices(limit=max_indices):
-        add_candidate(device_path, getattr(cv2, "CAP_V4L2", None), device_path)
+        add_candidate(
+            _v4l2_capture_source(device_path),
+            getattr(cv2, "CAP_V4L2", None),
+            device_path,
+        )
 
     for camera_index in range(max(0, max_indices)):
         add_candidate(camera_index, None, f"camera index {camera_index}")
@@ -565,6 +745,7 @@ def open_camera(
     frame_height: Optional[int] = None,
     warmup_reads: int = 3,
     verbose: bool = True,
+    allow_fallbacks: bool = True,
 ) -> Tuple[Optional[cv2.VideoCapture], Dict[str, Any]]:
     """
     Open the first camera candidate that produces a real frame.
@@ -574,7 +755,14 @@ def open_camera(
     """
     attempts: List[str] = []
 
-    for candidate in get_camera_candidates(camera_source):
+    candidates = get_camera_candidates(
+        camera_source,
+        allow_fallbacks=allow_fallbacks,
+    )
+    if not candidates and camera_source is None and not allow_fallbacks:
+        attempts.append("No Intel RealSense color camera was discovered")
+
+    for candidate in candidates:
         kind = candidate.get("kind", "opencv")
         source = candidate["source"]
         backend = candidate["backend"]
@@ -1013,6 +1201,19 @@ class VisionCore:
             "ArcFace": 0.68,
         }.get(self.face_model, 0.40)
 
+    def _refresh_face_database_on_lookup(self) -> bool:
+        """
+        Return whether DeepFace should force-refresh the face DB on each lookup.
+
+        The default is off because newly learned faces already invalidate the
+        cached representation files, and forcing a refresh every frame makes the
+        long-running assistant much slower on the robot.
+        """
+        raw_value = os.environ.get("VISION_FACE_REFRESH_DATABASE_ON_LOOKUP")
+        if raw_value is None:
+            return False
+        return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
     def _extract_detected_faces(
         self,
         image: np.ndarray,
@@ -1316,8 +1517,9 @@ class VisionCore:
                         "enforce_detection": False,
                         "detector_backend": self._face_detector_backend(),
                         "silent": True,
-                        "refresh_database": True,
                     }
+                    if self._refresh_face_database_on_lookup():
+                        find_kwargs["refresh_database"] = True
                     try:
                         results = self.deepface.find(**find_kwargs)
                     except TypeError:
@@ -1780,10 +1982,7 @@ if __name__ == "__main__":
     # WEBCAM CAPTURE
     # Use default webcam resolution (driver-optimized)
     # ============================================================
-    requested_camera_source = (
-        os.environ.get("VISION_CAMERA_SOURCE")
-        or os.environ.get("GO2_CAMERA_SOURCE")
-    )
+    requested_camera_source = os.environ.get("VISION_CAMERA_SOURCE")
     cap, camera_info = open_camera(
         camera_source=requested_camera_source,
         verbose=True,

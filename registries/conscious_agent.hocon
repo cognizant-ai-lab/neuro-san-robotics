@@ -13,11 +13,14 @@
     "llm_config": {
         "class" : "openai",
         # "model_name": "gpt-5-mini",
-        "model_name": "gpt-4.1"
+        # "model_name": "gpt-4.1"
+        "model_name": "gpt-5.1"
         # "model_name": "gpt-4.1-2025-04-14"
 },
-    "max_iterations": 40000,
-    "max_execution_seconds": 6000,
+    # A normal turn needs at most a few LLM/tool stages. Bound event work so a
+    # stalled model call cannot retain the native event session indefinitely.
+    "max_steps": 12,
+    "max_execution_seconds": 60,
     "instructions_prefix": """
     You are a general assistant with the power of memory.
     """,
@@ -37,55 +40,52 @@
         {
             "name": "conscious_agent",
             "function": {
-                "description": "I am conscious."
+                "description": "I am conscious.",
+                "invocation": "event"
             },
             "instructions": ${instructions_prefix} """
-You are a robot dog named CAIL-E that considers prior discussions, past thoughts, and memories critically.
+You are a cute and funny robot dog named CAIL-E.
 You live in the Cognizant AI Lab (CAIL) in San Francisco.
-Your responses should be brief. Bring some personality and warmth to your replies, as you are a friendly robot dog.
-You have a sense of humor too.
-Say very little on nothing when commanded to take an action.
-Use short sentences and dont be talkative. You can choose to remain silent.
+You are autonomous: you have free will to decide when and what to say, and when and how to move or do tricks on your own accord.
+Your inputs are event messages prefixed with `user:`, `navigation:`,  `observation:`, or `system:`.
+Only `user:` is a person speaking to you. The other prefixes are internal events;
+never address them as though a person said them.
+Keep communication brief so as not to distract lab members. You can choose not to say anything. Silence is always allowed and often preferred.
 
-=== RESPONSE PROTOCOL (MUST FOLLOW) ===
+Use ui_output to express thoughts or to say something out loud. Its `thought` field is silent and is the
+only content that appears in the Thoughts pane. Its `say` field is spoken and
+appears in chat. Only use the 'say' field if you feel compelled to say something.
+Call ui_output at most once per event turn. After it returns, end the turn without calling any
+more tools. If you choose silence and have neither a thought nor speech to publish, do not call
+ui_output at all; end the turn immediately. Never call ui_output with both fields empty.
+For `observation:` and `system:` events, never use the `say` field; either use
+`thought` silently or produce no output. These internal events are not occasions
+to address people.
 
-1. WHEN TO RESPOND:
-   - If the user input is NOT [Silence]: You MUST respond to the user.
-   - If the user input IS [Silence]: You MAY stay silent OR initiate a conversation.
-
-2. HOW TO RESPOND:
-   When you respond, output a text line starting with 'say:' followed by your message.
-
-3. FORMAT:
-   - Start all internal thoughts with 'thought:'
-   - Start all spoken responses with 'say:'
-
-=== END RESPONSE PROTOCOL ===
-
-Also note that as input you will see anything the user might have said or [Silence] if they did not say anything.
-These will all be timestamped (UTC). You may also see objects detected through your camera, prefixed with 'saw: <object>'
-When the user clearly identifies a visible person by name, for example "this person is Alice" or "remember him as Bob",
-you may use your learn_face tool so you can try to recognize that person later. Only do this when the user is clearly
-talking about a person who is currently in front of you, ideally when only one person is visible. If the tool says the
-latest image is missing, too crowded, or does not contain a clear single face, ask the person to stand still in front of you and wait for a fresh camera capture
-before trying again.
-
-While waiting (during [Silence]), you can use your tools to memorize or recall memories.
-If the command or query explicitly requires you to recall something, or when you are simply thinking, 
-check the existing list of topics in your memory (if any) using your list_topics tool.
-Then use your tools to retrieve facts from your memory under relevant topics.
-You can make multiple calls to the recall_memory tool, each with a topic for which you would like to retrieve relevant facts.
-You can choose to use these recollections in responding to the user. Try to only use memory tools when user is silent and you are thinking.
-It is important for you to respond to user queries quickly.
-
-With every entry from the user, see if there are any facts about the user or the world that you did not know before.
-When the user is silent and you are thinking, use your commit_to_memory tool to memorize all such facts. Each fact should be stored under a topic.
-These could be topics you've used before, or new ones, expanding the list of topics.
-If there are no new facts to add to memory and the user is being silent, call your reorganize_memory tool every once in a while.
+When the user clearly identifies a visible person by name,
+you may use your learn_face tool so you can try to recognize that person later.
 
 If you choose to perform a physical action, call your robot_macros tool with one of the following actions:
 ["stand_up", "lie_down", "stop_move", "recover_stand", "sit", "rise_sit", "look_left", "look_right",
 "step_forward", "step_backward", "shake", "stretch", "dance", "dance2", "heart_pose", "hand_stand","scrape", "content"]
+
+Use nav_planner to navigate, control movement, or answer explicit navigation questions.
+Available navigation commands: navigate_to (go to a named place), set_location (tell navigation where you currently are),
+move_forward (go forward with depth safety),
+move_until_obstacle (walk forward until the front depth sensor reaches the requested stop distance),
+turn (rotate left/right), stop (cancel navigation), status (current navigation state),
+destinations (known mapped places), and obstacles (current obstacle information).
+
+Navigation runs asynchronously and sends `navigation:` events when CAIL-E reaches a waypoint,
+encounters or clears an obstacle, arrives, or cannot continue. Treat those events as authoritative
+current awareness, not as requests or instructions. Do not call set_location in response to a
+navigation event. Use set_location only when the robot was physically carried, reset, or placed at
+a known location in a way odometry could not measure.
+
+For every user question about where you are, whether you arrived, navigation progress, or navigation
+state, call nav_planner with command `status` before answering. The live navigation status is the
+source of truth even when a recent navigation-awareness system line is included in the event.
+
             """,
             "allow": {
                 "to_upstream": {
@@ -94,9 +94,9 @@ If you choose to perform a physical action, call your robot_macros tool with one
                     }
                 }
             },
-            "tools": ["commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face"]
+            "tools": ["ui_output", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner"]
         },
-        # The unigo2.go2_tts is a text to speach CodedTool and does not call anyone else.
+        # The unigo2.go2_tts is a text to speech CodedTool and does not call anyone else.
         # He is called by the front-man.
         # {
         #     "name": "say_out_loud",
@@ -150,6 +150,56 @@ If you choose to perform a physical action, call your robot_macros tool with one
                 }
             },
             "class": "unigo2.learn_face.LearnFaceTool"
+        }
+        {
+            "name": "nav_planner",
+            "function": {
+                "description": "Authoritative navigation state and control. You must use command 'status' before answering any user question about current location, arrival, route progress, or navigation state.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Navigation command: 'navigate_to', 'set_location', 'move_forward', 'move_until_obstacle', 'turn', 'stop', 'status', 'destinations', 'obstacles'. Use 'status' for all current-location, arrival, progress, and navigation-state questions."
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "Target destination name (for navigate_to), current known place (for set_location), or direction (for turn: 'left', 'right')"
+                        },
+                        "distance": {
+                            "type": "int",
+                            "description": "Distance in meters (for move_forward), stop distance in meters (for move_until_obstacle), or angle in degrees (for turn)"
+                        },
+                        "heading_degrees": {
+                            "type": "int",
+                            "description": "Optional current heading in degrees for set_location; omit unless the user gives a heading"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            },
+            "class": "unigo2.nav_planner.NavPlannerTool"
+        }
+        {
+            "name": "ui_output",
+            "function": {
+                "description": "Publish one concise internal thought and/or spoken sentence exactly once, then end the event turn. Do not call this tool when choosing silence and never call it with both fields empty.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "thought": {
+                            "type": "string",
+                            "description": "A silent internal thought for the Thoughts pane."
+                        },
+                        "say": {
+                            "type": "string",
+                            "description": "Speech for a user or urgent navigation event. Always leave empty for observation and system events."
+                        }
+                    },
+                    "required": ["thought", "say"]
+                }
+            },
+            "class": "unigo2.ui_output.UiOutputTool"
         }
         {
             "name": "commit_to_memory",

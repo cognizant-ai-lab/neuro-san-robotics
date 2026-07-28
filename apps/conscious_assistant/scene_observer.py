@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -30,6 +31,14 @@ else:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse common boolean environment variable values."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_repo_relative_path(path_text: str) -> str:
@@ -105,6 +114,23 @@ def build_scene_input(timestamp: str, object_names: List[str]) -> Optional[str]:
     return "\n" + "\n".join(lines)
 
 
+def observation_signature(observation: Optional[Dict[str, Any]]) -> tuple[str, ...]:
+    """
+    Normalize an observation into a stable signature for duplicate suppression.
+
+    Repeated identical scene labels should not wake the top agent every interval,
+    but the camera UI should still be free to refresh the latest image.
+    """
+    if not observation:
+        return ()
+
+    return tuple(
+        str(object_name).strip()
+        for object_name in observation.get("objects", [])
+        if str(object_name).strip()
+    )
+
+
 class SceneObserver:
     """
     Captures a single scene observation on demand and keeps only the latest JPEG.
@@ -118,11 +144,16 @@ class SceneObserver:
         *,
         camera_source: Optional[str] = None,
         public_image_url: str = "/api/observation/latest.jpg",
+        enabled: Optional[bool] = None,
     ):
+        self.enabled = (
+            _env_flag("CONSCIOUS_ENABLE_SCENE_OBSERVER", default=sys.platform.startswith("linux"))
+            if enabled is None
+            else enabled
+        )
         self.camera_source = (
             camera_source
             or os.environ.get("VISION_CAMERA_SOURCE")
-            or os.environ.get("GO2_CAMERA_SOURCE")
         )
         self.public_image_url = public_image_url
         self.image_dir = Path(tempfile.gettempdir()) / "neuro_san_conscious_assistant"
@@ -136,7 +167,8 @@ class SceneObserver:
     def available(self) -> bool:
         """Return whether the vision observer can run in this environment."""
         return (
-            VisionCore is not None
+            self.enabled
+            and VisionCore is not None
             and detect_camera_snapshot is not None
             and get_default_vision_core_settings is not None
             and open_camera is not None
@@ -189,6 +221,7 @@ class SceneObserver:
         capture, camera_info = open_camera(
             camera_source=self.camera_source,
             verbose=False,
+            allow_fallbacks=True,
         )
         if capture is None:
             logging.warning(
@@ -209,10 +242,13 @@ class SceneObserver:
         """
         Eagerly initialize the observer so heavy imports can happen on the main thread.
 
-        The Flask app later uses a background task for periodic observations. On
-        some deployments, importing the YOLO stack from that worker thread is less
-        reliable than doing it once during startup.
+        The native observer service invokes captures periodically. On some deployments,
+        importing the YOLO stack from that worker thread is less reliable than doing
+        it once during startup.
         """
+        if not self.enabled:
+            return False
+
         with self._lock:
             vision = self._ensure_vision()
             if vision is None:
@@ -243,6 +279,9 @@ class SceneObserver:
         """
         Capture one frame, detect objects, overwrite the latest JPEG, and return metadata.
         """
+        if not self.enabled:
+            return None
+
         with self._lock:
             vision = self._ensure_vision()
             if vision is None:
@@ -288,9 +327,14 @@ class SceneObserver:
             finally:
                 self._capture = None
 
-    def cleanup(self) -> None:
+    def cleanup(self, timeout_s: float = 2.0) -> None:
         """Release resources and remove the retained image."""
-        with self._lock:
+        acquired = self._lock.acquire(timeout=timeout_s)
+        if not acquired:
+            logging.warning("Scene observer cleanup skipped because camera is busy")
+            return
+
+        try:
             self._release_capture()
             if self.image_path.exists():
                 try:
@@ -298,3 +342,5 @@ class SceneObserver:
                 except OSError:  # pragma: no cover - filesystem-dependent
                     logging.exception("Failed to delete latest observation image")
             self._last_observation = None
+        finally:
+            self._lock.release()

@@ -12,6 +12,10 @@ html, body {
     overflow-x: hidden;
 }
 
+* {
+    box-sizing: border-box;
+}
+
 /* Animated background particles effect */
 body::before {
     content: '';
@@ -44,6 +48,7 @@ body::before {
     position: relative;
     z-index: 1;
     align-items: stretch;
+    min-height: 0;
 }
 
 .main-container {
@@ -61,6 +66,10 @@ body::before {
     padding: 40px 36px 32px 36px;
     position: relative;
     animation: containerFadeIn 0.6s ease-out;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
 }
 
 @keyframes containerFadeIn {
@@ -87,7 +96,9 @@ body::before {
     transition: all 0.3s ease;
     position: sticky;
     top: 20px;
+    height: calc(100vh - 140px);
     max-height: calc(100vh - 140px);
+    min-height: 0;
     overflow: hidden;
     align-self: flex-start;
 }
@@ -135,6 +146,8 @@ body::before {
     max-height: none;
     margin-bottom: 0;
     overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-behavior: smooth;
 }
 
 .hidden {
@@ -150,6 +163,10 @@ body::before {
     box-shadow:
         0 4px 18px rgba(0, 0, 0, 0.28),
         inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 0 0 auto;
 }
 
 .observation-meta {
@@ -188,11 +205,10 @@ body::before {
 }
 
 .observation-history {
-    max-height: 320px;
-    overflow-y: auto;
+    min-height: 0;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
-    gap: 12px;
 }
 
 .observation-entry {
@@ -226,6 +242,7 @@ body::before {
 
 .observation-entry-image {
     width: 100%;
+    aspect-ratio: 16 / 9;
     display: block;
     border-radius: 12px;
     border: 1px solid rgba(255, 215, 0, 0.2);
@@ -331,6 +348,13 @@ header h1 {
 section {
     margin-bottom: 28px;
     animation: sectionSlideIn 0.5s ease-out backwards;
+}
+
+#chat-history-section {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
 }
 
 section:nth-child(2) { animation-delay: 0.1s; }
@@ -641,6 +665,63 @@ footer {
     z-index: 1;
 }
 
+@media (min-width: 1201px) {
+    html, body {
+        overflow: hidden;
+    }
+
+    .site-header {
+        padding: 18px 20px 12px 20px;
+        margin-bottom: 14px;
+    }
+
+    header h1 {
+        font-size: 2.2em;
+    }
+
+    .subtitle {
+        margin: 6px 0 0 0;
+    }
+
+    .page-layout {
+        height: calc(100dvh - 148px);
+        max-height: calc(100dvh - 148px);
+        margin-bottom: 8px;
+    }
+
+    .main-container,
+    .thoughts-sidebar {
+        height: 100%;
+        max-height: 100%;
+        align-self: stretch;
+    }
+
+    .thoughts-sidebar {
+        position: relative;
+        top: 0;
+    }
+
+    .thoughts-sidebar.collapsed {
+        height: auto;
+        align-self: flex-start;
+    }
+
+    .chat-history-box {
+        flex: 1;
+        min-height: 0;
+        max-height: none;
+    }
+
+    #user-input-section {
+        flex-shrink: 0;
+        margin-bottom: 0;
+    }
+
+    footer {
+        margin: 8px 0 8px 0;
+    }
+}
+
 /* Responsive Design for Tablet and Mobile */
 @media (max-width: 1200px) {
     .page-layout {
@@ -657,6 +738,7 @@ footer {
         width: 100%;
         position: relative;
         top: 0;
+        height: auto;
         max-height: none;
         order: 1;
     }
