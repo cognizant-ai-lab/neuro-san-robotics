@@ -916,6 +916,14 @@ class TestOdometryProvider(unittest.TestCase):
         pose = odom.get_pose()
         self.assertAlmostEqual(pose.yaw, math.pi / 2, places=2)
 
+    def test_dead_reckoning_lateral_motion(self):
+        odom = OdometryProvider()
+        odom.update_from_velocity(VelocityCommand(vy=0.2), dt=1.0)
+
+        pose = odom.get_pose()
+        self.assertAlmostEqual(pose.x, 0.0, places=2)
+        self.assertAlmostEqual(pose.y, 0.2, places=2)
+
     def test_reset(self):
         odom = OdometryProvider()
         odom.update_from_velocity(VelocityCommand(vx=1.0), dt=1.0)
@@ -1107,6 +1115,9 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.GOAL_TOLERANCE_M, 0.15)
         self.assertAlmostEqual(NavCore.SEMANTIC_ARRIVAL_TOLERANCE_M, 0.65)
         self.assertAlmostEqual(NavCore.OBSTACLE_GRID_MAX_AGE_S, 0.50)
+        self.assertAlmostEqual(NavCore.STALL_ESCAPE_SPEED_MPS, 0.15)
+        self.assertAlmostEqual(NavCore.STALL_ESCAPE_DISTANCE_M, 0.15)
+        self.assertAlmostEqual(NavCore.STALL_ESCAPE_CLEARANCE_M, 0.40)
 
     def test_stale_obstacle_grid_is_rejected(self):
         core = NavCore.__new__(NavCore)
@@ -1930,6 +1941,10 @@ class TestNavCoreStatus(unittest.TestCase):
             fake_depth.get_obstacle_grid.return_value = _empty_grid()
             nav._depth_processor = fake_depth
             nav._odometry.set_pose(0.0, 0.0, math.radians(10.0))
+            escape_pose = RobotPose(0.0, 0.15, math.radians(10.0))
+            nav._execute_stall_escape = MagicMock(
+                return_value=(escape_pose, "left")
+            )
 
             goal = NavGoal(goal_type="relative", x=0.0, y=2.0, label="Kitchen")
             with nav._state_lock:
@@ -1986,8 +2001,8 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertEqual(
                 events,
                 [
-                    "I stalled while heading to Kitchen. I replanned from my current "
-                    "position and am continuing."
+                    "I stalled while heading to Kitchen. I stepped left, rerouted, "
+                    "and am continuing."
                 ],
             )
             fake_go2.stop_move.assert_called()
@@ -2025,6 +2040,42 @@ class TestNavCoreStatus(unittest.TestCase):
             "path is clear again",
             nav._on_status_change.call_args_list[1].args[0],
         )
+
+    def test_stall_escape_moves_away_from_right_obstacle(self):
+        nav = NavCore.__new__(NavCore)
+        nav.STALL_ESCAPE_CLEARANCE_M = 0.40
+        grid = _grid_with_obstacle_at_bearing(
+            distance_m=0.50,
+            bearing_rad=math.radians(-30.0),
+        )
+        grid.path_obstacle_m = 0.50
+        grid.path_obstacle_bearing = math.radians(-30.0)
+
+        self.assertEqual(nav._choose_stall_escape_direction(grid), 1.0)
+
+    def test_stall_escape_randomizes_when_both_sides_are_clear(self):
+        nav = NavCore.__new__(NavCore)
+        nav.STALL_ESCAPE_CLEARANCE_M = 0.40
+        grid = _empty_grid()
+
+        with patch(
+            "coded_tools.unigo2.nav_core.random.choice",
+            return_value=-1.0,
+        ) as choose:
+            direction = nav._choose_stall_escape_direction(grid)
+
+        self.assertEqual(direction, -1.0)
+        choose.assert_called_once()
+
+    def test_stall_escape_refuses_when_neither_side_is_safe(self):
+        nav = NavCore.__new__(NavCore)
+        nav.STALL_ESCAPE_CLEARANCE_M = 0.40
+        grid = _empty_grid()
+        row = grid.origin_row - 5
+        grid.grid[row, grid.origin_col - 4] = 1.0
+        grid.grid[row, grid.origin_col + 4] = 1.0
+
+        self.assertIsNone(nav._choose_stall_escape_direction(grid))
 
     def test_rotation_does_not_reset_stall_recovery_attempts(self):
         nav = NavCore.__new__(NavCore)
@@ -2067,6 +2118,10 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._global_planner.get_next_waypoint.return_value = waypoint
             nav._global_planner.current_segment.return_value = None
             nav._global_planner.plan_path.return_value = [waypoint]
+            escape_pose = RobotPose(0.0, 0.15, 0.0)
+            nav._execute_stall_escape = MagicMock(
+                return_value=(escape_pose, "left")
+            )
 
             goal = NavGoal(goal_type="semantic", x=2.0, y=0.0, label="Kitchen")
             with nav._state_lock:
@@ -2082,15 +2137,15 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertEqual(
                 events,
                 [
-                    "I stalled while heading to Kitchen. I replanned from my current "
-                    "position and am continuing."
+                    "I stalled while heading to Kitchen. I stepped left, rerouted, "
+                    "and am continuing."
                 ],
             )
             fake_go2.stop_move.assert_called()
             fake_go2.move.assert_not_called()
             fake_depth.stop.assert_not_called()
             nav._global_planner.plan_path.assert_called_once_with(
-                nav._odometry.get_pose(),
+                escape_pose,
                 "Kitchen",
             )
             nav.shutdown()

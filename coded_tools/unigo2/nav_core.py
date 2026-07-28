@@ -34,6 +34,7 @@ import json
 import math
 import os
 import logging
+import random
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -1209,8 +1210,10 @@ class OdometryProvider:
     def update_from_velocity(self, cmd: VelocityCommand, dt: float):
         """Integrate a velocity command over dt seconds (dead-reckoning)."""
         with self._lock:
-            self._pose.x += cmd.vx * math.cos(self._pose.yaw) * dt
-            self._pose.y += cmd.vx * math.sin(self._pose.yaw) * dt
+            cos_yaw = math.cos(self._pose.yaw)
+            sin_yaw = math.sin(self._pose.yaw)
+            self._pose.x += (cmd.vx * cos_yaw - cmd.vy * sin_yaw) * dt
+            self._pose.y += (cmd.vx * sin_yaw + cmd.vy * cos_yaw) * dt
             self._pose.yaw += cmd.vyaw * dt
             self._pose.yaw = math.atan2(
                 math.sin(self._pose.yaw), math.cos(self._pose.yaw)
@@ -1543,8 +1546,10 @@ class SdkSportModeOdometryProvider(OdometryProvider):
                     "using command-integrated fallback position"
                 )
 
-            self._pose.x += cmd.vx * math.cos(self._pose.yaw) * dt
-            self._pose.y += cmd.vx * math.sin(self._pose.yaw) * dt
+            cos_yaw = math.cos(self._pose.yaw)
+            sin_yaw = math.sin(self._pose.yaw)
+            self._pose.x += (cmd.vx * cos_yaw - cmd.vy * sin_yaw) * dt
+            self._pose.y += (cmd.vx * sin_yaw + cmd.vy * cos_yaw) * dt
             if not (has_fresh_sdk_pose and self._sdk_yaw_confirmed):
                 self._pose.yaw = self._normalize_angle(self._pose.yaw + cmd.vyaw * dt)
             self._pose.timestamp = time.time()
@@ -1731,6 +1736,13 @@ class NavCore:
     DEPTH_STOP_WHEN_IDLE: bool = _env_flag("NAV_DEPTH_STOP_WHEN_IDLE", True)
     OBSTACLE_MEMORY_SECONDS: float = _env_float("NAV_OBSTACLE_MEMORY_SECONDS", 0.8)
     OBSTACLE_TELEMETRY_SECONDS: float = _env_float("NAV_OBSTACLE_TELEMETRY_SECONDS", 1.0)
+    STALL_ESCAPE_SPEED_MPS: float = _env_float("NAV_STALL_ESCAPE_SPEED", 0.15)
+    STALL_ESCAPE_DISTANCE_M: float = _env_float("NAV_STALL_ESCAPE_DISTANCE", 0.15)
+    STALL_ESCAPE_CLEARANCE_M: float = _env_float("NAV_STALL_ESCAPE_CLEARANCE", 0.40)
+    STALL_ESCAPE_COMMAND_PERIOD_S: float = _env_float(
+        "NAV_STALL_ESCAPE_COMMAND_PERIOD",
+        0.10,
+    )
 
     @classmethod
     def get_instance(cls) -> "NavCore":
@@ -2068,10 +2080,128 @@ class NavCore:
         self._notify_status_change(message)
         self._stop_depth_when_idle()
 
-    def _recover_from_stall(self, goal: NavGoal, pose: RobotPose) -> bool:
-        """Replan in place after a transient stall while preserving the destination."""
+    def _lateral_escape_clearance(self, grid: ObstacleGrid, direction: float) -> float:
+        """Return visible clearance on one side of the robot for a short strafe."""
+        points = occupied_xy_points(grid)
+        if points.size == 0:
+            return float("inf")
+        signed_lateral = points[:, 1] * direction
+        nearby = points[
+            (signed_lateral > 0.05)
+            & (points[:, 0] >= 0.0)
+            & (points[:, 0] <= 0.75)
+        ]
+        if nearby.size == 0:
+            return float("inf")
+        return float(np.min(np.abs(nearby[:, 1])))
+
+    def _choose_stall_escape_direction(self, grid: ObstacleGrid) -> Optional[float]:
+        """Choose a safe lateral direction, preferring motion away from the obstacle."""
+        clearances = {
+            1.0: self._lateral_escape_clearance(grid, 1.0),
+            -1.0: self._lateral_escape_clearance(grid, -1.0),
+        }
+        safe_directions = [
+            direction
+            for direction, clearance in clearances.items()
+            if clearance >= self.STALL_ESCAPE_CLEARANCE_M
+        ]
+        if not safe_directions:
+            return None
+
+        bearing = grid.path_obstacle_bearing
+        if (
+            not math.isfinite(grid.path_obstacle_m)
+            or not isinstance(bearing, (int, float))
+            or not math.isfinite(bearing)
+        ):
+            bearing = grid.nearest_obstacle_bearing
+        if isinstance(bearing, (int, float)) and abs(float(bearing)) >= math.radians(5.0):
+            away = -math.copysign(1.0, float(bearing))
+            if away in safe_directions:
+                return away
+
+        best_clearance = max(clearances[direction] for direction in safe_directions)
+        best_directions = [
+            direction
+            for direction in safe_directions
+            if clearances[direction] >= best_clearance - 0.10
+        ]
+        return random.choice(best_directions)
+
+    def _execute_stall_escape(
+        self,
+        goal: NavGoal,
+        grid: Optional[ObstacleGrid],
+    ) -> Optional[Tuple[RobotPose, str]]:
+        """Take one short, guarded lateral step before trying the route again."""
+        if grid is None:
+            return None
+        direction = self._choose_stall_escape_direction(grid)
+        if direction is None:
+            logger.warning("NavCore: no safe lateral direction for stall recovery")
+            return None
+
+        self._ensure_go2()
+        if not self._go2 or not getattr(self._go2, "available", False):
+            return None
+
+        speed = max(0.05, abs(self.STALL_ESCAPE_SPEED_MPS)) * direction
+        distance = max(0.05, self.STALL_ESCAPE_DISTANCE_M) * random.uniform(0.8, 1.2)
+        period = max(0.05, self.STALL_ESCAPE_COMMAND_PERIOD_S)
+        deadline = time.monotonic() + distance / abs(speed)
+        side_name = "left" if direction > 0.0 else "right"
+        command = VelocityCommand(vx=0.0, vy=speed, vyaw=0.0)
+
+        logger.warning(
+            "NavCore: attempting %.2fm %s escape step before rerouting to '%s'",
+            distance,
+            side_name,
+            self._goal_display_name(goal),
+        )
+        try:
+            while time.monotonic() < deadline:
+                latest = self._fresh_obstacle_grid(
+                    self._depth_processor.get_obstacle_grid()
+                )
+                if (
+                    latest is None
+                    or self._lateral_escape_clearance(latest, direction)
+                    < self.STALL_ESCAPE_CLEARANCE_M
+                ):
+                    logger.warning(
+                        "NavCore: cancelled %s escape step; clearance changed",
+                        side_name,
+                    )
+                    return None
+                self._go2.move(vx=0.0, vy=speed, vyaw=0.0)
+                self._odometry.update_from_velocity(command, period)
+                time.sleep(period)
+        except Exception:
+            logger.exception("NavCore: %s escape step failed", side_name)
+            return None
+        finally:
+            try:
+                self._go2.stop_move()
+            except Exception:
+                logger.debug("NavCore: stop_move failed after escape step", exc_info=True)
+
+        return self._odometry.get_pose(), side_name
+
+    def _recover_from_stall(
+        self,
+        goal: NavGoal,
+        pose: RobotPose,
+        grid: Optional[ObstacleGrid],
+    ) -> bool:
+        """Change position safely, then replan while preserving the destination."""
         if self._stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
             return False
+
+        escaped = self._execute_stall_escape(goal, grid)
+        if escaped is None:
+            return False
+        pose, escape_direction = escaped
 
         if goal.goal_type == "semantic":
             path = self._global_planner.plan_path(pose, goal.label or "")
@@ -2115,7 +2245,7 @@ class NavCore:
         )
         self._notify_status_change(
             f"I stalled while heading to {self._goal_display_name(goal)}. "
-            "I replanned from my current position and am continuing."
+            f"I stepped {escape_direction}, rerouted, and am continuing."
         )
         return True
 
@@ -2868,7 +2998,7 @@ class NavCore:
                 self._abort_active_navigation(goal, reason, message, state=NavState.E_STOP)
                 return
             elif event.startswith("stuck"):
-                if self._recover_from_stall(goal, pose):
+                if self._recover_from_stall(goal, pose, grid):
                     return
                 reason = "Stuck: no progress toward the goal"
                 self._abort_active_navigation(
