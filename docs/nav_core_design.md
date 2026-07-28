@@ -761,6 +761,9 @@ Following existing patterns from `vision_core.py` (`_env_flag()`, `_env_float()`
 | `NAV_LOOP_HZ` | int | `10` | Navigation loop frequency |
 | `NAV_SAFETY_DISTANCE` | float | `0.20` | Confirmed stop distance in the swept path corridor (meters) |
 | `NAV_AVOIDANCE_DISTANCE` | float | `0.75` | Slowdown and local-steering start distance for path-corridor obstacles (meters) |
+| `NAV_CENTER_ONLY_CLOSE_CONFIRM_S` | float | `0.2` | Seconds a grid-disputed close center-depth reading must persist before it can abort navigation |
+| `NAV_CENTER_ONLY_CLOSE_CONFIRM_READINGS` | int | `3` | Readings a grid-disputed close center-depth hazard must persist |
+| `NAV_CENTER_ONLY_GRID_MARGIN` | float | `0.15` | Grid-clearance margin for identifying center-depth disagreement |
 | `NAV_PATH_OBSTACLE_CONFIRM_S` | float | `0.3` | Seconds an avoidance-band path obstacle must persist before planner/safety use it |
 | `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | int | `3` | Nav-loop readings an avoidance-band path obstacle must persist before planner/safety use it |
 | `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | float | `0.15` | Raw center-depth agreement margin for avoidance-band path obstacles |

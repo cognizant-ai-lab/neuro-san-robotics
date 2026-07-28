@@ -247,6 +247,8 @@ class MapNode:
     tags: List[str] = field(default_factory=list)
     aliases: List[str] = field(default_factory=list)
     arrival_landmarks: List[Dict[str, Any]] = field(default_factory=list)
+    arrival_tolerance_m: Optional[float] = None
+    pass_through_tolerance_m: Optional[float] = None
 
 
 @dataclass
@@ -311,6 +313,16 @@ class TopologicalMap:
                 tags=node_data.get("tags", []),
                 aliases=node_data.get("aliases", []),
                 arrival_landmarks=node_data.get("arrival_landmarks", []),
+                arrival_tolerance_m=(
+                    float(node_data["arrival_tolerance_m"])
+                    if node_data.get("arrival_tolerance_m") is not None
+                    else None
+                ),
+                pass_through_tolerance_m=(
+                    float(node_data["pass_through_tolerance_m"])
+                    if node_data.get("pass_through_tolerance_m") is not None
+                    else None
+                ),
             )
             self.nodes[name] = node
             self._adjacency.setdefault(name, [])
@@ -350,6 +362,8 @@ class TopologicalMap:
                     "description": n.description, "tags": n.tags,
                     "aliases": n.aliases,
                     "arrival_landmarks": n.arrival_landmarks,
+                    "arrival_tolerance_m": n.arrival_tolerance_m,
+                    "pass_through_tolerance_m": n.pass_through_tolerance_m,
                 }
                 for n in self.nodes.values()
             ],
@@ -528,12 +542,64 @@ class GlobalPlanner:
 
         wp = self._current_path[self._waypoint_index]
         dist = math.hypot(wp.x - current_pose.x, wp.y - current_pose.y)
+        arrival_tolerance = (
+            tolerance_m
+            if wp.arrival_tolerance_m is None
+            else wp.arrival_tolerance_m
+        )
 
-        if dist < tolerance_m:
+        if dist < arrival_tolerance:
+            logger.info(
+                "GlobalPlanner: accepted waypoint '%s' within %.2fm arrival region",
+                wp.name,
+                arrival_tolerance,
+            )
+            advanced = self.advance_current_waypoint(on_advance=on_advance)
+            return advanced[1] if advanced is not None else None
+
+        pass_tolerance = wp.pass_through_tolerance_m
+        if pass_tolerance is not None and self._passed_waypoint_plane(
+            current_pose,
+            lateral_tolerance_m=pass_tolerance,
+        ):
+            logger.info(
+                "GlobalPlanner: accepted waypoint '%s' after passing its arrival plane",
+                wp.name,
+            )
             advanced = self.advance_current_waypoint(on_advance=on_advance)
             return advanced[1] if advanced is not None else None
 
         return wp
+
+    def get_current_waypoint(self) -> Optional[MapNode]:
+        """Return the active waypoint without changing route progress."""
+        if not self._current_path or self._waypoint_index >= len(self._current_path):
+            return None
+        return self._current_path[self._waypoint_index]
+
+    def _passed_waypoint_plane(
+        self,
+        pose: RobotPose,
+        lateral_tolerance_m: float,
+    ) -> bool:
+        """Return whether pose passed the active waypoint along the route edge."""
+        segment = self.current_segment()
+        if segment is None:
+            return False
+        start, target = segment
+        edge_x = target.x - start.x
+        edge_y = target.y - start.y
+        edge_length = math.hypot(edge_x, edge_y)
+        if edge_length <= 1e-6:
+            return False
+
+        unit_x = edge_x / edge_length
+        unit_y = edge_y / edge_length
+        relative_x = pose.x - start.x
+        relative_y = pose.y - start.y
+        along = relative_x * unit_x + relative_y * unit_y
+        lateral = abs(relative_x * unit_y - relative_y * unit_x)
+        return along >= edge_length and lateral <= lateral_tolerance_m
 
     def current_segment(self) -> Optional[Tuple[MapNode, MapNode]]:
         """Return the active directed map edge."""
@@ -1611,6 +1677,18 @@ class NavCore:
     )
     CLOSE_OBSTACLE_CONFIRM_S: float = _env_float("NAV_CLOSE_OBSTACLE_CONFIRM_S", 0.7)
     CLOSE_OBSTACLE_CONFIRM_READINGS: int = _env_int("NAV_CLOSE_OBSTACLE_CONFIRM_READINGS", 6)
+    CENTER_ONLY_CLOSE_CONFIRM_S: float = _env_float(
+        "NAV_CENTER_ONLY_CLOSE_CONFIRM_S",
+        0.2,
+    )
+    CENTER_ONLY_CLOSE_CONFIRM_READINGS: int = _env_int(
+        "NAV_CENTER_ONLY_CLOSE_CONFIRM_READINGS",
+        3,
+    )
+    CENTER_ONLY_GRID_MARGIN_M: float = _env_float(
+        "NAV_CENTER_ONLY_GRID_MARGIN",
+        0.15,
+    )
     PATH_OBSTACLE_CONFIRM_S: float = _env_float("NAV_PATH_OBSTACLE_CONFIRM_S", 0.3)
     PATH_OBSTACLE_CONFIRM_READINGS: int = _env_int("NAV_PATH_OBSTACLE_CONFIRM_READINGS", 3)
     PATH_OBSTACLE_DISTANCE_TOLERANCE_M: float = _env_float(
@@ -1702,6 +1780,12 @@ class NavCore:
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
             min_readings=self.CLOSE_OBSTACLE_CONFIRM_READINGS,
         )
+        self._center_only_close_confirmation = ObstacleConfirmationTracker(
+            min_seconds=self.CENTER_ONLY_CLOSE_CONFIRM_S,
+            min_readings=self.CENTER_ONLY_CLOSE_CONFIRM_READINGS,
+            distance_tolerance_m=0.10,
+        )
+        self._center_only_close_pending = False
         self._path_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.PATH_OBSTACLE_CONFIRM_S,
             min_readings=self.PATH_OBSTACLE_CONFIRM_READINGS,
@@ -1816,6 +1900,7 @@ class NavCore:
         """Clear the active route plus transient local-navigation state."""
         self._global_planner.clear()
         self._reset_close_obstacle_confirmation()
+        self._reset_center_only_close_confirmation()
         self._reset_path_obstacle_confirmation()
         self._path_obstacle_active = False
         self._obstacle_memory.clear()
@@ -1975,11 +2060,24 @@ class NavCore:
             self._path_obstacle_active = False
             self._reset_progress_tracker(reset_recovery_attempts=False)
 
+        waypoint = self._global_planner.get_current_waypoint()
+        remaining = (
+            math.hypot(waypoint.x - pose.x, waypoint.y - pose.y)
+            if isinstance(waypoint, MapNode)
+            else math.hypot(goal.x - pose.x, goal.y - pose.y)
+        )
+        waypoint_name = waypoint.name if isinstance(waypoint, MapNode) else "goal"
         logger.warning(
-            "NavCore: no-progress recovery %d/%d toward '%s'",
+            "NavCore: no-progress recovery %d/%d toward '%s'; "
+            "pose=(%.2f, %.2f, %.0fdeg) waypoint='%s' remaining=%.2fm",
             attempt,
             self.MAX_STUCK_RECOVERY_ATTEMPTS,
             self._goal_display_name(goal),
+            pose.x,
+            pose.y,
+            math.degrees(pose.yaw),
+            waypoint_name,
+            remaining,
         )
         self._notify_status_change(
             f"I stalled while heading to {self._goal_display_name(goal)}. "
@@ -1989,6 +2087,9 @@ class NavCore:
 
     def _complete_navigation(self, goal: NavGoal, distance_m: Optional[float] = None) -> None:
         """Stop motion and consistently close a successful navigation action."""
+        if distance_m is None:
+            pose = self._odometry.get_pose()
+            distance_m = math.hypot(goal.x - pose.x, goal.y - pose.y)
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
             self._go2.stop_move()
@@ -1997,8 +2098,7 @@ class NavCore:
             self._goal = None
             self._last_stop_reason = None
             self._clear_planner_and_obstacle_state()
-        if distance_m is not None:
-            logger.info("NavCore: goal reached (dist=%.2fm)", distance_m)
+        logger.info("NavCore: goal reached (dist=%.2fm)", distance_m)
         self._stop_depth_when_idle()
         if goal.goal_type == "semantic":
             self._notify_status_change(f"I arrived at {self._goal_display_name(goal)}.")
@@ -2582,7 +2682,7 @@ class NavCore:
         pose = self._odometry.get_pose()
         geometry_grid = self._obstacle_memory.update(raw_grid, pose)
         grid = self._filter_transient_path_obstacle(geometry_grid)
-        self._log_obstacle_telemetry(raw_grid, geometry_grid)
+        self._log_obstacle_telemetry(raw_grid, geometry_grid, pose)
         self._update_progress(pose)
 
         path_dist = grid.path_obstacle_m if grid else float("inf")
@@ -2752,6 +2852,7 @@ class NavCore:
     ) -> Tuple[float, float]:
         """Merge projected path clearance with raw center depth for one safety gate."""
         if cmd.vx <= 1e-3:
+            self._reset_center_only_close_confirmation()
             return path_dist, path_bearing
 
         reading, supported = self._read_center_depth(
@@ -2759,12 +2860,40 @@ class NavCore:
             percentile=25.0,
         )
         if not supported or reading is None:
+            self._reset_center_only_close_confirmation()
             return path_dist, path_bearing
 
         center_dist = reading.distance_m
         if not isinstance(center_dist, (int, float)) or not math.isfinite(center_dist):
+            self._reset_center_only_close_confirmation()
             return path_dist, path_bearing
         center_dist = float(center_dist)
+
+        center_only_close = (
+            center_dist <= self.SAFETY_DISTANCE_M
+            and path_dist > self.SAFETY_DISTANCE_M + self.CENTER_ONLY_GRID_MARGIN_M
+        )
+        if center_only_close:
+            confirmed, started_new_track = self._center_only_close_confirmation.update(
+                center_dist,
+                0.0,
+            )
+            self._center_only_close_pending = not confirmed
+            if started_new_track:
+                logger.info(
+                    "NavCore: checking uncorroborated center-depth reading at %.2fm",
+                    center_dist,
+                )
+            if not confirmed:
+                # Hold for safety while deciding whether this grid-disputed reading
+                # is persistent.  The hold is excluded from stall accounting below.
+                return center_dist, 0.0
+            logger.warning(
+                "NavCore: persistent center-depth hazard at %.2fm despite clear grid",
+                center_dist,
+            )
+        else:
+            self._reset_center_only_close_confirmation()
 
         if center_dist < path_dist:
             return center_dist, 0.0
@@ -2774,6 +2903,7 @@ class NavCore:
         self,
         current: Optional[ObstacleGrid],
         geometry: Optional[ObstacleGrid],
+        pose: RobotPose,
     ) -> None:
         """Periodically report directional clearance and fitted wall geometry."""
         now = time.monotonic()
@@ -2824,8 +2954,21 @@ class NavCore:
             if math.isfinite(current.path_obstacle_m)
             else "clear"
         )
+        waypoint = self._global_planner.get_current_waypoint()
+        if isinstance(waypoint, MapNode):
+            waypoint_text = (
+                f"{waypoint.name}, "
+                f"remaining={math.hypot(waypoint.x - pose.x, waypoint.y - pose.y):.2f}m"
+            )
+        else:
+            waypoint_text = "none"
         logger.info(
-            "NavCore: obstacle view path=%s sectors_deg_m=[%s] wall=[%s]",
+            "NavCore: obstacle view pose=(%.2f, %.2f, %.0fdeg) waypoint=[%s] "
+            "path=%s sectors_deg_m=[%s] wall=[%s]",
+            pose.x,
+            pose.y,
+            math.degrees(pose.yaw),
+            waypoint_text,
             path_text,
             " ".join(sector_values),
             wall_text,
@@ -2907,6 +3050,13 @@ class NavCore:
             self._reset_close_obstacle_confirmation()
             return False
 
+        if self._center_only_close_pending:
+            self._last_progress_time = time.monotonic()
+            self._ensure_go2()
+            if self._go2 and getattr(self._go2, "available", False):
+                self._go2.stop_move()
+            return True
+
         confirmed, started_new_track = self._close_obstacle_confirmation.update(
             nearest_dist,
             nearest_bearing,
@@ -2919,6 +3069,8 @@ class NavCore:
         if confirmed:
             return False
 
+        # A deliberate safety hold is not evidence that navigation is stuck.
+        self._last_progress_time = time.monotonic()
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
             self._go2.stop_move()
@@ -2927,6 +3079,11 @@ class NavCore:
     def _reset_close_obstacle_confirmation(self) -> None:
         """Clear transient close-obstacle confirmation state."""
         self._close_obstacle_confirmation.reset()
+
+    def _reset_center_only_close_confirmation(self) -> None:
+        """Clear confirmation state for a close raw reading absent from the grid."""
+        self._center_only_close_confirmation.reset()
+        self._center_only_close_pending = False
 
     def _filter_transient_path_obstacle(
         self,
@@ -3004,6 +3161,7 @@ class NavCore:
         if reset_recovery_attempts:
             self._stuck_recovery_attempts = 0
         self._reset_close_obstacle_confirmation()
+        self._reset_center_only_close_confirmation()
         self._reset_path_obstacle_confirmation()
 
     @staticmethod

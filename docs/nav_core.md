@@ -212,6 +212,9 @@ agent. Queries are intended for explicit questions and diagnostics, not progress
 | `NAV_PIVOT_YAW_RATE` | `0.50` | In-place yaw rate for planned turns (rad/s) |
 | `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed stop distance in the swept path corridor (meters) |
 | `NAV_AVOIDANCE_DISTANCE` | `0.75` | Start slowing down and locally steering for path-corridor obstacles (meters) |
+| `NAV_CENTER_ONLY_CLOSE_CONFIRM_S` | `0.2` | Persistence required for a close center-depth reading that is absent from the grid |
+| `NAV_CENTER_ONLY_CLOSE_CONFIRM_READINGS` | `3` | Minimum readings required for a grid-disputed close center-depth hazard |
+| `NAV_CENTER_ONLY_GRID_MARGIN` | `0.15` | Grid-clearance margin used when checking center-depth disagreement |
 | `NAV_PATH_OBSTACLE_CONFIRM_S` | `0.3` | Seconds an avoidance-band path obstacle must persist before affecting planning |
 | `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | `3` | Nav-loop readings an avoidance-band path obstacle must appear in before affecting planning |
 | `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | `0.15` | Raw center-depth agreement margin for avoidance-band path obstacles |
