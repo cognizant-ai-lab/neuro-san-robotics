@@ -6,7 +6,10 @@ import json
 import logging
 import os
 import ssl
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -16,6 +19,67 @@ from urllib.request import urlopen
 
 logger = logging.getLogger(__name__)
 _EVENT_DISPATCHER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-events")
+_AWARENESS_LOCK = threading.Lock()
+_DEFAULT_AWARENESS_MAX_AGE_SECONDS = 6 * 60 * 60
+
+
+def _navigation_awareness_path() -> Path:
+    """Return the small cross-process state file used by the event bridge."""
+    return Path(
+        os.environ.get(
+            "CONSCIOUS_NAVIGATION_AWARENESS_FILE",
+            "/tmp/cail-e-navigation-awareness.json",
+        )
+    )
+
+
+def remember_navigation_awareness(text: str) -> None:
+    """Persist the newest authoritative navigation event for later user turns."""
+    text = str(text).strip()
+    if not text:
+        return
+
+    path = _navigation_awareness_path()
+    temporary_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    payload = {"text": text, "updated_at": time.time()}
+    try:
+        with _AWARENESS_LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(temporary_path, path)
+    except OSError:
+        logger.warning("Could not retain navigation awareness", exc_info=True)
+
+
+def latest_navigation_awareness() -> str:
+    """Return recent navigation awareness shared by the native and Flask processes."""
+    path = _navigation_awareness_path()
+    try:
+        with _AWARENESS_LOCK:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        text = str(payload.get("text", "")).strip()
+        updated_at = float(payload.get("updated_at", 0.0))
+        max_age = float(
+            os.environ.get(
+                "CONSCIOUS_NAVIGATION_AWARENESS_MAX_AGE_SECONDS",
+                _DEFAULT_AWARENESS_MAX_AGE_SECONDS,
+            )
+        )
+        if not text or time.time() - updated_at > max(0.0, max_age):
+            return ""
+        return text
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return ""
+
+
+def clear_navigation_awareness() -> None:
+    """Discard awareness left by an earlier native runtime session."""
+    path = _navigation_awareness_path()
+    try:
+        with _AWARENESS_LOCK:
+            path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not clear stale navigation awareness", exc_info=True)
 
 
 def _local_ssl_context(url: str) -> ssl.SSLContext | None:
@@ -49,12 +113,24 @@ def dispatch_agent_event(text: str, *, source: str) -> bool:
     if not text:
         return False
 
+    if source == "navigation":
+        remember_navigation_awareness(text)
+
+    event_text = f"{source}: {text}"
+    if source == "user":
+        awareness = latest_navigation_awareness()
+        if awareness:
+            event_text += (
+                "\nsystem: Current navigation awareness (authoritative): "
+                f"{awareness}"
+            )
+
     endpoint = os.environ.get(
         "CONSCIOUS_AGENT_EVENT_ENDPOINT",
         "http://127.0.0.1:8188/api/v1/conscious_agent/streaming_chat",
     )
     payload = {
-        "user_message": {"type": "HUMAN", "text": f"{source}: {text}"},
+        "user_message": {"type": "HUMAN", "text": event_text},
         "chat_filter": {"chat_filter_type": "MINIMAL"},
     }
     try:

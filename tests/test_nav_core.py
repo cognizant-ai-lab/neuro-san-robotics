@@ -1211,6 +1211,10 @@ class TestNavCoreStatus(unittest.TestCase):
                 ["charging_station", "shrushtis_desk"],
             )
             self.assertEqual(nav.state, NavState.IDLE)
+            self.assertIn(
+                "Current mapped location: Charging station",
+                nav.get_status_summary(),
+            )
             fake_go2.stop_move.assert_called()
             nav.shutdown()
         finally:
@@ -2557,6 +2561,7 @@ class TestNavCoreStatus(unittest.TestCase):
                         "x": 1.3,
                         "y": 15.7,
                         "description": "Charging station, red marker 0",
+                        "arrival_tolerance_m": 0.65,
                     },
                     {
                         "name": "shrushtis_desk",
@@ -2569,13 +2574,17 @@ class TestNavCoreStatus(unittest.TestCase):
                     {"from": "charging_station", "to": "shrushtis_desk", "distance": 4.32},
                 ],
             })
-            nav._odometry.set_pose(1.3, 15.7, 0.0)
+            nav._odometry.set_pose(1.9, 15.7, 0.0)
 
             result = nav.navigate_to("charging station")
 
             self.assertTrue(result)
             self.assertEqual(nav.state, NavState.IDLE)
             self.assertIn("Already at Charging station", nav.get_status_summary())
+            self.assertIn(
+                "Current mapped location: Charging station",
+                nav.get_status_summary(),
+            )
             self.assertEqual(events, ["I am already at Charging station."])
             fake_depth.start.assert_not_called()
             fake_go2.move.assert_not_called()
@@ -2601,6 +2610,17 @@ class TestNavCoreStatus(unittest.TestCase):
             fake_depth = MagicMock()
             fake_depth.get_obstacle_grid.return_value = _empty_grid()
             nav._depth_processor = fake_depth
+            nav._topo_map.load_from_dict({
+                "name": "suite21",
+                "nodes": [{
+                    "name": "kitchen_entrance",
+                    "x": 1.0,
+                    "y": 1.0,
+                    "description": "Kitchen entrance",
+                    "aliases": ["kitchen"],
+                }],
+                "edges": [],
+            })
             nav._odometry.set_pose(1.0, 1.0, 0.0)
 
             goal = NavGoal(goal_type="semantic", x=1.0, y=1.0, label="Kitchen")
@@ -2611,6 +2631,10 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.IDLE)
+            self.assertIn(
+                "Current mapped location: Kitchen entrance",
+                nav.get_status_summary(),
+            )
             fake_go2.stop_move.assert_called()
             fake_depth.stop.assert_called()
             nav.shutdown()

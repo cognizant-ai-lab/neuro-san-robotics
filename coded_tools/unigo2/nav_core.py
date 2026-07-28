@@ -1745,6 +1745,7 @@ class NavCore:
         self._state = NavState.IDLE
         self._goal: Optional[NavGoal] = None
         self._last_stop_reason: Optional[str] = None
+        self._current_location_name: Optional[str] = None
         self._on_status_change = type(self)._global_status_callback
         self._state_lock = threading.Lock()
         self._running = False
@@ -1842,6 +1843,7 @@ class NavCore:
                 else 0.0
             )
         self._odometry.set_pose(node.x, node.y, math.radians(heading_deg))
+        self._current_location_name = node.name
         self._reset_progress_tracker()
         logger.info(
             "NavCore: initial pose anchored to '%s' at (%.2f, %.2f), heading %.0f deg",
@@ -2093,10 +2095,17 @@ class NavCore:
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
             self._go2.stop_move()
+        arrived_node = (
+            self._topo_map.get_node(goal.label or "")
+            if goal.goal_type == "semantic"
+            else None
+        )
         with self._state_lock:
             self._state = NavState.IDLE
             self._goal = None
             self._last_stop_reason = None
+            if arrived_node is not None:
+                self._current_location_name = arrived_node.name
             self._clear_planner_and_obstacle_state()
         logger.info("NavCore: goal reached (dist=%.2fm)", distance_m)
         self._stop_depth_when_idle()
@@ -2171,7 +2180,12 @@ class NavCore:
 
         goal_label = self._topo_map.get_node_label(goal_node)
         dist_to_goal = math.hypot(goal_node.x - pose.x, goal_node.y - pose.y)
-        if dist_to_goal <= self.GOAL_TOLERANCE_M:
+        arrival_tolerance = (
+            goal_node.arrival_tolerance_m
+            if goal_node.arrival_tolerance_m is not None
+            else self.GOAL_TOLERANCE_M
+        )
+        if dist_to_goal <= arrival_tolerance:
             if self._go2 and getattr(self._go2, "available", False):
                 try:
                     self._go2.stop_move()
@@ -2184,6 +2198,7 @@ class NavCore:
                 self._state = NavState.IDLE
                 self._goal = None
                 self._last_stop_reason = f"Already at {goal_label}"
+                self._current_location_name = goal_node.name
                 self._clear_planner_and_obstacle_state()
             logger.info(
                 "NavCore: already at '%s' (dist=%.2fm), no movement needed",
@@ -2232,6 +2247,7 @@ class NavCore:
             )
             self._state = NavState.NAVIGATING
             self._last_stop_reason = None
+            self._current_location_name = None
             self._reset_progress_tracker()
 
         self._ensure_running()
@@ -2266,6 +2282,7 @@ class NavCore:
             self._state = NavState.IDLE
             self._goal = None
             self._last_stop_reason = None
+            self._current_location_name = node.name
             self._clear_planner_and_obstacle_state()
 
         self._odometry.set_pose(node.x, node.y, heading_rad)
@@ -2303,6 +2320,7 @@ class NavCore:
             )
             self._state = NavState.NAVIGATING
             self._last_stop_reason = None
+            self._current_location_name = None
             self._reset_progress_tracker()
 
         self._ensure_running()
@@ -2389,6 +2407,7 @@ class NavCore:
             )
             self._state = NavState.NAVIGATING
             self._last_stop_reason = None
+            self._current_location_name = None
             self._reset_progress_tracker()
 
         start = time.monotonic()
@@ -2506,10 +2525,18 @@ class NavCore:
             state = self._state
             goal = self._goal
             last_stop_reason = self._last_stop_reason
+            current_location_name = getattr(self, "_current_location_name", None)
 
         pose = self._odometry.get_pose()
         parts = [f"Navigation state: {state.value}"]
         parts.append(f"Position: ({pose.x:.1f}, {pose.y:.1f}), heading: {math.degrees(pose.yaw):.0f} deg")
+
+        if current_location_name:
+            current_node = self._topo_map.get_node(current_location_name)
+            if current_node is not None:
+                parts.append(
+                    f"Current mapped location: {self._topo_map.get_node_label(current_node)}"
+                )
 
         if goal:
             if goal.label:

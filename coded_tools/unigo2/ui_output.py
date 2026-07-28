@@ -18,13 +18,21 @@ class UiOutputTool(CodedTool):
         thought = args.get("thought", "")
         say = args.get("say", "")
         if not isinstance(thought, str) or not isinstance(say, str):
-            return "thought and say must be strings"
+            return "thought and say must be strings. End this event turn now."
         if not thought.strip() and not say.strip():
-            return "No output requested."
+            return (
+                "Silence selected. End this event turn now without calling "
+                "ui_output or any other tool again."
+            )
 
         delivered = await asyncio.to_thread(
             publish_ui_output,
             thought=thought,
             say=say,
         )
-        return "Output delivered." if delivered else "The presentation adapter is unavailable."
+        if delivered:
+            return "Output delivered. End this event turn now; do not call ui_output again."
+        return (
+            "The presentation adapter is unavailable. End this event turn now; "
+            "do not retry ui_output."
+        )

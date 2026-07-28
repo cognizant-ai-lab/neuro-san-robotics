@@ -64,6 +64,10 @@ class AgentRuntime:
         if _port_is_open(self.port):
             return
 
+        from coded_tools.unigo2.agent_events import clear_navigation_awareness
+
+        clear_navigation_awareness()
+
         environment = os.environ.copy()
         environment.setdefault("AGENT_MANIFEST_FILE", str(REPO_ROOT / "registries" / "manifest.hocon"))
         environment.setdefault("AGENT_TOOL_PATH", str(REPO_ROOT / "coded_tools"))

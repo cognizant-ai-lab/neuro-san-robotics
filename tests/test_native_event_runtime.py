@@ -1,4 +1,6 @@
 import unittest
+import os
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -27,12 +29,19 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn('"ui_output"', source)
         self.assertNotIn('"scene_observer"', source)
         self.assertIn("only content that appears in the Thoughts pane", source)
+        self.assertIn("Call ui_output at most once per event turn", source)
+        self.assertIn("Never call ui_output with both fields empty", source)
+        self.assertIn('"required": ["thought", "say"]', source)
 
     def test_navigation_has_one_event_aware_agent_tool(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
 
         self.assertIn('"name": "nav_planner"', source)
         self.assertNotIn('"name": "nav_status"', source)
+        self.assertIn("Treat those events as authoritative", source)
+        self.assertIn("call nav_planner with command `status` before answering", source)
+        self.assertIn("Do not call set_location in response", source)
+        self.assertIn("You must use command 'status'", source)
 
     def test_internal_events_are_not_treated_as_user_speech(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
@@ -58,13 +67,70 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn('"max_execution_seconds": 60', source)
 
     def test_dispatch_agent_event_posts_a_minimal_event(self):
-        with patch.object(agent_events, "_post_json") as post:
-            self.assertTrue(agent_events.dispatch_agent_event("go home", source="user"))
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            awareness_file = str(Path(temporary_directory) / "awareness.json")
+            with (
+                patch.dict(
+                    os.environ,
+                    {"CONSCIOUS_NAVIGATION_AWARENESS_FILE": awareness_file},
+                ),
+                patch.object(agent_events, "_post_json") as post,
+            ):
+                self.assertTrue(agent_events.dispatch_agent_event("go home", source="user"))
 
         endpoint, payload = post.call_args.args[:2]
         self.assertIn("/conscious_agent/streaming_chat", endpoint)
         self.assertEqual(payload["user_message"]["text"], "user: go home")
         self.assertEqual(payload["chat_filter"]["chat_filter_type"], "MINIMAL")
+
+    def test_navigation_awareness_is_added_to_later_minimal_user_turns(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            awareness_file = str(Path(temporary_directory) / "awareness.json")
+            with (
+                patch.dict(
+                    os.environ,
+                    {"CONSCIOUS_NAVIGATION_AWARENESS_FILE": awareness_file},
+                ),
+                patch.object(agent_events, "_post_json") as post,
+            ):
+                agent_events.dispatch_agent_event(
+                    "I arrived at kitchen.",
+                    source="navigation",
+                )
+                agent_events.dispatch_agent_event(
+                    "where are you?",
+                    source="user",
+                )
+
+        payload = post.call_args.args[1]
+        self.assertEqual(
+            payload["user_message"]["text"],
+            "user: where are you?\n"
+            "system: Current navigation awareness (authoritative): "
+            "I arrived at kitchen.",
+        )
+
+    def test_stale_navigation_awareness_is_not_added_to_user_turns(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            awareness_file = Path(temporary_directory) / "awareness.json"
+            awareness_file.write_text(
+                '{"text": "I arrived at kitchen.", "updated_at": 1}',
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CONSCIOUS_NAVIGATION_AWARENESS_FILE": str(awareness_file),
+                        "CONSCIOUS_NAVIGATION_AWARENESS_MAX_AGE_SECONDS": "1",
+                    },
+                ),
+                patch.object(agent_events, "_post_json") as post,
+            ):
+                agent_events.dispatch_agent_event("where are you?", source="user")
+
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["user_message"]["text"], "user: where are you?")
 
     def test_navigation_events_are_queued_off_the_control_loop(self):
         with patch.object(agent_events._EVENT_DISPATCHER, "submit") as submit:
