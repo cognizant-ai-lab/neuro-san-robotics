@@ -5,6 +5,7 @@ import os
 import queue
 import random
 import re
+import signal
 import sys
 import tempfile
 import threading
@@ -473,23 +474,37 @@ def add_header(response):
 # Register the cleanup function
 atexit.register(cleanup)
 
+
+def handle_shutdown_signal(signum, _frame):
+    """Make terminal interrupts leave the Werkzeug loop and run bounded cleanup."""
+    logging.info("Received signal %s; shutting down", signum)
+    raise KeyboardInterrupt
+
 if __name__ == "__main__":
     import ssl
 
-    agent_runtime.start()
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
-    ssl_ctx = None
-    if TLS_CERT.exists() and TLS_KEY.exists():
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+    try:
+        agent_runtime.start()
 
-    socketio.run(
-        app,
-        host="0.0.0.0",
-        port=5001,
-        debug=False,
-        ssl_context=ssl_ctx,
-        allow_unsafe_werkzeug=True,
-        log_output=True,
-        use_reloader=False
-    )
+        ssl_ctx = None
+        if TLS_CERT.exists() and TLS_KEY.exists():
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+
+        socketio.run(
+            app,
+            host="0.0.0.0",
+            port=5001,
+            debug=False,
+            ssl_context=ssl_ctx,
+            allow_unsafe_werkzeug=True,
+            log_output=True,
+            use_reloader=False
+        )
+    except KeyboardInterrupt:
+        logging.info("Terminal interrupt received")
+    finally:
+        cleanup()

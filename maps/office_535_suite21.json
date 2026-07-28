@@ -155,7 +155,7 @@
           ],
           "max_pose_error_m": 1.0,
           "max_lateral_error_m": 0.5,
-          "max_detection_distance_m": 0.3,
+          "max_detection_distance_m": 0.55,
           "min_span_m": 0.3
         }
       ],

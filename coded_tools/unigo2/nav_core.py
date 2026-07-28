@@ -1668,6 +1668,10 @@ class NavCore:
         _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.50),
     )
     GOAL_TOLERANCE_M: float = _env_float("NAV_GOAL_TOLERANCE", 0.15)
+    SEMANTIC_ARRIVAL_TOLERANCE_M: float = _env_float(
+        "NAV_SEMANTIC_ARRIVAL_TOLERANCE",
+        0.65,
+    )
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 10.0)
     MAX_STUCK_RECOVERY_ATTEMPTS: int = 2
     PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.0)
@@ -1702,6 +1706,10 @@ class NavCore:
     PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M: float = _env_float(
         "NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN",
         0.15,
+    )
+    PATH_OBSTACLE_CLEAR_CONFIRM_S: float = _env_float(
+        "NAV_PATH_OBSTACLE_CLEAR_CONFIRM_S",
+        1.0,
     )
     FORWARD_SPEED: float = _env_float("NAV_FORWARD_SPEED", 0.45)
     FORWARD_STOP_DISTANCE_M: float = _env_float("NAV_FORWARD_STOP_DISTANCE", 0.50)
@@ -1776,6 +1784,8 @@ class NavCore:
         # Progress tracking
         self._last_progress_pose = RobotPose()
         self._last_progress_time = time.monotonic()
+        self._last_translation_progress_pose = RobotPose()
+        self._last_translation_progress_time = time.monotonic()
         self._stuck_recovery_attempts = 0
         self._close_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
@@ -1794,6 +1804,7 @@ class NavCore:
             bearing_tolerance_rad=self.PATH_OBSTACLE_BEARING_TOLERANCE_RAD,
         )
         self._path_obstacle_active = False
+        self._path_obstacle_clear_since: Optional[float] = None
         self._manual_override_active = False
         self._obstacle_memory = LocalObstacleMemory(self.OBSTACLE_MEMORY_SECONDS)
         self._last_obstacle_telemetry_time = 0.0
@@ -1905,6 +1916,7 @@ class NavCore:
         self._reset_center_only_close_confirmation()
         self._reset_path_obstacle_confirmation()
         self._path_obstacle_active = False
+        self._path_obstacle_clear_since = None
         self._obstacle_memory.clear()
 
     def _notify_waypoint_advance(self, reached: MapNode, upcoming: MapNode) -> None:
@@ -1978,6 +1990,7 @@ class NavCore:
             )
             upcoming = advanced[1] if advanced is not None else None
             self._path_obstacle_active = False
+            self._path_obstacle_clear_since = None
             self._reset_progress_tracker()
             logger.info(
                 "NavCore: accepted mapped wall landmark at '%s' from '%s' "
@@ -1991,22 +2004,40 @@ class NavCore:
         return pose, target, False
 
     def _update_path_obstacle_event(self, path_distance_m: float, goal: NavGoal) -> None:
-        """Publish confirmed obstacle enter/clear transitions once each."""
+        """Publish obstacle transitions without chattering on intermittent depth frames."""
         in_avoidance_band = (
             self.SAFETY_DISTANCE_M < path_distance_m < self.AVOIDANCE_DISTANCE_M
         )
+        now = time.monotonic()
         if in_avoidance_band and not self._path_obstacle_active:
             self._path_obstacle_active = True
+            self._path_obstacle_clear_since = None
             self._notify_status_change(
                 f"I encountered an obstacle in my path at {path_distance_m:.2f} meters "
                 f"while heading to {self._goal_display_name(goal)}. "
                 "My local planner is navigating around it."
             )
-        elif (
-            path_distance_m >= self.AVOIDANCE_DISTANCE_M
-            and self._path_obstacle_active
-        ):
+            return
+
+        if in_avoidance_band:
+            self._path_obstacle_clear_since = None
+            return
+
+        if not self._path_obstacle_active:
+            self._path_obstacle_clear_since = None
+            return
+
+        if path_distance_m < self.AVOIDANCE_DISTANCE_M:
+            self._path_obstacle_clear_since = None
+            return
+
+        if self._path_obstacle_clear_since is None:
+            self._path_obstacle_clear_since = now
+            return
+
+        if now - self._path_obstacle_clear_since >= self.PATH_OBSTACLE_CLEAR_CONFIRM_S:
             self._path_obstacle_active = False
+            self._path_obstacle_clear_since = None
             self._notify_status_change(
                 f"The path is clear again, and I am continuing toward "
                 f"{self._goal_display_name(goal)}."
@@ -2060,6 +2091,7 @@ class NavCore:
             self._state = NavState.NAVIGATING
             self._last_stop_reason = None
             self._path_obstacle_active = False
+            self._path_obstacle_clear_since = None
             self._reset_progress_tracker(reset_recovery_attempts=False)
 
         waypoint = self._global_planner.get_current_waypoint()
@@ -2183,7 +2215,7 @@ class NavCore:
         arrival_tolerance = (
             goal_node.arrival_tolerance_m
             if goal_node.arrival_tolerance_m is not None
-            else self.GOAL_TOLERANCE_M
+            else self.SEMANTIC_ARRIVAL_TOLERANCE_M
         )
         if dist_to_goal <= arrival_tolerance:
             if self._go2 and getattr(self._go2, "available", False):
@@ -2729,7 +2761,7 @@ class NavCore:
             if goal.goal_type == "semantic":
                 waypoint = self._global_planner.get_next_waypoint(
                     pose,
-                    self.GOAL_TOLERANCE_M,
+                    self.SEMANTIC_ARRIVAL_TOLERANCE_M,
                     on_advance=self._notify_waypoint_advance,
                 )
                 if waypoint is None:
@@ -2790,7 +2822,15 @@ class NavCore:
             safety_dist,
             safety_bearing,
         )
-        seconds_since_progress = time.monotonic() - self._last_progress_time
+        now = time.monotonic()
+        # Heading changes let a normal planned pivot finish, but they must not
+        # postpone stall detection forever when the robot only oscillates or
+        # turns beside an obstacle. Ten seconds is longer than a 180-degree
+        # pivot at the configured pivot rate.
+        seconds_since_progress = max(
+            now - self._last_progress_time,
+            now - self._last_translation_progress_time,
+        )
         cmd, event = self._safety.filter_command(
             cmd,
             nearest_obstacle_m=safety_dist,
@@ -3183,8 +3223,12 @@ class NavCore:
 
     def _reset_progress_tracker(self, *, reset_recovery_attempts: bool = True):
         """Reset the stuck-detection timer to now."""
-        self._last_progress_pose = self._odometry.get_pose()
-        self._last_progress_time = time.monotonic()
+        pose = self._odometry.get_pose()
+        now = time.monotonic()
+        self._last_progress_pose = pose
+        self._last_progress_time = now
+        self._last_translation_progress_pose = pose
+        self._last_translation_progress_time = now
         if reset_recovery_attempts:
             self._stuck_recovery_attempts = 0
         self._reset_close_obstacle_confirmation()
@@ -3206,6 +3250,14 @@ class NavCore:
         if dist_moved > 0.1 or yaw_moved > self.YAW_PROGRESS_TOLERANCE_RAD:
             self._last_progress_pose = current_pose
             self._last_progress_time = time.monotonic()
+
+        translation_moved = math.hypot(
+            current_pose.x - self._last_translation_progress_pose.x,
+            current_pose.y - self._last_translation_progress_pose.y,
+        )
+        if translation_moved > 0.1:
+            self._last_translation_progress_pose = current_pose
+            self._last_translation_progress_time = time.monotonic()
             self._stuck_recovery_attempts = 0
 
     # ------------------------------------------------------------------

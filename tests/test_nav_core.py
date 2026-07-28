@@ -1105,6 +1105,7 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertEqual(NavCore.PATH_OBSTACLE_CONFIRM_READINGS, 3)
         self.assertAlmostEqual(NavCore.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M, 0.15)
         self.assertAlmostEqual(NavCore.GOAL_TOLERANCE_M, 0.15)
+        self.assertAlmostEqual(NavCore.SEMANTIC_ARRIVAL_TOLERANCE_M, 0.65)
         self.assertAlmostEqual(NavCore.OBSTACLE_GRID_MAX_AGE_S, 0.50)
 
     def test_stale_obstacle_grid_is_rejected(self):
@@ -1951,6 +1952,95 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_pivot_only_cannot_mask_translation_stall(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._odometry.set_pose(0.0, 0.0, math.radians(10.0))
+
+            goal = NavGoal(goal_type="relative", x=0.0, y=2.0, label="Kitchen")
+            stale_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._last_progress_pose = RobotPose(0.0, 0.0, 0.0)
+                nav._last_progress_time = stale_time
+                nav._last_translation_progress_pose = nav._odometry.get_pose()
+                nav._last_translation_progress_time = stale_time
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            self.assertEqual(
+                events,
+                [
+                    "I stalled while heading to Kitchen. I replanned from my current "
+                    "position and am continuing."
+                ],
+            )
+            fake_go2.stop_move.assert_called()
+            fake_go2.move.assert_not_called()
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    def test_path_obstacle_clear_event_requires_stable_clearance(self):
+        nav = NavCore.__new__(NavCore)
+        nav._path_obstacle_active = False
+        nav._path_obstacle_clear_since = None
+        nav._on_status_change = MagicMock()
+        goal = NavGoal(label="Kitchen")
+
+        with patch(
+            "coded_tools.unigo2.nav_core.time.monotonic",
+            side_effect=[0.0, 0.1, 0.2, 0.3, 1.2, 1.4],
+        ):
+            nav._update_path_obstacle_event(0.5, goal)
+            nav._update_path_obstacle_event(float("inf"), goal)
+            nav._update_path_obstacle_event(0.5, goal)
+            nav._update_path_obstacle_event(float("inf"), goal)
+            nav._update_path_obstacle_event(float("inf"), goal)
+            nav._update_path_obstacle_event(float("inf"), goal)
+
+        self.assertEqual(nav._on_status_change.call_count, 2)
+        self.assertIn(
+            "encountered an obstacle",
+            nav._on_status_change.call_args_list[0].args[0],
+        )
+        self.assertIn(
+            "path is clear again",
+            nav._on_status_change.call_args_list[1].args[0],
+        )
+
+    def test_rotation_does_not_reset_stall_recovery_attempts(self):
+        nav = NavCore.__new__(NavCore)
+        nav._last_progress_pose = RobotPose(0.0, 0.0, 0.0)
+        nav._last_translation_progress_pose = RobotPose(0.0, 0.0, 0.0)
+        nav._last_progress_time = 0.0
+        nav._last_translation_progress_time = 0.0
+        nav._stuck_recovery_attempts = 1
+
+        nav._update_progress(RobotPose(0.0, 0.0, math.radians(10.0)))
+        self.assertEqual(nav._stuck_recovery_attempts, 1)
+
+        nav._update_progress(RobotPose(0.2, 0.0, math.radians(10.0)))
+        self.assertEqual(nav._stuck_recovery_attempts, 0)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_nav_cycle_stuck_replans_and_keeps_goal(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
@@ -2561,7 +2651,6 @@ class TestNavCoreStatus(unittest.TestCase):
                         "x": 1.3,
                         "y": 15.7,
                         "description": "Charging station, red marker 0",
-                        "arrival_tolerance_m": 0.65,
                     },
                     {
                         "name": "shrushtis_desk",
