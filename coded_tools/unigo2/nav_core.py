@@ -528,6 +528,41 @@ class GlobalPlanner:
         self._waypoint_index = 1  # skip start node
         return path
 
+    def replan_path_preserving_progress(
+        self,
+        current_pose: RobotPose,
+        goal_label: str,
+    ) -> Optional[List[MapNode]]:
+        """Replan without reinstating waypoints already completed on this route."""
+        active = self.get_current_waypoint()
+        completed_names = {
+            node.name for node in self._current_path[: self._waypoint_index]
+        }
+        path = self.plan_path(current_pose, goal_label)
+        if path is None:
+            return None
+
+        if active is not None:
+            active_indices = [
+                index for index, node in enumerate(path) if node.name == active.name
+            ]
+            if active_indices:
+                self._waypoint_index = active_indices[0]
+
+        while (
+            self._waypoint_index < len(self._current_path)
+            and self._current_path[self._waypoint_index].name in completed_names
+        ):
+            self._waypoint_index += 1
+
+        logger.info(
+            "GlobalPlanner: replanned while preserving progress; active waypoint='%s'",
+            self._current_path[self._waypoint_index].name
+            if self._waypoint_index < len(self._current_path)
+            else "complete",
+        )
+        return path
+
     def get_next_waypoint(
         self,
         current_pose: RobotPose,
@@ -1724,6 +1759,10 @@ class NavCore:
     FORWARD_ACTUAL_SPEED_RATIO: float = _env_float("NAV_FORWARD_ACTUAL_SPEED_RATIO", 1.40)
     DEPTH_READY_TIMEOUT_S: float = _env_float("NAV_DEPTH_READY_TIMEOUT", 2.0)
     OBSTACLE_GRID_MAX_AGE_S: float = 0.50
+    OBSTACLE_GRID_LOSS_GRACE_S: float = _env_float(
+        "NAV_OBSTACLE_GRID_LOSS_GRACE",
+        3.0,
+    )
     YAW_PROGRESS_TOLERANCE_RAD: float = _env_float(
         "NAV_YAW_PROGRESS_TOLERANCE_RAD",
         math.radians(5.0),
@@ -1748,6 +1787,15 @@ class NavCore:
     STALL_BACKUP_CLEARANCE_DROP_M: float = _env_float(
         "NAV_STALL_BACKUP_CLEARANCE_DROP",
         0.08,
+    )
+    STALL_SCAN_YAW_RATE_RPS: float = _env_float("NAV_STALL_SCAN_YAW_RATE", 0.35)
+    STALL_SCAN_MIN_ANGLE_RAD: float = _env_float(
+        "NAV_STALL_SCAN_MIN_ANGLE_RAD",
+        math.radians(20.0),
+    )
+    STALL_SCAN_MAX_ANGLE_RAD: float = _env_float(
+        "NAV_STALL_SCAN_MAX_ANGLE_RAD",
+        math.radians(50.0),
     )
     STALL_ESCAPE_COMMAND_PERIOD_S: float = _env_float(
         "NAV_STALL_ESCAPE_COMMAND_PERIOD",
@@ -1809,6 +1857,7 @@ class NavCore:
         self._last_translation_progress_pose = RobotPose()
         self._last_translation_progress_time = time.monotonic()
         self._stuck_recovery_attempts = 0
+        self._last_stall_scan_direction: Optional[float] = None
         self._close_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
             min_readings=self.CLOSE_OBSTACLE_CONFIRM_READINGS,
@@ -1827,6 +1876,8 @@ class NavCore:
         )
         self._path_obstacle_active = False
         self._path_obstacle_clear_since: Optional[float] = None
+        self._obstacle_grid_unavailable_since: Optional[float] = None
+        self._obstacle_grid_unavailable_notified = False
         self._manual_override_active = False
         self._obstacle_memory = LocalObstacleMemory(self.OBSTACLE_MEMORY_SECONDS)
         self._last_obstacle_telemetry_time = 0.0
@@ -1939,6 +1990,9 @@ class NavCore:
         self._reset_path_obstacle_confirmation()
         self._path_obstacle_active = False
         self._path_obstacle_clear_since = None
+        self._obstacle_grid_unavailable_since = None
+        self._obstacle_grid_unavailable_notified = False
+        self._last_stall_scan_direction = None
         self._obstacle_memory.clear()
 
     def _notify_waypoint_advance(self, reached: MapNode, upcoming: MapNode) -> None:
@@ -2089,6 +2143,62 @@ class NavCore:
         logger.warning("NavCore: %s", reason)
         self._notify_status_change(message)
         self._stop_depth_when_idle()
+
+    def _pause_for_obstacle_grid_recovery(self, goal: NavGoal) -> None:
+        """Stop safely during a brief depth dropout while preserving the route."""
+        self._ensure_go2()
+        if self._go2 and getattr(self._go2, "available", False):
+            try:
+                self._go2.stop_move()
+            except Exception:
+                logger.debug(
+                    "NavCore: stop_move failed during obstacle-grid pause",
+                    exc_info=True,
+                )
+
+        now = time.monotonic()
+        if self._obstacle_grid_unavailable_since is None:
+            self._obstacle_grid_unavailable_since = now
+            logger.warning(
+                "NavCore: obstacle grid unavailable; holding route for up to %.1fs",
+                self.OBSTACLE_GRID_LOSS_GRACE_S,
+            )
+        if not self._obstacle_grid_unavailable_notified:
+            self._obstacle_grid_unavailable_notified = True
+            self._notify_status_change(
+                f"My obstacle view paused while heading to "
+                f"{self._goal_display_name(goal)}. I stopped safely and am waiting "
+                "for it to recover."
+            )
+
+    def _obstacle_grid_grace_expired(self) -> bool:
+        """Return whether the current depth dropout exceeded its retry window."""
+        if self._obstacle_grid_unavailable_since is None:
+            return False
+        return (
+            time.monotonic() - self._obstacle_grid_unavailable_since
+            >= self.OBSTACLE_GRID_LOSS_GRACE_S
+        )
+
+    def _resume_after_obstacle_grid_recovery(self, goal: NavGoal) -> None:
+        """Clear a transient depth pause and prevent it from becoming a stall."""
+        if self._obstacle_grid_unavailable_since is None:
+            return
+        outage_s = time.monotonic() - self._obstacle_grid_unavailable_since
+        self._obstacle_grid_unavailable_since = None
+        was_notified = self._obstacle_grid_unavailable_notified
+        self._obstacle_grid_unavailable_notified = False
+        self._reset_progress_tracker(reset_recovery_attempts=False)
+        logger.info(
+            "NavCore: obstacle grid recovered after %.2fs; resuming '%s'",
+            outage_s,
+            self._goal_display_name(goal),
+        )
+        if was_notified:
+            self._notify_status_change(
+                f"My obstacle view recovered, and I am continuing toward "
+                f"{self._goal_display_name(goal)}."
+            )
 
     def _lateral_escape_clearance(self, grid: ObstacleGrid, direction: float) -> float:
         """Return visible clearance on one side of the robot for a short strafe."""
@@ -2304,6 +2414,111 @@ class NavCore:
         pose, side_name = lateral
         return pose, f"backward then {side_name}"
 
+    @staticmethod
+    def _stall_side_view_clearance(grid: ObstacleGrid, direction: float) -> float:
+        """Estimate visible open distance in the left or right turning sector."""
+        points = occupied_xy_points(grid)
+        if points.size == 0:
+            return float("inf")
+        distances = np.hypot(points[:, 0], points[:, 1])
+        bearings = np.arctan2(points[:, 1], points[:, 0]) * direction
+        selected = distances[
+            (bearings >= math.radians(15.0))
+            & (bearings <= math.radians(60.0))
+        ]
+        if selected.size == 0:
+            return float("inf")
+        return float(np.percentile(selected, 10))
+
+    def _choose_stall_scan_direction(self, grid: ObstacleGrid) -> float:
+        """Choose an exploratory turn and force the next attempt to try the other side."""
+        if self._last_stall_scan_direction in {-1.0, 1.0}:
+            return -self._last_stall_scan_direction
+
+        clearances = {
+            1.0: self._stall_side_view_clearance(grid, 1.0),
+            -1.0: self._stall_side_view_clearance(grid, -1.0),
+        }
+        best = max(clearances.values())
+        candidates = [
+            direction
+            for direction, clearance in clearances.items()
+            if (
+                clearance == best
+                or (
+                    math.isfinite(clearance)
+                    and math.isfinite(best)
+                    and clearance >= best - 0.10
+                )
+            )
+        ]
+        return random.choice(candidates)
+
+    def _execute_stall_turn_scan(
+        self,
+        goal: NavGoal,
+        grid: Optional[ObstacleGrid],
+    ) -> Optional[Tuple[RobotPose, str]]:
+        """Pivot to inspect an opening, alternating direction after a failed recovery."""
+        if grid is None:
+            return None
+        self._ensure_go2()
+        if not self._go2 or not getattr(self._go2, "available", False):
+            return None
+
+        direction = self._choose_stall_scan_direction(grid)
+        self._last_stall_scan_direction = direction
+        side_name = "left" if direction > 0.0 else "right"
+        yaw_rate = max(0.10, abs(self.STALL_SCAN_YAW_RATE_RPS)) * direction
+        min_angle = max(0.0, self.STALL_SCAN_MIN_ANGLE_RAD)
+        max_angle = max(min_angle, self.STALL_SCAN_MAX_ANGLE_RAD)
+        target_angle = random.uniform(min_angle, max_angle)
+        period = max(0.05, self.STALL_ESCAPE_COMMAND_PERIOD_S)
+        turned = 0.0
+        command = VelocityCommand(vx=0.0, vy=0.0, vyaw=yaw_rate)
+
+        logger.warning(
+            "NavCore: scanning up to %.0fdeg %s for an open path toward '%s'",
+            math.degrees(target_angle),
+            side_name,
+            self._goal_display_name(goal),
+        )
+        try:
+            while turned < target_angle:
+                latest = self._fresh_obstacle_grid(
+                    self._depth_processor.get_obstacle_grid()
+                )
+                if latest is None:
+                    logger.warning(
+                        "NavCore: paused %s turn scan; obstacle view unavailable",
+                        side_name,
+                    )
+                    return None
+                if (
+                    turned >= min_angle
+                    and latest.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                ):
+                    logger.warning(
+                        "NavCore: found an open path after turning %.0fdeg %s",
+                        math.degrees(turned),
+                        side_name,
+                    )
+                    break
+                self._go2.move(vx=0.0, vy=0.0, vyaw=yaw_rate)
+                self._odometry.update_from_velocity(command, period)
+                time.sleep(period)
+                turned += abs(yaw_rate) * period
+        except Exception:
+            logger.exception("NavCore: %s turn scan failed", side_name)
+            return None
+        finally:
+            try:
+                self._go2.stop_move()
+            except Exception:
+                logger.debug("NavCore: stop failed after turn scan", exc_info=True)
+
+        return self._odometry.get_pose(), side_name
+
     def _recover_from_stall(
         self,
         goal: NavGoal,
@@ -2336,8 +2551,19 @@ class NavCore:
             return True
         pose, escape_direction = escaped
 
+        latest_grid = self._fresh_obstacle_grid(
+            self._depth_processor.get_obstacle_grid()
+        )
+        scanned = self._execute_stall_turn_scan(goal, latest_grid)
+        scan_direction = None
+        if scanned is not None:
+            pose, scan_direction = scanned
+
         if goal.goal_type == "semantic":
-            path = self._global_planner.plan_path(pose, goal.label or "")
+            path = self._global_planner.replan_path_preserving_progress(
+                pose,
+                goal.label or "",
+            )
             if path is None:
                 return False
 
@@ -2378,7 +2604,9 @@ class NavCore:
         )
         self._notify_status_change(
             f"I stalled while heading to {self._goal_display_name(goal)}. "
-            f"I stepped {escape_direction}, rerouted, and am continuing."
+            f"I stepped {escape_direction}"
+            + (f", turned {scan_direction}" if scan_direction else "")
+            + ", rerouted, and am continuing."
         )
         return True
 
@@ -3018,6 +3246,19 @@ class NavCore:
             self._complete_navigation(goal, dist_to_goal)
             return
 
+        if raw_grid is None:
+            self._pause_for_obstacle_grid_recovery(goal)
+            if self._obstacle_grid_grace_expired():
+                self._abort_active_navigation(
+                    goal,
+                    "E-STOP: obstacle grid unavailable",
+                    f"I stopped before reaching {self._goal_display_name(goal)} "
+                    "because my obstacle view did not recover.",
+                    state=NavState.E_STOP,
+                )
+            return
+        self._resume_after_obstacle_grid_recovery(goal)
+
         # 3. Compute velocity command
         if state == NavState.NAVIGATING:
             accepted_landmark = False
@@ -3050,19 +3291,9 @@ class NavCore:
             goal_dir = math.atan2(math.sin(goal_dir), math.cos(goal_dir))
             goal_dist = math.hypot(target_x - pose.x, target_y - pose.y)
 
-            if grid:
-                cmd = self._local_planner.compute_velocity(grid, goal_dir, goal_dist)
-                if goal.goal_type == "semantic":
-                    cmd = self._local_planner.apply_corridor_course_correction(cmd, grid)
-            else:
-                self._abort_active_navigation(
-                    goal,
-                    "E-STOP: obstacle grid unavailable",
-                    f"I stopped before reaching {self._goal_display_name(goal)} "
-                    "because my obstacle grid became unavailable.",
-                    state=NavState.E_STOP,
-                )
-                return
+            cmd = self._local_planner.compute_velocity(grid, goal_dir, goal_dist)
+            if goal.goal_type == "semantic":
+                cmd = self._local_planner.apply_corridor_course_correction(cmd, grid)
 
         elif state == NavState.AVOIDING:
             if grid:
@@ -3494,6 +3725,7 @@ class NavCore:
         self._last_translation_progress_time = now
         if reset_recovery_attempts:
             self._stuck_recovery_attempts = 0
+            self._last_stall_scan_direction = None
         self._reset_close_obstacle_confirmation()
         self._reset_center_only_close_confirmation()
         self._reset_path_obstacle_confirmation()
@@ -3522,6 +3754,7 @@ class NavCore:
             self._last_translation_progress_pose = current_pose
             self._last_translation_progress_time = time.monotonic()
             self._stuck_recovery_attempts = 0
+            self._last_stall_scan_direction = None
 
     # ------------------------------------------------------------------
     # Lifecycle
