@@ -1,6 +1,6 @@
 {
   "name": "535 Mission - Suite 21 Red Marker Graph",
-  "version": "1.0",
+  "version": "1.1",
   "coordinate_system": {
     "origin": "SW corner of marked floor-plan content bbox",
     "x_axis": "East (up on source image/PDF)",
@@ -132,10 +132,10 @@
       }
     },
     {
-      "name": "robertos_desk",
+      "name": "legacy_marker_5",
       "x": 6.86,
       "y": 27.27,
-      "description": "Roberto's desk, red marker 5 from annotated 535 Mission map",
+      "description": "Legacy marker 5, former Roberto's desk location from the earlier 535 Mission map",
       "tags": [
         "waypoint",
         "red_marker"
@@ -216,6 +216,108 @@
         "x": 3065.0,
         "y": 2046.5
       }
+    },
+    {
+      "name": "marker_a", "x": 10.34, "y": 2.59,
+      "description": "Coffee station, marker A from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point a", "marker a", "waypoint a"],
+      "source_pixel": {"x": 3500, "y": 1434}
+    },
+    {
+      "name": "marker_b", "x": 13.22, "y": 2.45,
+      "description": "Dishwasher, marker B from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point b", "marker b", "waypoint b"],
+      "source_pixel": {"x": 3512, "y": 1197}
+    },
+    {
+      "name": "marker_c", "x": 17.12, "y": 7.88,
+      "description": "Ping pong table, marker C from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point c", "marker c", "waypoint c"],
+      "source_pixel": {"x": 3066, "y": 877}
+    },
+    {
+      "name": "marker_d", "x": 22.37, "y": 18.52,
+      "description": "Immersive room, marker D from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point d", "marker d", "waypoint d"],
+      "source_pixel": {"x": 2192, "y": 446}
+    },
+    {
+      "name": "marker_e", "x": 20.98, "y": 26.38,
+      "description": "Lobby, marker E from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point e", "marker e", "waypoint e"],
+      "source_pixel": {"x": 1546, "y": 560}
+    },
+    {
+      "name": "marker_f", "x": 17.53, "y": 25.95,
+      "description": "Lobby entrance, marker F from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point f", "marker f", "waypoint f"],
+      "source_pixel": {"x": 1582, "y": 843}
+    },
+    {
+      "name": "marker_g", "x": 21.95, "y": 29.32,
+      "description": "Patent wall, marker G from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point g", "marker g", "waypoint g"],
+      "source_pixel": {"x": 1305, "y": 480}
+    },
+    {
+      "name": "marker_h", "x": 20.08, "y": 36.44,
+      "description": "Big conference room, marker H from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point h", "marker h", "waypoint h"],
+      "source_pixel": {"x": 720, "y": 634}
+    },
+    {
+      "name": "marker_i", "x": 21.85, "y": 35.24,
+      "description": "Studio, marker I from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point i", "marker i", "waypoint i"],
+      "source_pixel": {"x": 819, "y": 488}
+    },
+    {
+      "name": "marker_j", "x": 18.43, "y": 39.03,
+      "description": "Small conference room, marker J from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point j", "marker j", "waypoint j"],
+      "source_pixel": {"x": 507, "y": 769}
+    },
+    {
+      "name": "marker_k", "x": 12.82, "y": 38.88,
+      "description": "Middle office, marker K from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point k", "marker k", "waypoint k"],
+      "source_pixel": {"x": 520, "y": 1230}
+    },
+    {
+      "name": "marker_l", "x": 7.93, "y": 39.03,
+      "description": "Side office, marker L from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point l", "marker l", "waypoint l"],
+      "source_pixel": {"x": 507, "y": 1632}
+    },
+    {
+      "name": "marker_m", "x": 5.82, "y": 37.51,
+      "description": "Gathering area, marker M from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point m", "marker m", "waypoint m"],
+      "source_pixel": {"x": 632, "y": 1805}
+    },
+    {
+      "name": "marker_n", "x": 6.21, "y": 37.48,
+      "description": "Printer, marker N from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point n", "marker n", "waypoint n"],
+      "source_pixel": {"x": 635, "y": 1773}
+    },
+    {
+      "name": "robertos_desk", "x": 7.40, "y": 29.38,
+      "description": "Roberto's desk, marker O from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["Roberto desk", "point o", "marker o", "waypoint o"],
+      "source_pixel": {"x": 1300, "y": 1675}
+    },
+    {
+      "name": "marker_p", "x": 9.47, "y": 30.96,
+      "description": "Mens room, marker P from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point p", "marker p", "waypoint p"],
+      "source_pixel": {"x": 1170, "y": 1505}
+    },
+    {
+      "name": "marker_q", "x": 17.15, "y": 18.23,
+      "description": "Ladies room, marker Q from the updated 535 Mission map",
+      "tags": ["waypoint", "red_marker"], "aliases": ["point q", "marker q", "waypoint q"],
+      "source_pixel": {"x": 2216, "y": 874}
     }
   ],
   "edges": [
@@ -242,7 +344,7 @@
     },
     {
       "from": "entrance",
-      "to": "robertos_desk",
+      "to": "legacy_marker_5",
       "distance": 2.55,
       "traversable": true,
       "description": "annotated edge from entrance to Roberto's desk"
@@ -281,6 +383,78 @@
       "distance": 2.31,
       "traversable": true,
       "description": "annotated edge from Jamie's desk to kitchen entrance"
+    },
+    {
+      "from": "marker_i", "to": "marker_h", "distance": 2.14, "traversable": true,
+      "description": "marked corridor link I to H"
+    },
+    {
+      "from": "marker_h", "to": "marker_j", "distance": 3.07, "traversable": true,
+      "description": "marked corridor link H to J"
+    },
+    {
+      "from": "marker_j", "to": "marker_k", "distance": 5.61, "traversable": true,
+      "description": "marked corridor link J to K"
+    },
+    {
+      "from": "marker_k", "to": "marker_l", "distance": 4.89, "traversable": true,
+      "description": "marked corridor link K to L"
+    },
+    {
+      "from": "marker_l", "to": "marker_n", "distance": 2.32, "traversable": true,
+      "description": "marked corridor link L to N"
+    },
+    {
+      "from": "marker_n", "to": "marker_m", "distance": 0.39, "traversable": true,
+      "description": "marked corridor link N to M"
+    },
+    {
+      "from": "marker_n", "to": "robertos_desk", "distance": 8.19, "traversable": true,
+      "description": "marked corridor link N to O"
+    },
+    {
+      "from": "robertos_desk", "to": "marker_p", "distance": 2.60, "traversable": true,
+      "description": "marked corridor link O to P"
+    },
+    {
+      "from": "marker_p", "to": "entrance", "distance": 3.69, "traversable": true,
+      "description": "marked corridor link P to entrance"
+    },
+    {
+      "from": "marker_i", "to": "marker_g", "distance": 5.92, "traversable": true,
+      "description": "marked corridor link I to G"
+    },
+    {
+      "from": "marker_g", "to": "marker_e", "distance": 3.10, "traversable": true,
+      "description": "marked corridor link G to E"
+    },
+    {
+      "from": "marker_e", "to": "marker_f", "distance": 3.48, "traversable": true,
+      "description": "marked corridor link E to F"
+    },
+    {
+      "from": "marker_f", "to": "marker_q", "distance": 7.73, "traversable": true,
+      "description": "marked corridor link F to Q"
+    },
+    {
+      "from": "marker_q", "to": "marker_d", "distance": 5.23, "traversable": true,
+      "description": "marked corridor link Q to D"
+    },
+    {
+      "from": "marker_q", "to": "marker_c", "distance": 10.35, "traversable": true,
+      "description": "marked corridor link Q to C"
+    },
+    {
+      "from": "marker_c", "to": "marker_b", "distance": 6.69, "traversable": true,
+      "description": "marked corridor link C to B"
+    },
+    {
+      "from": "marker_b", "to": "marker_a", "distance": 2.88, "traversable": true,
+      "description": "marked corridor link B to A"
+    },
+    {
+      "from": "marker_a", "to": "kitchen_entrance", "distance": 4.64, "traversable": true,
+      "description": "marked corridor link A to kitchen entrance"
     }
   ],
   "exclusion_zones": [
@@ -288,6 +462,7 @@
       "name": "glass_enclosure_21_002_21_018",
       "type": "polygon",
       "reason": "Glass enclosure around 21-002 and 21-018 - robot cannot detect transparent barriers",
+      "tags": ["transparent_wall", "glass_enclosure", "no_bot_zone"],
       "points": [
         [
           7.65,
@@ -325,6 +500,25 @@
         }
       ],
       "buffer_m": 0.0
+    }
+  ],
+  "transparent_barriers": [
+    {
+      "name": "glass_enclosure_21_002_21_018",
+      "material": "glass",
+      "navigation_policy": "do_not_cross; use the perimeter marker graph"
+    },
+    {
+      "name": "conference_rooms",
+      "areas": ["21-007", "21-CRC-01", "21-CRC-02", "21-CRC-03"],
+      "material": "matted_glass",
+      "navigation_policy": "treat room perimeters as transparent barriers; route through marked corridor waypoints and doors only"
+    },
+    {
+      "name": "side_offices",
+      "areas": ["21-003", "21-004", "21-005", "21-006", "21-008", "21-009", "21-010", "21-011", "21-013", "21-014", "21-017", "21-018"],
+      "material": "matted_glass",
+      "navigation_policy": "treat office perimeters as transparent barriers; route through marked corridor waypoints and doors only"
     }
   ]
 }
