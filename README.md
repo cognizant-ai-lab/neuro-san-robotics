@@ -38,12 +38,17 @@ CAIL-E. Stop the Flask process to stop the service it started.
 ### Ambient listening mode
 
 The web UI has an **Ambient Off / Ambient On** control beside the microphone.
-When enabled, the browser microphone is captured continuously in short segments
-and each usable transcription is queued to the native agent as an `ambient:`
-event. There is no LLM pre-filter and no acknowledgement or automatic speech
-for these events. CAIL-E's agent instructions require it to remain silent unless
-the transcript clearly addresses or refers to CAIL-E. Capture pauses while
-CAIL-E is speaking so it does not transcribe its own TTS output.
+When enabled, the browser keeps a WebRTC microphone stream connected to OpenAI's
+Realtime transcription service. Server voice-activity detection produces complete
+utterances, and each is queued to the native agent as an `ambient:` event. There
+is no LLM pre-filter and no acknowledgement or automatic speech for these events.
+All raw **Heard:** text appears in the Thoughts pane. CAIL-E remains silent unless
+the transcript clearly addresses or refers to it; when it responds, the relevant
+addressed speech is also promoted into chat like a push-to-talk transcript.
+Capture pauses while CAIL-E speaks so it does not transcribe its own TTS output.
+
+Realtime ambient transcription uses `gpt-live-transcribe` by default. Override
+it with `CONSCIOUS_AMBIENT_TRANSCRIPTION_MODEL` if needed.
 
 ### Robot environment (`setmyenv.sh`)
 

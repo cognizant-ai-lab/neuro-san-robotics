@@ -30,6 +30,7 @@ class UiOutputToolTests(unittest.IsolatedAsyncioTestCase):
         publish.assert_called_once_with(
             thought="I reached the kitchen.",
             say="",
+            heard="",
         )
         self.assertIn("End this event turn now", result)
         self.assertIn("do not call ui_output again", result)

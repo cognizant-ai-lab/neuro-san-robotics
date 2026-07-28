@@ -32,6 +32,7 @@ from flask import send_file
 from flask_socketio import SocketIO
 
 from apps.conscious_assistant.agent_runtime import AgentRuntime
+from apps.conscious_assistant.realtime_transcription import create_realtime_call
 from apps.conscious_assistant.scene_observer import SceneObserver
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 from coded_tools.unigo2.agent_events import queue_agent_event
@@ -115,10 +116,17 @@ def receive_agent_output():
 
     thought = payload.get("thought", "")
     say = payload.get("say", "")
+    heard = payload.get("heard", "")
     observation = payload.get("observation")
-    if not isinstance(thought, str) or not isinstance(say, str):
-        return jsonify({"error": "thought and say must be strings"}), 400
+    if (
+        not isinstance(thought, str)
+        or not isinstance(say, str)
+        or not isinstance(heard, str)
+    ):
+        return jsonify({"error": "thought, say, and heard must be strings"}), 400
 
+    if heard.strip():
+        socketio.emit("update_user_input", {"data": heard.strip()}, namespace="/chat")
     if thought.strip():
         socketio.emit("update_thoughts", {"data": thought.strip()}, namespace="/chat")
     if say.strip():
@@ -395,6 +403,43 @@ def transcribe_audio():
                 os.unlink(temp_file.name)
             except Exception as e:
                 print(f"Failed to delete temp file: {e}")
+
+
+@app.route("/api/realtime/transcription-session", methods=["POST"])
+def realtime_transcription_session():
+    """Create a persistent transcription-only WebRTC session for ambient mode."""
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_api_key:
+        return jsonify({
+            "error": "OpenAI API key not configured. Set OPENAI_API_KEY env var."
+        }), 503
+
+    offer_sdp = request.get_data(cache=False)
+    if not offer_sdp or request.mimetype != "application/sdp":
+        return jsonify({"error": "Expected an application/sdp WebRTC offer"}), 400
+
+    model = os.environ.get(
+        "CONSCIOUS_AMBIENT_TRANSCRIPTION_MODEL",
+        "gpt-live-transcribe",
+    )
+    try:
+        status, content_type, response_body = create_realtime_call(
+            offer_sdp,
+            openai_api_key,
+            model,
+        )
+    except OSError:
+        logging.exception("Could not reach realtime transcription service")
+        return jsonify({"error": "Realtime transcription service is unavailable"}), 502
+    if status >= 400:
+        logging.error(
+            "Realtime transcription session creation failed (%d): %s",
+            status,
+            response_body.decode("utf-8", errors="replace")[:1000],
+        )
+        return jsonify({"error": "Could not start realtime transcription"}), status
+
+    return response_body, status, {"Content-Type": content_type or "application/sdp"}
 
 
 @socketio.on("user_input", namespace="/chat")

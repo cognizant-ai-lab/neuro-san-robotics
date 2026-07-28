@@ -146,17 +146,23 @@ def queue_agent_event(text: str, *, source: str) -> None:
     _EVENT_DISPATCHER.submit(dispatch_agent_event, text, source=source)
 
 
-def publish_ui_output(*, thought: str = "", say: str = "") -> bool:
+def publish_ui_output(*, thought: str = "", say: str = "", heard: str = "") -> bool:
     """Deliver agent-authored UI output to the local Flask presentation adapter."""
     thought = str(thought).strip()
     say = str(say).strip()
+    heard = str(heard).strip()
     if not thought and not say:
         return False
 
     endpoint = os.environ.get("CONSCIOUS_UI_EVENT_ENDPOINT", "http://127.0.0.1:5001/api/agent-output")
     token = os.environ.get("CONSCIOUS_UI_EVENT_TOKEN", "")
     try:
-        _post_json(endpoint, {"thought": thought, "say": say}, token=token, timeout=10.0)
+        _post_json(
+            endpoint,
+            {"thought": thought, "say": say, "heard": heard},
+            token=token,
+            timeout=10.0,
+        )
         return True
     except (OSError, URLError, ValueError) as exc:
         logger.warning("Could not publish agent output to the UI: %s", exc)
