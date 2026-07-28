@@ -1118,6 +1118,9 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.STALL_ESCAPE_SPEED_MPS, 0.15)
         self.assertAlmostEqual(NavCore.STALL_ESCAPE_DISTANCE_M, 0.15)
         self.assertAlmostEqual(NavCore.STALL_ESCAPE_CLEARANCE_M, 0.40)
+        self.assertAlmostEqual(NavCore.STALL_ESCAPE_ROBOT_HALF_LENGTH_M, 0.35)
+        self.assertAlmostEqual(NavCore.STALL_BACKUP_SPEED_MPS, 0.12)
+        self.assertAlmostEqual(NavCore.STALL_BACKUP_DISTANCE_M, 0.15)
 
     def test_stale_obstacle_grid_is_rejected(self):
         core = NavCore.__new__(NavCore)
@@ -1984,6 +1987,10 @@ class TestNavCoreStatus(unittest.TestCase):
             fake_depth.get_obstacle_grid.return_value = _empty_grid()
             nav._depth_processor = fake_depth
             nav._odometry.set_pose(0.0, 0.0, math.radians(10.0))
+            escape_pose = RobotPose(0.0, 0.15, math.radians(10.0))
+            nav._execute_stall_escape = MagicMock(
+                return_value=(escape_pose, "left")
+            )
 
             goal = NavGoal(goal_type="relative", x=0.0, y=2.0, label="Kitchen")
             stale_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
@@ -2067,15 +2074,116 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertEqual(direction, -1.0)
         choose.assert_called_once()
 
+    def test_front_wall_does_not_falsely_block_lateral_escape(self):
+        nav = NavCore.__new__(NavCore)
+        nav.STALL_ESCAPE_CLEARANCE_M = 0.40
+        nav.STALL_ESCAPE_ROBOT_HALF_LENGTH_M = 0.35
+        grid = _grid_with_wall_ahead(distance_m=0.50)
+
+        with patch(
+            "coded_tools.unigo2.nav_core.random.choice",
+            return_value=1.0,
+        ):
+            direction = nav._choose_stall_escape_direction(grid)
+
+        self.assertEqual(direction, 1.0)
+
     def test_stall_escape_refuses_when_neither_side_is_safe(self):
         nav = NavCore.__new__(NavCore)
         nav.STALL_ESCAPE_CLEARANCE_M = 0.40
+        nav.STALL_ESCAPE_ROBOT_HALF_LENGTH_M = 0.35
         grid = _empty_grid()
         row = grid.origin_row - 5
         grid.grid[row, grid.origin_col - 4] = 1.0
         grid.grid[row, grid.origin_col + 4] = 1.0
 
         self.assertIsNone(nav._choose_stall_escape_direction(grid))
+
+    def test_stall_escape_backs_up_and_reroutes_when_sides_stay_blocked(self):
+        nav = NavCore.__new__(NavCore)
+        goal = NavGoal(goal_type="semantic", label="Kitchen")
+        grid = _empty_grid()
+        backed_pose = RobotPose(-0.15, 0.0, 0.0)
+        nav._choose_stall_escape_direction = MagicMock(side_effect=[None, None])
+        nav._execute_stall_backup = MagicMock(return_value=backed_pose)
+        nav._depth_processor = MagicMock()
+        nav._depth_processor.get_obstacle_grid.return_value = grid
+
+        result = nav._execute_stall_escape(goal, grid)
+
+        self.assertEqual(result, (backed_pose, "backward"))
+        nav._execute_stall_backup.assert_called_once_with(goal, grid)
+        self.assertEqual(nav._choose_stall_escape_direction.call_count, 2)
+
+    def test_stall_escape_rechecks_sides_after_backing_up(self):
+        nav = NavCore.__new__(NavCore)
+        goal = NavGoal(goal_type="semantic", label="Kitchen")
+        grid = _empty_grid()
+        backed_pose = RobotPose(-0.15, 0.0, 0.0)
+        lateral_pose = RobotPose(-0.15, 0.15, 0.0)
+        nav._choose_stall_escape_direction = MagicMock(side_effect=[None, 1.0])
+        nav._execute_stall_backup = MagicMock(return_value=backed_pose)
+        nav._execute_lateral_stall_escape = MagicMock(
+            return_value=(lateral_pose, "left")
+        )
+        nav._depth_processor = MagicMock()
+        nav._depth_processor.get_obstacle_grid.return_value = grid
+
+        result = nav._execute_stall_escape(goal, grid)
+
+        self.assertEqual(result, (lateral_pose, "backward then left"))
+        nav._execute_lateral_stall_escape.assert_called_once_with(goal, 1.0)
+
+    def test_stall_backup_commands_short_reverse_motion(self):
+        nav = NavCore.__new__(NavCore)
+        nav.STALL_BACKUP_SPEED_MPS = 0.12
+        nav.STALL_BACKUP_DISTANCE_M = 0.15
+        nav.STALL_BACKUP_CLEARANCE_DROP_M = 0.08
+        nav.STALL_ESCAPE_COMMAND_PERIOD_S = 0.10
+        nav._go2 = MagicMock(available=True)
+        nav._ensure_go2 = MagicMock()
+        nav._odometry = OdometryProvider()
+        grid = _grid_with_wall_ahead(distance_m=0.50)
+        nav._depth_processor = MagicMock()
+        nav._depth_processor.get_obstacle_grid.return_value = grid
+        goal = NavGoal(goal_type="semantic", label="Kitchen")
+
+        with (
+            patch("coded_tools.unigo2.nav_core.random.uniform", return_value=1.0),
+            patch(
+                "coded_tools.unigo2.nav_core.time.monotonic",
+                side_effect=[0.0, 0.1, 2.0],
+            ),
+            patch("coded_tools.unigo2.nav_core.time.sleep"),
+        ):
+            pose = nav._execute_stall_backup(goal, grid)
+
+        nav._go2.move.assert_called_once_with(vx=-0.12, vy=0.0, vyaw=0.0)
+        nav._go2.stop_move.assert_called_once()
+        self.assertLess(pose.x, 0.0)
+
+    def test_failed_stall_escape_pauses_and_retries_instead_of_aborting(self):
+        nav = NavCore.__new__(NavCore)
+        nav.MAX_STUCK_RECOVERY_ATTEMPTS = 2
+        nav._stuck_recovery_attempts = 0
+        nav._state = NavState.NAVIGATING
+        nav._state_lock = threading.Lock()
+        nav._execute_stall_escape = MagicMock(return_value=None)
+        nav._reset_progress_tracker = MagicMock()
+        nav._notify_status_change = MagicMock()
+        goal = NavGoal(goal_type="semantic", label="Kitchen")
+
+        recovered = nav._recover_from_stall(goal, RobotPose(), _empty_grid())
+
+        self.assertTrue(recovered)
+        self.assertEqual(nav._stuck_recovery_attempts, 1)
+        nav._reset_progress_tracker.assert_called_once_with(
+            reset_recovery_attempts=False
+        )
+        self.assertIn(
+            "pause and try again",
+            nav._notify_status_change.call_args.args[0],
+        )
 
     def test_rotation_does_not_reset_stall_recovery_attempts(self):
         nav = NavCore.__new__(NavCore)

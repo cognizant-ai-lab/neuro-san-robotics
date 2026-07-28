@@ -1739,6 +1739,16 @@ class NavCore:
     STALL_ESCAPE_SPEED_MPS: float = _env_float("NAV_STALL_ESCAPE_SPEED", 0.15)
     STALL_ESCAPE_DISTANCE_M: float = _env_float("NAV_STALL_ESCAPE_DISTANCE", 0.15)
     STALL_ESCAPE_CLEARANCE_M: float = _env_float("NAV_STALL_ESCAPE_CLEARANCE", 0.40)
+    STALL_ESCAPE_ROBOT_HALF_LENGTH_M: float = _env_float(
+        "NAV_STALL_ESCAPE_ROBOT_HALF_LENGTH",
+        0.35,
+    )
+    STALL_BACKUP_SPEED_MPS: float = _env_float("NAV_STALL_BACKUP_SPEED", 0.12)
+    STALL_BACKUP_DISTANCE_M: float = _env_float("NAV_STALL_BACKUP_DISTANCE", 0.15)
+    STALL_BACKUP_CLEARANCE_DROP_M: float = _env_float(
+        "NAV_STALL_BACKUP_CLEARANCE_DROP",
+        0.08,
+    )
     STALL_ESCAPE_COMMAND_PERIOD_S: float = _env_float(
         "NAV_STALL_ESCAPE_COMMAND_PERIOD",
         0.10,
@@ -2089,7 +2099,10 @@ class NavCore:
         nearby = points[
             (signed_lateral > 0.05)
             & (points[:, 0] >= 0.0)
-            & (points[:, 0] <= 0.75)
+            # A lateral step only sweeps the robot's own front-to-back
+            # footprint.  Including farther points made a wall in front look
+            # like it blocked both sides, even when one side was wide open.
+            & (points[:, 0] <= self.STALL_ESCAPE_ROBOT_HALF_LENGTH_M)
         ]
         if nearby.size == 0:
             return float("inf")
@@ -2129,19 +2142,12 @@ class NavCore:
         ]
         return random.choice(best_directions)
 
-    def _execute_stall_escape(
+    def _execute_lateral_stall_escape(
         self,
         goal: NavGoal,
-        grid: Optional[ObstacleGrid],
+        direction: float,
     ) -> Optional[Tuple[RobotPose, str]]:
-        """Take one short, guarded lateral step before trying the route again."""
-        if grid is None:
-            return None
-        direction = self._choose_stall_escape_direction(grid)
-        if direction is None:
-            logger.warning("NavCore: no safe lateral direction for stall recovery")
-            return None
-
+        """Take one short lateral step while continuously checking clearance."""
         self._ensure_go2()
         if not self._go2 or not getattr(self._go2, "available", False):
             return None
@@ -2188,6 +2194,116 @@ class NavCore:
 
         return self._odometry.get_pose(), side_name
 
+    def _execute_stall_backup(
+        self,
+        goal: NavGoal,
+        grid: ObstacleGrid,
+    ) -> Optional[RobotPose]:
+        """Backtrack briefly over recently traversed floor and verify front clearance."""
+        self._ensure_go2()
+        if not self._go2 or not getattr(self._go2, "available", False):
+            return None
+
+        speed = max(0.05, abs(self.STALL_BACKUP_SPEED_MPS))
+        distance = max(0.05, self.STALL_BACKUP_DISTANCE_M) * random.uniform(0.8, 1.2)
+        period = max(0.05, self.STALL_ESCAPE_COMMAND_PERIOD_S)
+        deadline = time.monotonic() + distance / speed
+        command = VelocityCommand(vx=-speed, vy=0.0, vyaw=0.0)
+        previous_clearance = grid.path_obstacle_m
+
+        logger.warning(
+            "NavCore: lateral escape blocked; attempting %.2fm backward escape "
+            "before rerouting to '%s'",
+            distance,
+            self._goal_display_name(goal),
+        )
+        try:
+            while time.monotonic() < deadline:
+                latest = self._fresh_obstacle_grid(
+                    self._depth_processor.get_obstacle_grid()
+                )
+                if latest is None:
+                    logger.warning(
+                        "NavCore: cancelled backward escape; obstacle view unavailable"
+                    )
+                    return None
+
+                latest_clearance = latest.path_obstacle_m
+                if (
+                    math.isfinite(previous_clearance)
+                    and math.isfinite(latest_clearance)
+                    and latest_clearance
+                    < previous_clearance - self.STALL_BACKUP_CLEARANCE_DROP_M
+                ):
+                    logger.warning(
+                        "NavCore: cancelled backward escape; front clearance worsened "
+                        "from %.2fm to %.2fm",
+                        previous_clearance,
+                        latest_clearance,
+                    )
+                    return None
+
+                self._go2.move(vx=-speed, vy=0.0, vyaw=0.0)
+                self._odometry.update_from_velocity(command, period)
+                previous_clearance = latest_clearance
+                time.sleep(period)
+        except Exception:
+            logger.exception("NavCore: backward escape step failed")
+            return None
+        finally:
+            try:
+                self._go2.stop_move()
+            except Exception:
+                logger.debug(
+                    "NavCore: stop_move failed after backward escape",
+                    exc_info=True,
+                )
+
+        return self._odometry.get_pose()
+
+    def _execute_stall_escape(
+        self,
+        goal: NavGoal,
+        grid: Optional[ObstacleGrid],
+    ) -> Optional[Tuple[RobotPose, str]]:
+        """Change position before replanning, backing up if both sides are blocked."""
+        if grid is None:
+            return None
+
+        direction = self._choose_stall_escape_direction(grid)
+        if direction is not None:
+            return self._execute_lateral_stall_escape(goal, direction)
+
+        logger.warning(
+            "NavCore: no safe lateral direction; trying a guarded backward escape"
+        )
+        backed_pose = self._execute_stall_backup(goal, grid)
+        if backed_pose is None:
+            return None
+
+        latest = self._fresh_obstacle_grid(self._depth_processor.get_obstacle_grid())
+        direction = (
+            self._choose_stall_escape_direction(latest)
+            if latest is not None
+            else None
+        )
+        if direction is None:
+            logger.warning(
+                "NavCore: lateral directions remain blocked after backing up; "
+                "rerouting from the backed-up pose"
+            )
+            return backed_pose, "backward"
+
+        lateral = self._execute_lateral_stall_escape(goal, direction)
+        if lateral is None:
+            logger.warning(
+                "NavCore: lateral follow-up became unsafe; rerouting from the "
+                "backed-up pose"
+            )
+            return backed_pose, "backward"
+        pose, side_name = lateral
+        return pose, f"backward then {side_name}"
+
     def _recover_from_stall(
         self,
         goal: NavGoal,
@@ -2200,7 +2316,24 @@ class NavCore:
 
         escaped = self._execute_stall_escape(goal, grid)
         if escaped is None:
-            return False
+            with self._state_lock:
+                self._stuck_recovery_attempts += 1
+                attempt = self._stuck_recovery_attempts
+                self._state = NavState.NAVIGATING
+                self._reset_progress_tracker(reset_recovery_attempts=False)
+            logger.warning(
+                "NavCore: stall recovery %d/%d could not move safely; pausing "
+                "before retrying toward '%s'",
+                attempt,
+                self.MAX_STUCK_RECOVERY_ATTEMPTS,
+                self._goal_display_name(goal),
+            )
+            self._notify_status_change(
+                f"I stalled while heading to {self._goal_display_name(goal)}. "
+                "I could not make a safe recovery move yet, so I will pause and "
+                "try again."
+            )
+            return True
         pose, escape_direction = escaped
 
         if goal.goal_type == "semantic":
