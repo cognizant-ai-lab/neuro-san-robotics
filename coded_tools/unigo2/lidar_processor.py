@@ -33,7 +33,7 @@ class LidarPerimeterConfig:
     min_height_m: float = -0.25
     max_height_m: float = 0.80
     robot_half_width: float = 0.15
-    path_corridor_half_width: float = 0.12
+    path_corridor_half_width: float = 0.27
     path_obstacle_min_points: int = 6
     self_mask_forward_m: float = 0.45
     self_mask_rear_m: float = 0.35
@@ -88,7 +88,7 @@ class LidarPerimeterService:
             min_height_m=_env_float("NAV_LIDAR_MIN_HEIGHT", -0.25),
             max_height_m=_env_float("NAV_LIDAR_MAX_HEIGHT", 0.80),
             robot_half_width=_env_float("NAV_ROBOT_HALF_WIDTH", 0.15),
-            path_corridor_half_width=_env_float("NAV_PATH_CORRIDOR_HALF_WIDTH", 0.12),
+            path_corridor_half_width=_env_float("NAV_PATH_CORRIDOR_HALF_WIDTH", 0.27),
             path_obstacle_min_points=_env_int("NAV_PATH_OBSTACLE_MIN_POINTS", 6),
             self_mask_forward_m=_env_float("NAV_LIDAR_SELF_MASK_FORWARD", 0.45),
             self_mask_rear_m=_env_float("NAV_LIDAR_SELF_MASK_REAR", 0.35),

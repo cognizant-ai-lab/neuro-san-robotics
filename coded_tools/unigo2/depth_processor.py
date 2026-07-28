@@ -133,7 +133,9 @@ class DepthProcessorConfig:
 
     # Obstacle inflation
     robot_half_width: float = 0.15  # meters, for obstacle dilation
-    path_corridor_half_width: float = 0.12
+    # Robot half-width plus lateral clearance.  The old 0.12m center ray was
+    # narrower than the Go2 itself and could miss a slanted wall until contact.
+    path_corridor_half_width: float = 0.27
     path_obstacle_min_points: int = 6
 
     # Depth camera parameters
@@ -200,7 +202,7 @@ class DepthProcessor:
             obstacle_max_height=_env_float("NAV_OBSTACLE_MAX_HEIGHT", 0.60),
             camera_mount_height=_env_float("NAV_CAMERA_MOUNT_HEIGHT", 0.30),
             robot_half_width=_env_float("NAV_ROBOT_HALF_WIDTH", 0.15),
-            path_corridor_half_width=_env_float("NAV_PATH_CORRIDOR_HALF_WIDTH", 0.12),
+            path_corridor_half_width=_env_float("NAV_PATH_CORRIDOR_HALF_WIDTH", 0.27),
             path_obstacle_min_points=_env_int("NAV_PATH_OBSTACLE_MIN_POINTS", 6),
             process_width=_env_int("NAV_DEPTH_PROCESS_WIDTH", 640),
             process_height=_env_int("NAV_DEPTH_PROCESS_HEIGHT", 480),

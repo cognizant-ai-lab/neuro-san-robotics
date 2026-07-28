@@ -35,7 +35,7 @@ class FusedObstacleProvider:
             rows=160,
             cols=160,
             resolution=getattr(depth_config, "grid_resolution", 0.05),
-            path_corridor_half_width=getattr(depth_config, "path_corridor_half_width", 0.12),
+            path_corridor_half_width=getattr(depth_config, "path_corridor_half_width", 0.27),
             path_obstacle_min_points=getattr(depth_config, "path_obstacle_min_points", 6),
         )
 

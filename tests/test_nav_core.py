@@ -18,6 +18,7 @@ from coded_tools.unigo2.nav_core import (
     DEFAULT_MAP_FILE,
     GlobalPlanner,
     LocalPlanner,
+    LocalObstacleMemory,
     MapEdge,
     MapNode,
     NavCore,
@@ -283,10 +284,10 @@ class TestLocalPlanner(unittest.TestCase):
         )
 
         self.assertGreater(corrected.vyaw, 0.0)
-        self.assertLessEqual(corrected.vyaw, 0.04)
+        self.assertLessEqual(corrected.vyaw, 0.06)
         self.assertAlmostEqual(corrected.vx, cmd.vx)
 
-    def test_one_sided_depth_geometry_does_not_change_course(self):
+    def test_one_sided_depth_geometry_continuously_corrects_course(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.30)
         cmd = VelocityCommand(vx=0.30, vy=0.0, vyaw=0.01)
 
@@ -295,7 +296,25 @@ class TestLocalPlanner(unittest.TestCase):
             self._corridor_grid(include_right_wall=False),
         )
 
-        self.assertEqual(corrected, cmd)
+        self.assertGreater(corrected.vyaw, cmd.vyaw)
+        self.assertLessEqual(corrected.vyaw - cmd.vyaw, 0.06)
+
+    def test_close_slanted_left_wall_steers_robot_right(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            lateral = 0.10 + 0.25 * forward
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.30, vy=0.0, vyaw=0.0),
+            grid,
+        )
+
+        self.assertLess(corrected.vyaw, 0.0)
+
 
     def test_drives_toward_goal_in_clear_space(self):
         planner = LocalPlanner(max_linear_speed=0.3, safety_distance=0.4, avoidance_distance=0.8)
@@ -458,6 +477,41 @@ class TestLocalPlanner(unittest.TestCase):
         cmd = planner.compute_avoidance(grid)
         self.assertGreater(cmd.vyaw, 0.0,
                            msg="Should turn left (positive vyaw) to avoid obstacle on right")
+
+
+# ---------------------------------------------------------------------------
+# Local obstacle memory tests
+# ---------------------------------------------------------------------------
+
+class TestLocalObstacleMemory(unittest.TestCase):
+
+    def test_retains_and_pose_aligns_recent_wall_geometry(self):
+        memory = LocalObstacleMemory(ttl_s=0.8)
+        wall = _grid_with_wall_ahead(distance_m=1.0)
+        memory.update(wall, RobotPose(x=0.0, y=0.0, yaw=0.0), now=10.0)
+
+        retained = memory.update(
+            _empty_grid(),
+            RobotPose(x=0.10, y=0.0, yaw=0.0),
+            now=10.1,
+        )
+
+        occupied = np.argwhere(retained.grid > 0)
+        forward = (retained.origin_row - occupied[:, 0]) * retained.resolution
+        self.assertTrue(np.any(np.isclose(forward, 0.90, atol=retained.resolution)))
+        self.assertEqual(retained.path_obstacle_m, float("inf"))
+
+    def test_expires_old_wall_geometry(self):
+        memory = LocalObstacleMemory(ttl_s=0.5)
+        memory.update(
+            _grid_with_wall_ahead(distance_m=1.0),
+            RobotPose(),
+            now=10.0,
+        )
+
+        retained = memory.update(_empty_grid(), RobotPose(), now=10.6)
+
+        self.assertFalse(np.any(retained.grid > 0))
 
 
 # ---------------------------------------------------------------------------
@@ -994,8 +1048,8 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.MAX_LINEAR_SPEED, 0.40)
         self.assertAlmostEqual(NavCore.MAX_YAW_RATE, 0.08)
         self.assertAlmostEqual(NavCore.PIVOT_YAW_RATE, 0.50)
-        self.assertAlmostEqual(NavCore.SAFETY_DISTANCE_M, 0.10)
-        self.assertAlmostEqual(NavCore.AVOIDANCE_DISTANCE_M, 0.30)
+        self.assertAlmostEqual(NavCore.SAFETY_DISTANCE_M, 0.20)
+        self.assertAlmostEqual(NavCore.AVOIDANCE_DISTANCE_M, 0.75)
         self.assertAlmostEqual(NavCore.PIVOT_HARD_STOP_DISTANCE_M, 0.00)
         self.assertAlmostEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_S, 0.7)
         self.assertEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS, 6)
@@ -2088,7 +2142,7 @@ class TestNavCoreStatus(unittest.TestCase):
             fake_depth = MagicMock()
             fake_depth.get_obstacle_grid.return_value = _empty_grid()
             fake_depth.get_center_depth_reading.return_value = CenterDepthReading(
-                distance_m=0.20,
+                distance_m=0.475,
                 coverage=0.5,
             )
             nav._depth_processor = fake_depth

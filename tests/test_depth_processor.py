@@ -85,6 +85,7 @@ class TestDepthProcessing(unittest.TestCase):
     def test_depth_processing_defaults_to_full_realsense_sampling(self):
         old_width = os.environ.pop("NAV_DEPTH_PROCESS_WIDTH", None)
         old_height = os.environ.pop("NAV_DEPTH_PROCESS_HEIGHT", None)
+        old_corridor = os.environ.pop("NAV_PATH_CORRIDOR_HALF_WIDTH", None)
         try:
             cfg = DepthProcessor._config_from_env()
         finally:
@@ -92,9 +93,12 @@ class TestDepthProcessing(unittest.TestCase):
                 os.environ["NAV_DEPTH_PROCESS_WIDTH"] = old_width
             if old_height is not None:
                 os.environ["NAV_DEPTH_PROCESS_HEIGHT"] = old_height
+            if old_corridor is not None:
+                os.environ["NAV_PATH_CORRIDOR_HALF_WIDTH"] = old_corridor
 
         self.assertEqual(cfg.process_width, 640)
         self.assertEqual(cfg.process_height, 480)
+        self.assertAlmostEqual(cfg.path_corridor_half_width, 0.27)
 
     def test_empty_depth_produces_empty_grid(self):
         """All-zeros depth (out of range) should produce an empty grid."""

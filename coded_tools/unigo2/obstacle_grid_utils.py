@@ -19,7 +19,7 @@ class ObstacleGridSpec:
     resolution: float = 0.05
     origin_row: Optional[int] = None
     origin_col: Optional[int] = None
-    path_corridor_half_width: float = 0.12
+    path_corridor_half_width: float = 0.27
     path_obstacle_min_points: int = 6
     inflation_radius_m: float = 0.0
 

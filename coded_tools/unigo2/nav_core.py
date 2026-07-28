@@ -51,7 +51,12 @@ from coded_tools.unigo2.depth_processor import (
     _env_int,
 )
 from coded_tools.unigo2.obstacle_confirmation import ObstacleConfirmationTracker
-from coded_tools.unigo2.obstacle_grid_utils import is_transverse_wall
+from coded_tools.unigo2.obstacle_grid_utils import (
+    ObstacleGridSpec,
+    build_obstacle_grid,
+    is_transverse_wall,
+    occupied_xy_points,
+)
 from coded_tools.unigo2.obstacle_provider import create_default_obstacle_provider
 
 logger = logging.getLogger(__name__)
@@ -105,6 +110,108 @@ class RobotPose:
     y: float = 0.0
     yaw: float = 0.0
     timestamp: float = 0.0
+
+
+class LocalObstacleMemory:
+    """Retain recent wall geometry and align it to the current robot pose.
+
+    Scalar safety metadata always comes from the newest sensor frame. Historical
+    points are used only to stabilize local geometry for steering.
+    """
+
+    def __init__(self, ttl_s: float = 0.8, max_points_per_frame: int = 3000):
+        self.ttl_s = max(0.0, ttl_s)
+        self.max_points_per_frame = max(100, max_points_per_frame)
+        self._samples: List[Tuple[float, RobotPose, np.ndarray]] = []
+        self._lock = threading.Lock()
+
+    def clear(self) -> None:
+        """Forget all retained obstacle geometry."""
+        with self._lock:
+            self._samples.clear()
+
+    def update(
+        self,
+        current: Optional[ObstacleGrid],
+        pose: RobotPose,
+        now: Optional[float] = None,
+    ) -> Optional[ObstacleGrid]:
+        """Merge recent observations into the current robot frame."""
+        if current is None or self.ttl_s <= 0.0:
+            return current
+
+        sample_time = time.monotonic() if now is None else now
+        cutoff = sample_time - self.ttl_s
+        current_points = occupied_xy_points(current)
+        if len(current_points) > self.max_points_per_frame:
+            indices = np.linspace(
+                0,
+                len(current_points) - 1,
+                self.max_points_per_frame,
+                dtype=np.int32,
+            )
+            current_points = current_points[indices]
+
+        with self._lock:
+            self._samples = [sample for sample in self._samples if sample[0] >= cutoff]
+            if current_points.size:
+                self._samples.append(
+                    (
+                        sample_time,
+                        RobotPose(pose.x, pose.y, pose.yaw, pose.timestamp),
+                        current_points,
+                    )
+                )
+            samples = list(self._samples)
+
+        aligned_batches = [
+            self._points_in_current_frame(points, sample_pose, pose)
+            for _timestamp, sample_pose, points in samples
+        ]
+        aligned_batches = [points for points in aligned_batches if points.size]
+        if not aligned_batches:
+            return current
+
+        memory_grid = build_obstacle_grid(
+            np.vstack(aligned_batches),
+            ObstacleGridSpec(
+                rows=current.grid.shape[0],
+                cols=current.grid.shape[1],
+                resolution=current.resolution,
+                origin_row=current.origin_row,
+                origin_col=current.origin_col,
+                # Metadata is replaced below with current-frame values.
+                path_corridor_half_width=0.0,
+                path_obstacle_min_points=max(current.grid.size, 1),
+            ),
+        )
+        memory_grid.timestamp = current.timestamp
+        memory_grid.nearest_obstacle_m = current.nearest_obstacle_m
+        memory_grid.nearest_obstacle_bearing = current.nearest_obstacle_bearing
+        memory_grid.path_obstacle_m = current.path_obstacle_m
+        memory_grid.path_obstacle_bearing = current.path_obstacle_bearing
+        memory_grid.path_obstacle_points = current.path_obstacle_points
+        return memory_grid
+
+    @staticmethod
+    def _points_in_current_frame(
+        points: np.ndarray,
+        sample_pose: RobotPose,
+        current_pose: RobotPose,
+    ) -> np.ndarray:
+        """Transform robot-frame points from a sample pose to the current pose."""
+        sample_cos = math.cos(sample_pose.yaw)
+        sample_sin = math.sin(sample_pose.yaw)
+        world_x = sample_pose.x + sample_cos * points[:, 0] - sample_sin * points[:, 1]
+        world_y = sample_pose.y + sample_sin * points[:, 0] + sample_cos * points[:, 1]
+
+        delta_x = world_x - current_pose.x
+        delta_y = world_y - current_pose.y
+        current_cos = math.cos(current_pose.yaw)
+        current_sin = math.sin(current_pose.yaw)
+        forward = current_cos * delta_x + current_sin * delta_y
+        lateral = -current_sin * delta_x + current_cos * delta_y
+        return np.column_stack((forward, lateral)).astype(np.float32)
 
 
 @dataclass
@@ -548,10 +655,11 @@ class LocalPlanner:
     CORRIDOR_MIN_POINTS_PER_SIDE = 8
     CORRIDOR_MIN_LENGTH_M = 0.45
     CORRIDOR_MAX_RESIDUAL_M = 0.12
-    CORRIDOR_MAX_WALL_ANGLE_RAD = math.radians(25.0)
+    CORRIDOR_MAX_WALL_ANGLE_RAD = math.radians(55.0)
     CORRIDOR_MAX_PARALLEL_ERROR_RAD = math.radians(10.0)
     CORRIDOR_MIN_WIDTH_M = 0.55
     CORRIDOR_MAX_WIDTH_M = 2.50
+    SINGLE_WALL_TARGET_CLEARANCE_M = _env_float("NAV_WALL_CLEARANCE", 0.55)
 
     def __init__(
         self,
@@ -699,17 +807,24 @@ class LocalPlanner:
         cmd: VelocityCommand,
         obstacle_grid: ObstacleGrid,
     ) -> VelocityCommand:
-        """Add bounded steering from reliable, parallel corridor-wall geometry."""
+        """Add bounded steering from visible corridor or one-sided wall geometry."""
         if cmd.vx <= 0.05 or obstacle_grid.path_obstacle_m < self.avoidance_distance:
             return cmd
 
-        walls = self._estimate_corridor_walls(obstacle_grid)
-        if walls is None:
+        wall_geometry = self._estimate_wall_geometry(obstacle_grid)
+        if wall_geometry is None:
             return cmd
 
-        wall_heading, center_offset = walls
-        correction = 0.30 * wall_heading + 0.20 * center_offset
-        correction_limit = min(0.04, self.max_yaw_rate * 0.5)
+        wall_heading, lateral_error, geometry_type = wall_geometry
+        if geometry_type == "corridor":
+            correction = 0.30 * wall_heading + 0.20 * lateral_error
+        else:
+            # For a single wall, first align with it, then maintain clearance.
+            # lateral_error is signed so a close left wall steers right and a
+            # close right wall steers left.
+            alignment = float(np.clip(0.20 * wall_heading, -0.02, 0.02))
+            correction = alignment + 0.25 * lateral_error
+        correction_limit = min(0.06, self.max_yaw_rate * 0.75)
         corrected_yaw = float(
             np.clip(
                 cmd.vyaw + correction,
@@ -724,28 +839,91 @@ class LocalPlanner:
             )
         return VelocityCommand(vx=cmd.vx, vy=cmd.vy, vyaw=corrected_yaw)
 
-    def _estimate_corridor_walls(
+    def _estimate_wall_geometry(
         self,
         obstacle_grid: ObstacleGrid,
-    ) -> Optional[Tuple[float, float]]:
-        """Return corridor heading and center offset when both walls are reliable."""
+    ) -> Optional[Tuple[float, float, str]]:
+        """Return heading/error for a corridor or a reliable one-sided wall."""
+        walls = self._visible_wall_fits(obstacle_grid)
+        left = walls.get("left")
+        right = walls.get("right")
+
+        if left is not None and right is not None:
+            left_heading, left_at_reference = left
+            right_heading, right_at_reference = right
+            heading_delta = abs(
+                math.atan2(
+                    math.sin(left_heading - right_heading),
+                    math.cos(left_heading - right_heading),
+                )
+            )
+            corridor_width = left_at_reference - right_at_reference
+            if (
+                heading_delta <= self.CORRIDOR_MAX_PARALLEL_ERROR_RAD
+                and self.CORRIDOR_MIN_WIDTH_M
+                <= corridor_width
+                <= self.CORRIDOR_MAX_WIDTH_M
+            ):
+                wall_heading = math.atan2(
+                    math.sin(left_heading) + math.sin(right_heading),
+                    math.cos(left_heading) + math.cos(right_heading),
+                )
+                center_offset = 0.5 * (left_at_reference + right_at_reference)
+                return wall_heading, center_offset, "corridor"
+
+        # A single visible wall is still useful. Prefer the side with the
+        # smallest lateral clearance when both fits exist but are not parallel.
+        candidates = []
+        if left is not None:
+            candidates.append((abs(left[1]), 1.0, left))
+        if right is not None:
+            candidates.append((abs(right[1]), -1.0, right))
+        if not candidates:
+            return None
+
+        _clearance, side, (heading, lateral_at_reference) = min(candidates)
+        clearance_error = side * (
+            abs(lateral_at_reference) - self.SINGLE_WALL_TARGET_CLEARANCE_M
+        )
+        return heading, clearance_error, "single_wall"
+
+    def _visible_wall_fits(
+        self,
+        obstacle_grid: ObstacleGrid,
+    ) -> Dict[str, Tuple[float, float]]:
+        """Fit reliable wall lines independently on the robot's left and right."""
         occupied = np.argwhere(obstacle_grid.grid > 0)
         if occupied.size == 0:
-            return None
+            return {}
 
         forward = (obstacle_grid.origin_row - occupied[:, 0]) * obstacle_grid.resolution
         lateral = (obstacle_grid.origin_col - occupied[:, 1]) * obstacle_grid.resolution
         usable = (
-            (forward >= 0.30)
-            & (forward <= 2.00)
-            & (np.abs(lateral) >= 0.25)
+            (forward >= 0.25)
+            & (forward <= 2.50)
+            & (np.abs(lateral) >= 0.18)
             & (np.abs(lateral) <= 1.50)
         )
         forward = forward[usable]
         lateral = lateral[usable]
 
+        fits: Dict[str, Tuple[float, float]] = {}
         left = self._fit_corridor_wall(forward[lateral > 0], lateral[lateral > 0])
         right = self._fit_corridor_wall(forward[lateral < 0], lateral[lateral < 0])
+        if left is not None:
+            fits["left"] = left
+        if right is not None:
+            fits["right"] = right
+        return fits
+
+    def _estimate_corridor_walls(
+        self,
+        obstacle_grid: ObstacleGrid,
+    ) -> Optional[Tuple[float, float]]:
+        """Return corridor heading and center offset when both walls are reliable."""
+        walls = self._visible_wall_fits(obstacle_grid)
+        left = walls.get("left")
+        right = walls.get("right")
         if left is None or right is None:
             return None
 
@@ -1415,8 +1593,8 @@ class NavCore:
 
     # Configuration (overridable via environment variables)
     NAV_LOOP_HZ: int = _env_int("NAV_LOOP_HZ", 10)
-    SAFETY_DISTANCE_M: float = _env_float("NAV_SAFETY_DISTANCE", 0.10)
-    AVOIDANCE_DISTANCE_M: float = _env_float("NAV_AVOIDANCE_DISTANCE", 0.30)
+    SAFETY_DISTANCE_M: float = _env_float("NAV_SAFETY_DISTANCE", 0.20)
+    AVOIDANCE_DISTANCE_M: float = _env_float("NAV_AVOIDANCE_DISTANCE", 0.75)
     MAX_LINEAR_SPEED: float = _env_float("NAV_MAX_LINEAR_SPEED", 0.40)
     MAX_YAW_RATE: float = _env_float("NAV_MAX_YAW_RATE", 0.08)
     PIVOT_YAW_RATE: float = _env_float(
@@ -1465,6 +1643,8 @@ class NavCore:
     )
     ODOMETRY_YAW_RATE_RATIO: float = _env_float("NAV_ODOMETRY_YAW_RATE_RATIO", 1.0)
     DEPTH_STOP_WHEN_IDLE: bool = _env_flag("NAV_DEPTH_STOP_WHEN_IDLE", True)
+    OBSTACLE_MEMORY_SECONDS: float = _env_float("NAV_OBSTACLE_MEMORY_SECONDS", 0.8)
+    OBSTACLE_TELEMETRY_SECONDS: float = _env_float("NAV_OBSTACLE_TELEMETRY_SECONDS", 1.0)
 
     @classmethod
     def get_instance(cls) -> "NavCore":
@@ -1530,6 +1710,8 @@ class NavCore:
         )
         self._path_obstacle_active = False
         self._manual_override_active = False
+        self._obstacle_memory = LocalObstacleMemory(self.OBSTACLE_MEMORY_SECONDS)
+        self._last_obstacle_telemetry_time = 0.0
 
         # Go2 macros (lazy init)
         self._go2 = None
@@ -1636,6 +1818,7 @@ class NavCore:
         self._reset_close_obstacle_confirmation()
         self._reset_path_obstacle_confirmation()
         self._path_obstacle_active = False
+        self._obstacle_memory.clear()
 
     def _notify_waypoint_advance(self, reached: MapNode, upcoming: MapNode) -> None:
         """Publish topological progress without exposing noisy coordinates."""
@@ -2396,8 +2579,10 @@ class NavCore:
         raw_grid = self._fresh_obstacle_grid(
             self._depth_processor.get_obstacle_grid()
         )
-        grid = self._filter_transient_path_obstacle(raw_grid)
         pose = self._odometry.get_pose()
+        geometry_grid = self._obstacle_memory.update(raw_grid, pose)
+        grid = self._filter_transient_path_obstacle(geometry_grid)
+        self._log_obstacle_telemetry(raw_grid, geometry_grid)
         self._update_progress(pose)
 
         path_dist = grid.path_obstacle_m if grid else float("inf")
@@ -2584,6 +2769,67 @@ class NavCore:
         if center_dist < path_dist:
             return center_dist, 0.0
         return path_dist, path_bearing
+
+    def _log_obstacle_telemetry(
+        self,
+        current: Optional[ObstacleGrid],
+        geometry: Optional[ObstacleGrid],
+    ) -> None:
+        """Periodically report directional clearance and fitted wall geometry."""
+        now = time.monotonic()
+        if (
+            self.OBSTACLE_TELEMETRY_SECONDS <= 0.0
+            or now - self._last_obstacle_telemetry_time
+            < self.OBSTACLE_TELEMETRY_SECONDS
+        ):
+            return
+        self._last_obstacle_telemetry_time = now
+
+        if current is None or geometry is None:
+            logger.info("NavCore: obstacle view unavailable")
+            return
+
+        points = occupied_xy_points(geometry)
+        sector_centers = (-45, -30, -15, 0, 15, 30, 45)
+        sector_values = []
+        if points.size:
+            distances = np.hypot(points[:, 0], points[:, 1])
+            bearings = np.degrees(np.arctan2(points[:, 1], points[:, 0]))
+            for center in sector_centers:
+                selected = distances[np.abs(bearings - center) <= 7.5]
+                value = float(np.percentile(selected, 10)) if selected.size else float("inf")
+                sector_values.append(
+                    f"{center:+d}:{value:.2f}"
+                    if math.isfinite(value)
+                    else f"{center:+d}:clear"
+                )
+        else:
+            sector_values = [f"{center:+d}:clear" for center in sector_centers]
+
+        wall_geometry = self._local_planner._estimate_wall_geometry(geometry)
+        if (
+            not isinstance(wall_geometry, (tuple, list))
+            or len(wall_geometry) != 3
+        ):
+            wall_text = "none"
+        else:
+            heading, lateral_error, geometry_type = wall_geometry
+            wall_text = (
+                f"{geometry_type}, heading={math.degrees(heading):+.0f}deg, "
+                f"lateral_error={lateral_error:+.2f}m"
+            )
+
+        path_text = (
+            f"{current.path_obstacle_m:.2f}m"
+            if math.isfinite(current.path_obstacle_m)
+            else "clear"
+        )
+        logger.info(
+            "NavCore: obstacle view path=%s sectors_deg_m=[%s] wall=[%s]",
+            path_text,
+            " ".join(sector_values),
+            wall_text,
+        )
 
     def _fresh_obstacle_grid(
         self,

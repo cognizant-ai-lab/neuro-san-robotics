@@ -759,8 +759,8 @@ Following existing patterns from `vision_core.py` (`_env_flag()`, `_env_float()`
 |----------|------|---------|---------|
 | `NAV_ENABLED` | bool | `False` | Master enable for navigation subsystem |
 | `NAV_LOOP_HZ` | int | `10` | Navigation loop frequency |
-| `NAV_SAFETY_DISTANCE` | float | `0.10` | Confirmed stop distance in the path corridor (meters) |
-| `NAV_AVOIDANCE_DISTANCE` | float | `0.30` | Slowdown and local-steering start distance for path-corridor obstacles (meters) |
+| `NAV_SAFETY_DISTANCE` | float | `0.20` | Confirmed stop distance in the swept path corridor (meters) |
+| `NAV_AVOIDANCE_DISTANCE` | float | `0.75` | Slowdown and local-steering start distance for path-corridor obstacles (meters) |
 | `NAV_PATH_OBSTACLE_CONFIRM_S` | float | `0.3` | Seconds an avoidance-band path obstacle must persist before planner/safety use it |
 | `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | int | `3` | Nav-loop readings an avoidance-band path obstacle must persist before planner/safety use it |
 | `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | float | `0.15` | Raw center-depth agreement margin for avoidance-band path obstacles |
@@ -773,6 +773,10 @@ Following existing patterns from `vision_core.py` (`_env_flag()`, `_env_float()`
 | `NAV_SIMULATION_MODE` | bool | `False` | Desktop testing with synthetic obstacles |
 | `NAV_GOAL_TOLERANCE` | float | `0.15` | Distance to consider goal reached (meters) |
 | `NAV_STUCK_TIMEOUT` | float | `10.0` | Seconds without progress before STUCK state |
+| `NAV_PATH_CORRIDOR_HALF_WIDTH` | float | `0.27` | Robot half-width plus swept-path clearance (meters) |
+| `NAV_WALL_CLEARANCE` | float | `0.55` | Target clearance from a reliable one-sided wall (meters) |
+| `NAV_OBSTACLE_MEMORY_SECONDS` | float | `0.8` | Lifetime of odometry-aligned steering geometry |
+| `NAV_OBSTACLE_TELEMETRY_SECONDS` | float | `1.0` | Directional-clearance and wall-fit log interval |
 
 ---
 

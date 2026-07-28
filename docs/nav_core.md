@@ -56,7 +56,7 @@ NavCore runs a **background thread at 10 Hz**. Each cycle:
 
 1. Read obstacle grid from depth camera
 2. Get robot pose from odometry
-3. Safety pre-check (confirmed stop if a path-corridor obstacle is <= 0.10 m)
+3. Safety pre-check (confirmed stop if a swept-path obstacle is <= 0.20 m)
 4. Local planner computes velocity (VFH+ algorithm)
 5. Safety monitor filters the command
 6. Send velocity to Go2Macros
@@ -72,9 +72,11 @@ for unmeasured moves, such as physically carrying the robot to a known place.
 
 The filtered obstacle grid guides local planning, while raw fresh path clearance
 independently gates every autonomous motion command. Stale depth data cannot
-authorize movement. When two sufficiently long, parallel corridor walls are
-visible, their heading and center offset add a small bounded steering correction;
-one-sided or inconsistent geometry is ignored.
+authorize movement. Recent geometry is retained for 0.8 seconds and transformed
+with odometry so wall fits remain stable across frames, but retained points never
+replace current depth in the safety gate. Parallel corridor walls provide heading
+and centering corrections; a reliable single wall provides heading and clearance
+corrections, including for slanted approaches.
 
 Robot initialization disables both SportClient `FreeAvoid` and the Unitree
 obstacle-avoidance service so firmware steering cannot conflict with NavCore.
@@ -208,8 +210,8 @@ agent. Queries are intended for explicit questions and diagnostics, not progress
 | `NAV_MAX_LINEAR_SPEED` | `0.40` | Max planned forward speed (m/s) |
 | `NAV_MAX_YAW_RATE` | `0.08` | Max yaw correction while translating (rad/s) |
 | `NAV_PIVOT_YAW_RATE` | `0.50` | In-place yaw rate for planned turns (rad/s) |
-| `NAV_SAFETY_DISTANCE` | `0.10` | Confirmed stop distance in the path corridor (meters) |
-| `NAV_AVOIDANCE_DISTANCE` | `0.30` | Start slowing down and locally steering for path-corridor obstacles (meters) |
+| `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed stop distance in the swept path corridor (meters) |
+| `NAV_AVOIDANCE_DISTANCE` | `0.75` | Start slowing down and locally steering for path-corridor obstacles (meters) |
 | `NAV_PATH_OBSTACLE_CONFIRM_S` | `0.3` | Seconds an avoidance-band path obstacle must persist before affecting planning |
 | `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | `3` | Nav-loop readings an avoidance-band path obstacle must appear in before affecting planning |
 | `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | `0.15` | Raw center-depth agreement margin for avoidance-band path obstacles |
@@ -220,6 +222,10 @@ agent. Queries are intended for explicit questions and diagnostics, not progress
 | `NAV_GRID_RESOLUTION` | `0.05` | Obstacle grid cell size (meters) |
 | `NAV_CAMERA_MOUNT_HEIGHT` | `0.30` | Depth camera height from ground (meters) |
 | `NAV_GOAL_TOLERANCE` | `0.15` | Distance to consider goal reached (meters) |
+| `NAV_PATH_CORRIDOR_HALF_WIDTH` | `0.27` | Robot half-width plus swept-path clearance (meters) |
+| `NAV_WALL_CLEARANCE` | `0.55` | Target lateral clearance from one reliably fitted wall (meters) |
+| `NAV_OBSTACLE_MEMORY_SECONDS` | `0.8` | Lifetime of odometry-aligned geometry used for steering |
+| `NAV_OBSTACLE_TELEMETRY_SECONDS` | `1.0` | Directional-clearance and wall-fit log interval; `0` disables it |
 
 ---
 
