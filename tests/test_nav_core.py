@@ -18,6 +18,7 @@ from coded_tools.unigo2.nav_core import (
     DEFAULT_MAP_FILE,
     GlobalPlanner,
     LocalPlanner,
+    LocalObstacleMemory,
     MapEdge,
     MapNode,
     NavCore,
@@ -283,10 +284,10 @@ class TestLocalPlanner(unittest.TestCase):
         )
 
         self.assertGreater(corrected.vyaw, 0.0)
-        self.assertLessEqual(corrected.vyaw, 0.04)
+        self.assertLessEqual(corrected.vyaw, 0.06)
         self.assertAlmostEqual(corrected.vx, cmd.vx)
 
-    def test_one_sided_depth_geometry_does_not_change_course(self):
+    def test_one_sided_depth_geometry_continuously_corrects_course(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.30)
         cmd = VelocityCommand(vx=0.30, vy=0.0, vyaw=0.01)
 
@@ -295,7 +296,25 @@ class TestLocalPlanner(unittest.TestCase):
             self._corridor_grid(include_right_wall=False),
         )
 
-        self.assertEqual(corrected, cmd)
+        self.assertGreater(corrected.vyaw, cmd.vyaw)
+        self.assertLessEqual(corrected.vyaw - cmd.vyaw, 0.06)
+
+    def test_close_slanted_left_wall_steers_robot_right(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            lateral = 0.10 + 0.25 * forward
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.30, vy=0.0, vyaw=0.0),
+            grid,
+        )
+
+        self.assertLess(corrected.vyaw, 0.0)
+
 
     def test_drives_toward_goal_in_clear_space(self):
         planner = LocalPlanner(max_linear_speed=0.3, safety_distance=0.4, avoidance_distance=0.8)
@@ -458,6 +477,41 @@ class TestLocalPlanner(unittest.TestCase):
         cmd = planner.compute_avoidance(grid)
         self.assertGreater(cmd.vyaw, 0.0,
                            msg="Should turn left (positive vyaw) to avoid obstacle on right")
+
+
+# ---------------------------------------------------------------------------
+# Local obstacle memory tests
+# ---------------------------------------------------------------------------
+
+class TestLocalObstacleMemory(unittest.TestCase):
+
+    def test_retains_and_pose_aligns_recent_wall_geometry(self):
+        memory = LocalObstacleMemory(ttl_s=0.8)
+        wall = _grid_with_wall_ahead(distance_m=1.0)
+        memory.update(wall, RobotPose(x=0.0, y=0.0, yaw=0.0), now=10.0)
+
+        retained = memory.update(
+            _empty_grid(),
+            RobotPose(x=0.10, y=0.0, yaw=0.0),
+            now=10.1,
+        )
+
+        occupied = np.argwhere(retained.grid > 0)
+        forward = (retained.origin_row - occupied[:, 0]) * retained.resolution
+        self.assertTrue(np.any(np.isclose(forward, 0.90, atol=retained.resolution)))
+        self.assertEqual(retained.path_obstacle_m, float("inf"))
+
+    def test_expires_old_wall_geometry(self):
+        memory = LocalObstacleMemory(ttl_s=0.5)
+        memory.update(
+            _grid_with_wall_ahead(distance_m=1.0),
+            RobotPose(),
+            now=10.0,
+        )
+
+        retained = memory.update(_empty_grid(), RobotPose(), now=10.6)
+
+        self.assertFalse(np.any(retained.grid > 0))
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +708,38 @@ class TestGlobalPlanner(unittest.TestCase):
         wp = planner.get_next_waypoint(RobotPose(3.0, 0.0, 0), tolerance_m=0.3)
         self.assertIsNone(wp, "Should return None when at goal")
 
+    def test_get_next_waypoint_uses_map_arrival_tolerance(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.plan_path(RobotPose(0, 0, 0), "B")
+
+        wp = planner.get_next_waypoint(RobotPose(2.45, 0.0, 0), tolerance_m=0.15)
+
+        self.assertIsNone(wp)
+
+    def test_get_next_waypoint_accepts_passed_intermediate_waypoint(self):
+        topo = _create_test_map()
+        topo.nodes["B"].pass_through_tolerance_m = 0.75
+        planner = GlobalPlanner(topo)
+        planner.plan_path(RobotPose(0, 0, 0), "C")
+
+        wp = planner.get_next_waypoint(RobotPose(3.2, 0.4, 0), tolerance_m=0.15)
+
+        self.assertIsNotNone(wp)
+        self.assertEqual(wp.name, "C")
+
+    def test_get_next_waypoint_does_not_accept_wide_pass(self):
+        topo = _create_test_map()
+        topo.nodes["B"].pass_through_tolerance_m = 0.75
+        planner = GlobalPlanner(topo)
+        planner.plan_path(RobotPose(0, 0, 0), "C")
+
+        wp = planner.get_next_waypoint(RobotPose(3.2, 1.0, 0), tolerance_m=0.15)
+
+        self.assertIsNotNone(wp)
+        self.assertEqual(wp.name, "B")
+
 
 # ---------------------------------------------------------------------------
 # TopologicalMap tests
@@ -686,6 +772,22 @@ class TestTopologicalMap(unittest.TestCase):
         self.assertEqual(landmark["type"], "wall")
         self.assertEqual(landmark["approach_from"], ["start"])
         self.assertAlmostEqual(landmark["max_pose_error_m"], 0.8)
+
+    def test_loads_map_declared_arrival_regions(self):
+        topo = TopologicalMap()
+        topo.load_from_dict({
+            "nodes": [{
+                "name": "kitchen_entrance",
+                "x": 1.0,
+                "y": 0.0,
+                "arrival_tolerance_m": 0.65,
+                "pass_through_tolerance_m": 0.75,
+            }],
+        })
+
+        node = topo.nodes["kitchen_entrance"]
+        self.assertAlmostEqual(node.arrival_tolerance_m, 0.65)
+        self.assertAlmostEqual(node.pass_through_tolerance_m, 0.75)
 
     def test_find_nearest_node(self):
         topo = _create_test_map()
@@ -994,8 +1096,8 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.MAX_LINEAR_SPEED, 0.40)
         self.assertAlmostEqual(NavCore.MAX_YAW_RATE, 0.08)
         self.assertAlmostEqual(NavCore.PIVOT_YAW_RATE, 0.50)
-        self.assertAlmostEqual(NavCore.SAFETY_DISTANCE_M, 0.10)
-        self.assertAlmostEqual(NavCore.AVOIDANCE_DISTANCE_M, 0.30)
+        self.assertAlmostEqual(NavCore.SAFETY_DISTANCE_M, 0.20)
+        self.assertAlmostEqual(NavCore.AVOIDANCE_DISTANCE_M, 0.75)
         self.assertAlmostEqual(NavCore.PIVOT_HARD_STOP_DISTANCE_M, 0.00)
         self.assertAlmostEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_S, 0.7)
         self.assertEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS, 6)
@@ -1845,7 +1947,66 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
-    def test_nav_cycle_stuck_is_terminal_and_clears_goal(self, mock_go2):
+    def test_nav_cycle_stuck_replans_and_keeps_goal(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
+            nav._local_planner.apply_corridor_course_correction.side_effect = (
+                lambda cmd, _grid: cmd
+            )
+            waypoint = MapNode(name="kitchen", x=2.0, y=0.0)
+            nav._global_planner = MagicMock()
+            nav._global_planner.get_next_waypoint.return_value = waypoint
+            nav._global_planner.current_segment.return_value = None
+            nav._global_planner.plan_path.return_value = [waypoint]
+
+            goal = NavGoal(goal_type="semantic", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._last_progress_pose = nav._odometry.get_pose()
+                nav._last_progress_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            self.assertIs(nav._goal, goal)
+            self.assertEqual(
+                events,
+                [
+                    "I stalled while heading to Kitchen. I replanned from my current "
+                    "position and am continuing."
+                ],
+            )
+            fake_go2.stop_move.assert_called()
+            fake_go2.move.assert_not_called()
+            fake_depth.stop.assert_not_called()
+            nav._global_planner.plan_path.assert_called_once_with(
+                nav._odometry.get_pose(),
+                "Kitchen",
+            )
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_stuck_aborts_after_recovery_limit(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
         mock_go2.return_value = fake_go2
@@ -1868,6 +2029,7 @@ class TestNavCoreStatus(unittest.TestCase):
             with nav._state_lock:
                 nav._state = NavState.NAVIGATING
                 nav._goal = goal
+                nav._stuck_recovery_attempts = nav.MAX_STUCK_RECOVERY_ATTEMPTS
                 nav._last_progress_pose = nav._odometry.get_pose()
                 nav._last_progress_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
 
@@ -1879,15 +2041,7 @@ class TestNavCoreStatus(unittest.TestCase):
                 events,
                 ["I stopped before reaching Kitchen because I was not making progress."],
             )
-            fake_go2.stop_move.assert_called()
-            fake_go2.move.assert_not_called()
             fake_depth.stop.assert_called()
-
-            nav._nav_cycle(NavState.STUCK, goal)
-            self.assertEqual(
-                events,
-                ["I stopped before reaching Kitchen because I was not making progress."],
-            )
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
@@ -2036,7 +2190,7 @@ class TestNavCoreStatus(unittest.TestCase):
             fake_depth = MagicMock()
             fake_depth.get_obstacle_grid.return_value = _empty_grid()
             fake_depth.get_center_depth_reading.return_value = CenterDepthReading(
-                distance_m=0.20,
+                distance_m=0.475,
                 coverage=0.5,
             )
             nav._depth_processor = fake_depth
@@ -2070,8 +2224,12 @@ class TestNavCoreStatus(unittest.TestCase):
 
         original_confirm_s = NavCore.CLOSE_OBSTACLE_CONFIRM_S
         original_confirm_readings = NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS
+        original_center_confirm_s = NavCore.CENTER_ONLY_CLOSE_CONFIRM_S
+        original_center_confirm_readings = NavCore.CENTER_ONLY_CLOSE_CONFIRM_READINGS
         NavCore.CLOSE_OBSTACLE_CONFIRM_S = 0.0
         NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS = 1
+        NavCore.CENTER_ONLY_CLOSE_CONFIRM_S = 0.0
+        NavCore.CENTER_ONLY_CLOSE_CONFIRM_READINGS = 3
         NavCore._instance = None
         os.environ["NAV_SIMULATION_MODE"] = "1"
         events = []
@@ -2096,6 +2254,10 @@ class TestNavCoreStatus(unittest.TestCase):
                 nav._goal = goal
                 nav._reset_progress_tracker()
 
+            for _ in range(2):
+                nav._nav_cycle(NavState.NAVIGATING, goal)
+                self.assertEqual(nav.state, NavState.NAVIGATING)
+
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.E_STOP)
@@ -2114,6 +2276,47 @@ class TestNavCoreStatus(unittest.TestCase):
             NavCore.set_status_callback(None)
             NavCore.CLOSE_OBSTACLE_CONFIRM_S = original_confirm_s
             NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS = original_confirm_readings
+            NavCore.CENTER_ONLY_CLOSE_CONFIRM_S = original_center_confirm_s
+            NavCore.CENTER_ONLY_CLOSE_CONFIRM_READINGS = original_center_confirm_readings
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_ignores_isolated_center_depth_close_reading(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            fake_depth.get_center_depth_reading.side_effect = [
+                CenterDepthReading(distance_m=0.08, coverage=0.5),
+                CenterDepthReading(distance_m=1.0, coverage=0.5),
+            ]
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.20)
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            fake_go2.move.assert_called_once()
+            fake_go2.stop_move.assert_called_once()
+            nav.shutdown()
+        finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 

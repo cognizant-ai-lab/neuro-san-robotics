@@ -114,21 +114,30 @@ specific robot really needs a temporary override.
 | `NAV_SDK_ODOMETRY_MIN_DELTA_M` | `0.02` | SDK position must change by at least 0.02 m before translation odometry is trusted. |
 | `NAV_SDK_ODOMETRY_MIN_DELTA_YAW_RAD` | `0.03` | SDK yaw must change by at least 0.03 rad before it is trusted as moving odometry. |
 | `NAV_ODOMETRY_YAW_RATE_RATIO` | `1.00` | Fallback yaw scale used while SDK odometry is stale or unconfirmed. |
-| `NAV_SAFETY_DISTANCE` | `0.10` | Confirmed safety stop threshold inside the path corridor. |
-| `NAV_AVOIDANCE_DISTANCE` | `0.30` | Slowdown and local steering begin for supported path obstacles closer than 0.30 m. |
+| `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed safety stop threshold inside the swept path corridor. |
+| `NAV_AVOIDANCE_DISTANCE` | `0.75` | Slowdown and local steering begin for supported path obstacles closer than 0.75 m. |
 | `NAV_PIVOT_HARD_STOP_DISTANCE` | `0.00` | Lets close path obstacles use the confirmation window before aborting. |
 | `NAV_CLOSE_OBSTACLE_CONFIRM_S` | `0.7` | Close path obstacles must persist for at least 0.7 seconds before aborting. |
 | `NAV_CLOSE_OBSTACLE_CONFIRM_READINGS` | `6` | Close path obstacles must also persist for at least 6 nav-loop readings. |
+| `NAV_CENTER_ONLY_CLOSE_CONFIRM_S` | `0.2` | A close center-depth reading absent from the obstacle grid must persist this long before it can abort navigation; the robot holds meanwhile. |
+| `NAV_CENTER_ONLY_CLOSE_CONFIRM_READINGS` | `3` | A grid-disputed close center-depth reading must also appear in at least 3 readings. |
+| `NAV_CENTER_ONLY_GRID_MARGIN` | `0.15` | Clearance margin used to identify center-depth readings that disagree with the projected obstacle grid. |
 | `NAV_PATH_OBSTACLE_CONFIRM_S` | `0.3` | Avoidance-band path obstacles must persist briefly before slowing or steering. |
 | `NAV_PATH_OBSTACLE_CONFIRM_READINGS` | `3` | Avoidance-band path obstacles must also appear in at least 3 nav-loop readings. |
 | `NAV_PATH_OBSTACLE_DISTANCE_TOLERANCE` | `0.15` | Consecutive avoidance-band readings within 0.15 m are treated as the same obstacle track. |
 | `NAV_PATH_OBSTACLE_BEARING_TOLERANCE_RAD` | `0.1745` | Consecutive avoidance-band readings within about 10 degrees are treated as the same obstacle track. |
 | `NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN` | `0.15` | When a depth source is active, avoidance-band projected obstacles must agree with raw center depth within the slowdown distance plus this margin. |
 | `NAV_GOAL_TOLERANCE` | `0.15` | Destination is considered reached within 0.15 m. |
-| `NAV_PATH_CORRIDOR_HALF_WIDTH` | `0.12` | Only points within 0.12 m left/right of centerline count as path-corridor obstacles. |
+| `NAV_PATH_CORRIDOR_HALF_WIDTH` | `0.27` | Robot half-width plus clearance used for swept-path obstacle checks. |
 | `NAV_PATH_OBSTACLE_MIN_POINTS` | `6` | Requires at least 6 supporting sensor points before a path obstacle is considered real. |
+| `NAV_WALL_CLEARANCE` | `0.55` | Target lateral clearance from a reliably fitted one-sided wall. |
+| `NAV_OBSTACLE_MEMORY_SECONDS` | `0.8` | Retains recent wall geometry and aligns it using odometry; current depth remains authoritative for safety. |
+| `NAV_OBSTACLE_TELEMETRY_SECONDS` | `1.0` | Interval for directional-clearance and wall-fit log messages; set to `0` to disable. |
 
-Map nodes may declare directional `arrival_landmarks`. A confirmed transverse wall can
+Map nodes may declare `arrival_tolerance_m` and `pass_through_tolerance_m` so an
+entrance or turn can be accepted despite modest odometry drift. Pass-through acceptance
+requires crossing the waypoint plane while remaining inside its route corridor. Nodes
+may also declare directional `arrival_landmarks`. A confirmed transverse wall can
 correct the robot's along-track pose and advance its route only within that landmark's
 configured longitudinal, lateral, and sensor-distance bounds. Otherwise it remains an
 ordinary obstacle for the local planner to circumnavigate.

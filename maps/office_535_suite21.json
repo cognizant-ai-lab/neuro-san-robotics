@@ -54,6 +54,8 @@
       "aliases": [
         "kitchen"
       ],
+      "arrival_tolerance_m": 0.65,
+      "pass_through_tolerance_m": 0.75,
       "source_pixel": {
         "x": 3305.0,
         "y": 1725.0
@@ -142,6 +144,8 @@
         "waypoint",
         "red_marker"
       ],
+      "arrival_tolerance_m": 0.5,
+      "pass_through_tolerance_m": 0.75,
       "arrival_landmarks": [
         {
           "type": "wall",

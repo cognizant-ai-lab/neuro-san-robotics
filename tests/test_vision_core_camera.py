@@ -205,6 +205,24 @@ class VisionCoreCameraTests(unittest.TestCase):
         self.assertTrue(vision_core._is_realsense_color_link(link))
         self.assertEqual(vision_core._realsense_color_link_sort_key(link)[0], 0)
 
+    def test_realsense_streams_try_image_endpoints_before_metadata(self):
+        links = [
+            Path(f"/dev/v4l/by-id/realsense-video-index{index}")
+            for index in range(4)
+        ]
+
+        ordered = sorted(links, key=vision_core._realsense_color_link_sort_key)
+
+        self.assertEqual(
+            [path.name for path in ordered],
+            [
+                "realsense-video-index0",
+                "realsense-video-index2",
+                "realsense-video-index1",
+                "realsense-video-index3",
+            ],
+        )
+
     def test_realsense_sysfs_name_detection_matches_robot_card_name(self):
         self.assertTrue(
             vision_core._looks_like_realsense_device_name(
