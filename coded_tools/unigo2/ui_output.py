@@ -17,8 +17,13 @@ class UiOutputTool(CodedTool):
     async def async_invoke(self, args: Dict[str, Any], sly_data: Dict[str, Any]) -> Any:
         thought = args.get("thought", "")
         say = args.get("say", "")
-        if not isinstance(thought, str) or not isinstance(say, str):
-            return "thought and say must be strings. End this event turn now."
+        heard = args.get("heard", "")
+        if (
+            not isinstance(thought, str)
+            or not isinstance(say, str)
+            or not isinstance(heard, str)
+        ):
+            return "thought, say, and heard must be strings. End this event turn now."
         if not thought.strip() and not say.strip():
             return (
                 "Silence selected. End this event turn now without calling "
@@ -29,6 +34,7 @@ class UiOutputTool(CodedTool):
             publish_ui_output,
             thought=thought,
             say=say,
+            heard=heard,
         )
         if delivered:
             return "Output delivered. End this event turn now; do not call ui_output again."

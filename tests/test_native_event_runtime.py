@@ -31,7 +31,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn("only content that appears in the Thoughts pane", source)
         self.assertIn("Call ui_output at most once per event turn", source)
         self.assertIn("Never call ui_output with both fields empty", source)
-        self.assertIn('"required": ["thought", "say"]', source)
+        self.assertIn('"required": ["thought", "say", "heard"]', source)
 
     def test_navigation_has_one_event_aware_agent_tool(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
@@ -56,8 +56,36 @@ class NativeEventRuntimeTests(unittest.TestCase):
 
         self.assertIn("`ambient:` is an automatic transcription", source)
         self.assertIn("remain completely silent", source)
+        self.assertIn("only the relevant addressed speech", source)
         self.assertIn('queue_agent_event(transcript, source="ambient")', interface_source)
         self.assertNotIn("ambient_llm_filter", interface_source)
+
+    def test_ambient_audio_uses_a_persistent_realtime_stream(self):
+        interface_source = (
+            ROOT / "apps" / "conscious_assistant" / "interface_flask.py"
+        ).read_text()
+        browser_source = (
+            ROOT / "apps" / "conscious_assistant" / "templates" / "index.html"
+        ).read_text()
+
+        self.assertIn('/api/realtime/transcription-session', interface_source)
+        self.assertIn("new RTCPeerConnection()", browser_source)
+        self.assertIn("conversation.item.input_audio_transcription.completed", browser_source)
+        self.assertNotIn("AMBIENT_CHUNK_MS", browser_source)
+        self.assertNotIn("ambientRecorder", browser_source)
+
+    def test_raw_ambient_speech_is_thought_only_until_the_agent_responds(self):
+        interface_source = (
+            ROOT / "apps" / "conscious_assistant" / "interface_flask.py"
+        ).read_text()
+        browser_source = (
+            ROOT / "apps" / "conscious_assistant" / "templates" / "index.html"
+        ).read_text()
+
+        self.assertIn("'assistant-thoughts'", browser_source)
+        self.assertIn("'Heard: ' + data.data", browser_source)
+        self.assertIn('payload.get("heard", "")', interface_source)
+        self.assertIn('"update_user_input", {"data": heard.strip()}', interface_source)
 
     def test_scene_observer_is_a_native_python_service(self):
         server_source = (ROOT / "apps" / "conscious_assistant" / "native_server.py").read_text()

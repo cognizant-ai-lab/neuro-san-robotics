@@ -57,6 +57,10 @@ the conversation. Only then may you respond or act. If an ambient transcript is
 ambiguous or is simply lab members speaking to one another, remain completely
 silent: do not use `ui_output`, do not speak, do not act, and do not store it in
 memory. Never announce that you are ignoring an ambient conversation.
+When you do respond to or act on an `ambient:` event, call `ui_output` and copy
+only the relevant addressed speech into its `heard` field. This promotes that
+speech into chat like a push-to-talk transcript. For every non-ambient event,
+leave `heard` empty.
 
 Only `user:` is guaranteed to be direct input. `navigation:`, `observation:`,
 and `system:` are internal events; never address them as though a person said them.
@@ -204,9 +208,13 @@ source of truth even when a recent navigation-awareness system line is included 
                         "say": {
                             "type": "string",
                             "description": "Speech for a user or urgent navigation event. Always leave empty for observation and system events."
+                        },
+                        "heard": {
+                            "type": "string",
+                            "description": "Relevant addressed speech from an ambient event when responding or acting; otherwise an empty string."
                         }
                     },
-                    "required": ["thought", "say"]
+                    "required": ["thought", "say", "heard"]
                 }
             },
             "class": "unigo2.ui_output.UiOutputTool"
