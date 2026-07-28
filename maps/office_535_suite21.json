@@ -208,7 +208,7 @@
       }
     },
     {
-      "name": "marker_a",
+      "name": "coffee_station",
       "x": 10.34,
       "y": 2.59,
       "description": "Coffee station, marker A from the updated 535 Mission map",
@@ -217,7 +217,7 @@
       "source_pixel": {"x": 3500, "y": 1434}
     },
     {
-      "name": "marker_b",
+      "name": "dishwasher",
       "x": 13.22,
       "y": 2.45,
       "description": "Dishwasher, marker B from the updated 535 Mission map",
@@ -226,7 +226,7 @@
       "source_pixel": {"x": 3512, "y": 1197}
     },
     {
-      "name": "marker_c",
+      "name": "ping_pong_table",
       "x": 17.12,
       "y": 7.88,
       "description": "Ping pong table, marker C from the updated 535 Mission map",
@@ -235,7 +235,7 @@
       "source_pixel": {"x": 3066, "y": 877}
     },
     {
-      "name": "marker_d",
+      "name": "immersive_room",
       "x": 22.37,
       "y": 18.52,
       "description": "Immersive room, marker D from the updated 535 Mission map",
@@ -244,7 +244,7 @@
       "source_pixel": {"x": 2192, "y": 446}
     },
     {
-      "name": "marker_e",
+      "name": "lobby",
       "x": 20.98,
       "y": 26.38,
       "description": "Lobby, marker E from the updated 535 Mission map",
@@ -253,7 +253,7 @@
       "source_pixel": {"x": 1546, "y": 560}
     },
     {
-      "name": "marker_f",
+      "name": "lobby_entrance",
       "x": 17.53,
       "y": 25.95,
       "description": "Lobby entrance, marker F from the updated 535 Mission map",
@@ -262,7 +262,7 @@
       "source_pixel": {"x": 1582, "y": 843}
     },
     {
-      "name": "marker_g",
+      "name": "patent_wall",
       "x": 21.95,
       "y": 29.32,
       "description": "Patent wall, marker G from the updated 535 Mission map",
@@ -271,7 +271,7 @@
       "source_pixel": {"x": 1305, "y": 480}
     },
     {
-      "name": "marker_h",
+      "name": "big_conference_room",
       "x": 20.08,
       "y": 36.44,
       "description": "Big conference room, marker H from the updated 535 Mission map",
@@ -280,7 +280,7 @@
       "source_pixel": {"x": 720, "y": 634}
     },
     {
-      "name": "marker_i",
+      "name": "studio",
       "x": 21.85,
       "y": 35.24,
       "description": "Studio, marker I from the updated 535 Mission map",
@@ -289,7 +289,7 @@
       "source_pixel": {"x": 819, "y": 488}
     },
     {
-      "name": "marker_j",
+      "name": "small_conference_room",
       "x": 18.43,
       "y": 39.03,
       "description": "Small conference room, marker J from the updated 535 Mission map",
@@ -298,7 +298,7 @@
       "source_pixel": {"x": 507, "y": 769}
     },
     {
-      "name": "marker_k",
+      "name": "middle_office",
       "x": 12.82,
       "y": 38.88,
       "description": "Middle office, marker K from the updated 535 Mission map",
@@ -307,7 +307,7 @@
       "source_pixel": {"x": 520, "y": 1230}
     },
     {
-      "name": "marker_l",
+      "name": "side_office",
       "x": 7.93,
       "y": 39.03,
       "description": "Side office, marker L from the updated 535 Mission map",
@@ -316,7 +316,7 @@
       "source_pixel": {"x": 507, "y": 1632}
     },
     {
-      "name": "marker_m",
+      "name": "gathering_area",
       "x": 5.82,
       "y": 37.51,
       "description": "Gathering area, marker M from the updated 535 Mission map",
@@ -325,7 +325,7 @@
       "source_pixel": {"x": 632, "y": 1805}
     },
     {
-      "name": "marker_n",
+      "name": "printer",
       "x": 6.21,
       "y": 37.48,
       "description": "Printer, marker N from the updated 535 Mission map",
@@ -343,7 +343,7 @@
       "source_pixel": {"x": 1300, "y": 1675}
     },
     {
-      "name": "marker_p",
+      "name": "mens_room",
       "x": 9.47,
       "y": 30.96,
       "description": "Mens room, marker P from the updated 535 Mission map",
@@ -352,7 +352,7 @@
       "source_pixel": {"x": 1170, "y": 1505}
     },
     {
-      "name": "marker_q",
+      "name": "ladies_room",
       "x": 17.15,
       "y": 18.23,
       "description": "Ladies room, marker Q from the updated 535 Mission map",
@@ -426,75 +426,75 @@
       "description": "annotated edge from Jamie's desk to kitchen entrance"
     },
     {
-      "from": "marker_i", "to": "marker_h", "distance": 2.14, "traversable": true,
+      "from": "studio", "to": "big_conference_room", "distance": 2.14, "traversable": true,
       "description": "marked corridor link I to H"
     },
     {
-      "from": "marker_h", "to": "marker_j", "distance": 3.07, "traversable": true,
+      "from": "big_conference_room", "to": "small_conference_room", "distance": 3.07, "traversable": true,
       "description": "marked corridor link H to J"
     },
     {
-      "from": "marker_j", "to": "marker_k", "distance": 5.61, "traversable": true,
+      "from": "small_conference_room", "to": "middle_office", "distance": 5.61, "traversable": true,
       "description": "marked corridor link J to K"
     },
     {
-      "from": "marker_k", "to": "marker_l", "distance": 4.89, "traversable": true,
+      "from": "middle_office", "to": "side_office", "distance": 4.89, "traversable": true,
       "description": "marked corridor link K to L"
     },
     {
-      "from": "marker_l", "to": "marker_n", "distance": 2.32, "traversable": true,
+      "from": "side_office", "to": "printer", "distance": 2.32, "traversable": true,
       "description": "marked corridor link L to N"
     },
     {
-      "from": "marker_n", "to": "marker_m", "distance": 0.39, "traversable": true,
+      "from": "printer", "to": "gathering_area", "distance": 0.39, "traversable": true,
       "description": "marked corridor link N to M"
     },
     {
-      "from": "marker_n", "to": "robertos_desk", "distance": 8.19, "traversable": true,
+      "from": "printer", "to": "robertos_desk", "distance": 8.19, "traversable": true,
       "description": "marked corridor link N to O"
     },
     {
-      "from": "robertos_desk", "to": "marker_p", "distance": 2.60, "traversable": true,
+      "from": "robertos_desk", "to": "mens_room", "distance": 2.60, "traversable": true,
       "description": "marked corridor link O to P"
     },
     {
-      "from": "marker_p", "to": "entrance", "distance": 3.69, "traversable": true,
+      "from": "mens_room", "to": "entrance", "distance": 3.69, "traversable": true,
       "description": "marked corridor link P to entrance"
     },
     {
-      "from": "marker_i", "to": "marker_g", "distance": 5.92, "traversable": true,
+      "from": "studio", "to": "patent_wall", "distance": 5.92, "traversable": true,
       "description": "marked corridor link I to G"
     },
     {
-      "from": "marker_g", "to": "marker_e", "distance": 3.10, "traversable": true,
+      "from": "patent_wall", "to": "lobby", "distance": 3.10, "traversable": true,
       "description": "marked corridor link G to E"
     },
     {
-      "from": "marker_e", "to": "marker_f", "distance": 3.48, "traversable": true,
+      "from": "lobby", "to": "lobby_entrance", "distance": 3.48, "traversable": true,
       "description": "marked corridor link E to F"
     },
     {
-      "from": "marker_f", "to": "marker_q", "distance": 7.73, "traversable": true,
+      "from": "lobby_entrance", "to": "ladies_room", "distance": 7.73, "traversable": true,
       "description": "marked corridor link F to Q"
     },
     {
-      "from": "marker_q", "to": "marker_d", "distance": 5.23, "traversable": true,
+      "from": "ladies_room", "to": "immersive_room", "distance": 5.23, "traversable": true,
       "description": "marked corridor link Q to D"
     },
     {
-      "from": "marker_q", "to": "marker_c", "distance": 10.35, "traversable": true,
+      "from": "ladies_room", "to": "ping_pong_table", "distance": 10.35, "traversable": true,
       "description": "marked corridor link Q to C"
     },
     {
-      "from": "marker_c", "to": "marker_b", "distance": 6.69, "traversable": true,
+      "from": "ping_pong_table", "to": "dishwasher", "distance": 6.69, "traversable": true,
       "description": "marked corridor link C to B"
     },
     {
-      "from": "marker_b", "to": "marker_a", "distance": 2.88, "traversable": true,
+      "from": "dishwasher", "to": "coffee_station", "distance": 2.88, "traversable": true,
       "description": "marked corridor link B to A"
     },
     {
-      "from": "marker_a", "to": "kitchen_entrance", "distance": 4.64, "traversable": true,
+      "from": "coffee_station", "to": "kitchen_entrance", "distance": 4.64, "traversable": true,
       "description": "marked corridor link A to kitchen entrance"
     }
   ],
