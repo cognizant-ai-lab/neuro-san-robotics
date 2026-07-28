@@ -46,9 +46,18 @@ class NativeEventRuntimeTests(unittest.TestCase):
     def test_internal_events_are_not_treated_as_user_speech(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
 
-        self.assertIn("Only `user:` is a person speaking to you", source)
+        self.assertIn("Only `user:` is guaranteed to be direct input", source)
         self.assertIn("`observation:`", source)
         self.assertIn("For `observation:` and `system:` events, never use the `say` field", source)
+
+    def test_ambient_speech_is_sent_to_the_agent_without_a_prefilter(self):
+        source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
+        interface_source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()
+
+        self.assertIn("`ambient:` is an automatic transcription", source)
+        self.assertIn("remain completely silent", source)
+        self.assertIn('queue_agent_event(transcript, source="ambient")', interface_source)
+        self.assertNotIn("ambient_llm_filter", interface_source)
 
     def test_scene_observer_is_a_native_python_service(self):
         server_source = (ROOT / "apps" / "conscious_assistant" / "native_server.py").read_text()

@@ -35,6 +35,16 @@ navigation controller. A lightweight Python observer service captures the scene
 periodically, updates the UI image, and sends compact `observation:` events to
 CAIL-E. Stop the Flask process to stop the service it started.
 
+### Ambient listening mode
+
+The web UI has an **Ambient Off / Ambient On** control beside the microphone.
+When enabled, the browser microphone is captured continuously in short segments
+and each usable transcription is queued to the native agent as an `ambient:`
+event. There is no LLM pre-filter and no acknowledgement or automatic speech
+for these events. CAIL-E's agent instructions require it to remain silent unless
+the transcript clearly addresses or refers to CAIL-E. Capture pauses while
+CAIL-E is speaking so it does not transcribe its own TTS output.
+
 ### Robot environment (`setmyenv.sh`)
 
 Use this as the robot-side `setmyenv.sh`. Keep secrets such as

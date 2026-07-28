@@ -953,6 +953,27 @@ footer {
     transform: translateY(-2px);
 }
 
+.ambient-listen-btn {
+    font-size: 0.8em;
+    color: #b8c7ff;
+    background: rgba(108, 92, 231, 0.18);
+    border: 1px solid rgba(160, 140, 255, 0.42);
+    border-radius: 25px;
+    padding: 12px 16px;
+    cursor: pointer;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.ambient-listen-btn.active {
+    color: #ffffff;
+    background: linear-gradient(135deg, #6c5ce7 0%, #a855f7 100%);
+    border-color: #c4b5fd;
+    box-shadow: 0 0 18px rgba(168, 85, 247, 0.55);
+}
+
 .floating-mic-btn {
     padding: 16px 20px;
     font-weight: 600;

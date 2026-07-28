@@ -61,6 +61,9 @@
         <button type="button" id="toggle-chat" class="floating-toggle-btn" aria-label="Toggle conversation">
             <span id="toggle-chat-text">Show Chat</span>
         </button>
+        <button type="button" id="ambient-listen-button" class="ambient-listen-btn" aria-label="Start ambient listening" aria-pressed="false">
+            <span id="ambient-listen-text">Ambient Off</span>
+        </button>
         <button type="button" id="floating-mic-button" class="floating-mic-btn" aria-label="Voice input">
             <span class="mic-icon">🎤</span>
         </button>
@@ -95,6 +98,11 @@
         var recordingStartTime = 0;  // Track when recording started
         var MIN_RECORDING_DURATION_MS = 300;  // Minimum recording duration in milliseconds
         var MIN_AUDIO_SIZE_BYTES = 1000;  // Minimum audio blob size in bytes
+        var ambientRecorder = null;
+        var ambientStream = null;
+        var ambientListening = false;
+        var ambientUploadChain = Promise.resolve();
+        var AMBIENT_CHUNK_MS = 5000;
 
         // Audio constraints optimized for speech recognition
         var audioConstraints = {
@@ -147,6 +155,10 @@
 
         // Start recording with MediaRecorder (OpenAI Whisper)
         async function startWhisperRecording() {
+            if (ambientListening) {
+                console.log('Manual recording is unavailable while ambient listening is active');
+                return;
+            }
             if (isVoiceInputLocked()) {
                 console.log('Cannot record while robot is processing or speaking');
                 return;
@@ -347,6 +359,106 @@
             }
         }
 
+        function ambientRecordingOptions() {
+            let mimeType = 'audio/webm;codecs=opus';
+            if (!MediaRecorder.isTypeSupported(mimeType)) {
+                mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+            }
+            return mimeType ? {
+                mimeType: mimeType,
+                audioBitsPerSecond: 32000
+            } : { audioBitsPerSecond: 32000 };
+        }
+
+        function updateAmbientListeningControl() {
+            const button = document.getElementById('ambient-listen-button');
+            const label = document.getElementById('ambient-listen-text');
+            button.classList.toggle('active', ambientListening);
+            button.setAttribute('aria-pressed', ambientListening ? 'true' : 'false');
+            button.setAttribute('aria-label', ambientListening ? 'Stop ambient listening' : 'Start ambient listening');
+            label.textContent = ambientListening ? 'Ambient On' : 'Ambient Off';
+        }
+
+        function queueAmbientTranscription(audioBlob) {
+            if (audioBlob.size < MIN_AUDIO_SIZE_BYTES) {
+                return;
+            }
+
+            ambientUploadChain = ambientUploadChain.then(async function() {
+                const formData = new FormData();
+                formData.append('audio', audioBlob, 'ambient.webm');
+                const response = await fetch('/api/transcribe', {
+                    method: 'POST',
+                    body: formData
+                });
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Ambient transcription failed');
+                }
+                const data = await response.json();
+                const text = (data.text || '').trim();
+                if (text && socket.connected) {
+                    socket.emit('ambient_transcript', {data: text});
+                }
+            }).catch(function(err) {
+                console.error('Ambient transcription error:', err);
+            });
+        }
+
+        async function startAmbientListening() {
+            if (ambientListening || isRecording || isTranscribing) {
+                return;
+            }
+            try {
+                ambientStream = await navigator.mediaDevices.getUserMedia(audioConstraints);
+                ambientRecorder = new MediaRecorder(ambientStream, ambientRecordingOptions());
+                ambientRecorder.ondataavailable = function(event) {
+                    if (event.data && event.data.size > 0) {
+                        queueAmbientTranscription(event.data);
+                    }
+                };
+                ambientRecorder.onstop = function() {
+                    if (ambientStream) {
+                        ambientStream.getTracks().forEach(track => track.stop());
+                        ambientStream = null;
+                    }
+                    ambientRecorder = null;
+                };
+                ambientRecorder.start(AMBIENT_CHUNK_MS);
+                ambientListening = true;
+                updateAmbientListeningControl();
+                if (isSpeaking && ambientRecorder.state === 'recording') {
+                    ambientRecorder.pause();
+                }
+                console.info('Ambient listening started; transcripts are sent to the agent as ambient events');
+            } catch (err) {
+                console.error('Failed to start ambient listening:', err);
+                ambientListening = false;
+                updateAmbientListeningControl();
+                alert('Ambient listening could not start: ' + err.message);
+            }
+        }
+
+        function stopAmbientListening() {
+            ambientListening = false;
+            updateAmbientListeningControl();
+            if (ambientRecorder && ambientRecorder.state !== 'inactive') {
+                ambientRecorder.stop();
+            }
+            console.info('Ambient listening stopped');
+        }
+
+        function setAmbientCapturePaused(paused) {
+            if (!ambientListening || !ambientRecorder) {
+                return;
+            }
+            if (paused && ambientRecorder.state === 'recording') {
+                ambientRecorder.pause();
+            } else if (!paused && ambientRecorder.state === 'paused') {
+                ambientRecorder.resume();
+            }
+        }
+
         // Spacebar hotkey for speech input (hold to talk, release to stop)
         var spacebarPressed = false;
         var spacebarStartTime = 0;
@@ -519,11 +631,23 @@
         socket.on('speech_started', function() {
             console.log('Robot is speaking...');
             setSpeakingState(true);
+            setAmbientCapturePaused(true);
         });
 
         socket.on('speech_complete', function() {
             console.log('Robot finished speaking');
             setSpeakingState(false);
+            setAmbientCapturePaused(false);
+        });
+
+        socket.on('ambient_transcript', function(data) {
+            appendTextEntry(
+                'chat-history',
+                'ambient-msg',
+                'Heard: ' + data.data,
+                '.speech-msg, .user-msg, .ambient-msg',
+                MAX_CHAT_HISTORY,
+            );
         });
 
         socket.on('update_thoughts', function(data) {
@@ -683,6 +807,14 @@
             var toggleChatText = document.getElementById('toggle-chat-text');
             mainContainer.classList.toggle('hidden');
             toggleChatText.innerText = mainContainer.classList.contains('hidden') ? 'Show Chat' : 'Hide Chat';
+        });
+
+        document.getElementById('ambient-listen-button').addEventListener('click', function() {
+            if (ambientListening) {
+                stopAmbientListening();
+            } else {
+                startAmbientListening();
+            }
         });
 
         document.getElementById('floating-mic-button').addEventListener('mousedown', async function(e) {

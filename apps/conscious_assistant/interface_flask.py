@@ -34,6 +34,7 @@ from flask_socketio import SocketIO
 from apps.conscious_assistant.agent_runtime import AgentRuntime
 from apps.conscious_assistant.scene_observer import SceneObserver
 from coded_tools.unigo2.agent_events import dispatch_agent_event
+from coded_tools.unigo2.agent_events import queue_agent_event
 
 
 # TLS certificate paths used by both Flask and the native runtime callback.
@@ -423,6 +424,27 @@ def handle_user_input(json, *_):
         socketio.emit("processing_complete", {"interactive": True}, namespace="/chat")
 
     socketio.start_background_task(submit)
+
+
+@socketio.on("ambient_transcript", namespace="/chat")
+def handle_ambient_transcript(json, *_):
+    """Queue an always-listening transcript without treating it as direct input.
+
+    Ambient mode deliberately has no acknowledgement, processing indicator, or
+    automatic speech.  The native agent receives every usable transcript and
+    decides from its event instructions whether CAIL-E was being addressed.
+    """
+    transcript = str((json or {}).get("data", "")).strip()
+    if not transcript:
+        return
+
+    logging.info("Ambient transcript queued (%d chars): %s", len(transcript), transcript)
+    socketio.emit(
+        "ambient_transcript",
+        {"data": transcript},
+        namespace="/chat",
+    )
+    queue_agent_event(transcript, source="ambient")
 
 
 cleaned_up = False
