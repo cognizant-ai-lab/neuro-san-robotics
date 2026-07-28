@@ -46,8 +46,11 @@ All raw **Heard:** text appears in the Thoughts pane. CAIL-E remains silent unle
 the transcript clearly addresses or refers to it; when it responds, the relevant
 addressed speech is also promoted into chat like a push-to-talk transcript.
 Capture pauses while CAIL-E speaks so it does not transcribe its own TTS output.
+The Flask backend mints a short-lived Realtime client token; the standard API key
+never leaves the robot, and the browser negotiates its WebRTC session directly
+with OpenAI. Transient gateway failures are retried once.
 
-Realtime ambient transcription uses `gpt-live-transcribe` by default. Override
+Realtime ambient transcription uses `gpt-4o-transcribe` by default. Override
 it with `CONSCIOUS_AMBIENT_TRANSCRIPTION_MODEL` if needed.
 
 ### Robot environment (`setmyenv.sh`)

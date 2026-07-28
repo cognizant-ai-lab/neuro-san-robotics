@@ -1,12 +1,13 @@
-"""Server-side bridge for browser WebRTC transcription sessions."""
+"""Server-side credentials for browser WebRTC transcription sessions."""
 
 import json
-import uuid
+import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
-REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"
+REALTIME_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
+TRANSIENT_STATUSES = {502, 503, 504}
 
 
 def transcription_session_config(model: str) -> dict:
@@ -18,12 +19,11 @@ def transcription_session_config(model: str) -> dict:
                 "noise_reduction": {"type": "far_field"},
                 "transcription": {
                     "model": model,
-                    "languages": ["en"],
+                    "language": "en",
                     "prompt": (
                         "Ambient speech in the Cognizant AI Lab. CAIL-E is the robot's "
                         "name. Preserve names and technical terms accurately."
                     ),
-                    "keywords": ["CAIL-E", "Cognizant", "Neuro-SAN", "Unitree"],
                 },
                 "turn_detection": {
                     "type": "server_vad",
@@ -36,34 +36,47 @@ def transcription_session_config(model: str) -> dict:
     }
 
 
-def create_realtime_call(offer_sdp: bytes, api_key: str, model: str):
-    """Exchange a browser SDP offer for an OpenAI WebRTC SDP answer."""
-    boundary = f"----conscious-assistant-{uuid.uuid4().hex}"
-    session_json = json.dumps(transcription_session_config(model)).encode("utf-8")
-    body = b"".join((
-        f"--{boundary}\r\n".encode(),
-        b'Content-Disposition: form-data; name="sdp"\r\n',
-        b"Content-Type: application/sdp\r\n\r\n",
-        offer_sdp,
-        b"\r\n",
-        f"--{boundary}\r\n".encode(),
-        b'Content-Disposition: form-data; name="session"\r\n',
-        b"Content-Type: application/json\r\n\r\n",
-        session_json,
-        b"\r\n",
-        f"--{boundary}--\r\n".encode(),
-    ))
+def _send_client_secret_request(api_key: str, model: str):
+    request_body = json.dumps({
+        "session": transcription_session_config(model),
+    }).encode("utf-8")
     upstream_request = Request(
-        REALTIME_CALLS_URL,
-        data=body,
+        REALTIME_CLIENT_SECRETS_URL,
+        data=request_body,
         method="POST",
         headers={
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Type": "application/json",
         },
     )
     try:
         with urlopen(upstream_request, timeout=20) as response:  # nosec B310
-            return response.status, response.headers.get_content_type(), response.read()
+            return (
+                response.status,
+                response.headers.get_content_type(),
+                response.read(),
+                response.headers.get("x-request-id", ""),
+            )
     except HTTPError as error:
-        return error.code, error.headers.get_content_type(), error.read()
+        return (
+            error.code,
+            error.headers.get_content_type(),
+            error.read(),
+            error.headers.get("x-request-id", ""),
+        )
+
+
+def create_realtime_client_secret(
+    api_key: str,
+    model: str,
+    *,
+    max_attempts: int = 2,
+):
+    """Mint a short-lived browser token, retrying transient gateway failures."""
+    attempts = max(1, max_attempts)
+    for attempt in range(attempts):
+        result = _send_client_secret_request(api_key, model)
+        if result[0] not in TRANSIENT_STATUSES or attempt == attempts - 1:
+            return result
+        time.sleep(0.5 * (attempt + 1))
+    raise AssertionError("unreachable")

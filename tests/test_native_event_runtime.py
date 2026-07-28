@@ -68,7 +68,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
             ROOT / "apps" / "conscious_assistant" / "templates" / "index.html"
         ).read_text()
 
-        self.assertIn('/api/realtime/transcription-session', interface_source)
+        self.assertIn('/api/realtime/transcription-token', interface_source)
         self.assertIn("new RTCPeerConnection()", browser_source)
         self.assertIn("conversation.item.input_audio_transcription.completed", browser_source)
         self.assertNotIn("AMBIENT_CHUNK_MS", browser_source)

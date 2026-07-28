@@ -509,14 +509,41 @@
 
             var offer = await ambientPeerConnection.createOffer();
             await ambientPeerConnection.setLocalDescription(offer);
-            var response = await fetch('/api/realtime/transcription-session', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/sdp'},
-                body: offer.sdp
-            });
+
+            var response = null;
+            for (var attempt = 0; attempt < 2; attempt += 1) {
+                var tokenResponse = await fetch('/api/realtime/transcription-token', {
+                    method: 'POST'
+                });
+                if (!tokenResponse.ok) {
+                    var tokenError = await tokenResponse.text();
+                    throw new Error('Token creation failed (' + tokenResponse.status + '): ' + tokenError);
+                }
+                var tokenData = await tokenResponse.json();
+                if (!tokenData.value) {
+                    throw new Error('Token creation returned no ephemeral key');
+                }
+
+                response = await fetch('https://api.openai.com/v1/realtime/calls', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + tokenData.value,
+                        'Content-Type': 'application/sdp'
+                    },
+                    body: offer.sdp
+                });
+                if (![502, 503, 504].includes(response.status) || attempt === 1) {
+                    break;
+                }
+                await new Promise(function(resolve) { setTimeout(resolve, 500); });
+            }
             if (!response.ok) {
                 var errorText = await response.text();
-                throw new Error('Session creation failed (' + response.status + '): ' + errorText);
+                var requestId = response.headers.get('x-request-id') || 'unavailable';
+                throw new Error(
+                    'Session creation failed (' + response.status +
+                    ', request ID ' + requestId + '): ' + errorText
+                );
             }
             var answerSdp = await response.text();
             await ambientPeerConnection.setRemoteDescription({type: 'answer', sdp: answerSdp});

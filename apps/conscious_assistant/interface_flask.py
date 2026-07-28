@@ -32,7 +32,7 @@ from flask import send_file
 from flask_socketio import SocketIO
 
 from apps.conscious_assistant.agent_runtime import AgentRuntime
-from apps.conscious_assistant.realtime_transcription import create_realtime_call
+from apps.conscious_assistant.realtime_transcription import create_realtime_client_secret
 from apps.conscious_assistant.scene_observer import SceneObserver
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 from coded_tools.unigo2.agent_events import queue_agent_event
@@ -405,26 +405,21 @@ def transcribe_audio():
                 print(f"Failed to delete temp file: {e}")
 
 
-@app.route("/api/realtime/transcription-session", methods=["POST"])
-def realtime_transcription_session():
-    """Create a persistent transcription-only WebRTC session for ambient mode."""
+@app.route("/api/realtime/transcription-token", methods=["POST"])
+def realtime_transcription_token():
+    """Mint a short-lived token for a browser transcription WebRTC session."""
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
         return jsonify({
             "error": "OpenAI API key not configured. Set OPENAI_API_KEY env var."
         }), 503
 
-    offer_sdp = request.get_data(cache=False)
-    if not offer_sdp or request.mimetype != "application/sdp":
-        return jsonify({"error": "Expected an application/sdp WebRTC offer"}), 400
-
     model = os.environ.get(
         "CONSCIOUS_AMBIENT_TRANSCRIPTION_MODEL",
-        "gpt-live-transcribe",
+        "gpt-4o-transcribe",
     )
     try:
-        status, content_type, response_body = create_realtime_call(
-            offer_sdp,
+        status, content_type, response_body, request_id = create_realtime_client_secret(
             openai_api_key,
             model,
         )
@@ -433,13 +428,21 @@ def realtime_transcription_session():
         return jsonify({"error": "Realtime transcription service is unavailable"}), 502
     if status >= 400:
         logging.error(
-            "Realtime transcription session creation failed (%d): %s",
+            "Realtime transcription token creation failed (%d, request_id=%s): %s",
             status,
+            request_id or "unavailable",
             response_body.decode("utf-8", errors="replace")[:1000],
         )
         return jsonify({"error": "Could not start realtime transcription"}), status
 
-    return response_body, status, {"Content-Type": content_type or "application/sdp"}
+    logging.info(
+        "Realtime transcription token created (request_id=%s)",
+        request_id or "unavailable",
+    )
+    return response_body, status, {
+        "Content-Type": content_type or "application/json",
+        "Cache-Control": "no-store",
+    }
 
 
 @socketio.on("user_input", namespace="/chat")
