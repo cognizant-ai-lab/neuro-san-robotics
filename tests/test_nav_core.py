@@ -518,6 +518,37 @@ class TestLocalPlanner(unittest.TestCase):
         cmd = planner.compute_velocity(grid, goal_direction=0.0, goal_distance=0.3)
         self.assertLessEqual(cmd.vx, 0.1, "Should slow down near goal")
 
+    def test_does_not_slow_for_close_intermediate_route_point(self):
+        planner = LocalPlanner(max_linear_speed=0.3)
+        grid = _empty_grid()
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=0.0,
+            goal_distance=0.3,
+            slow_for_arrival=False,
+        )
+
+        self.assertAlmostEqual(cmd.vx, 0.3)
+
+    def test_close_intermediate_route_point_still_pivots_for_real_corner(self):
+        planner = LocalPlanner(
+            max_linear_speed=0.3,
+            max_yaw_rate=0.08,
+            pivot_yaw_rate=0.5,
+        )
+        grid = _empty_grid()
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(45.0),
+            goal_distance=0.3,
+            slow_for_arrival=False,
+        )
+
+        self.assertAlmostEqual(cmd.vx, 0.0)
+        self.assertAlmostEqual(cmd.vyaw, 0.5)
+
     def test_avoidance_turns_away_from_obstacle(self):
         planner = LocalPlanner()
         grid = _grid_with_wall_right(distance_m=0.5)

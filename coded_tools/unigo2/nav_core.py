@@ -987,6 +987,8 @@ class LocalPlanner:
         obstacle_grid: ObstacleGrid,
         goal_direction: float,
         goal_distance: float,
+        *,
+        slow_for_arrival: bool = True,
     ) -> VelocityCommand:
         """Compute velocity toward the goal while avoiding obstacles.
 
@@ -994,6 +996,8 @@ class LocalPlanner:
             obstacle_grid: Current obstacle map from depth processor.
             goal_direction: Bearing to goal in radians (0=ahead, positive=left).
             goal_distance: Distance to goal in meters.
+            slow_for_arrival: Brake inside 0.5m for a stopping destination. False
+                for intermediate route points that should be passed through.
 
         Returns:
             VelocityCommand with speed modulated by obstacle proximity and goal distance.
@@ -1009,6 +1013,7 @@ class LocalPlanner:
                 route_direction,
                 goal_distance,
                 path_nearest,
+                slow_for_arrival=slow_for_arrival,
             )
 
         histogram = self._build_histogram(obstacle_grid)
@@ -1034,7 +1039,7 @@ class LocalPlanner:
             )
 
         if (
-            goal_distance > 0.5
+            (not slow_for_arrival or goal_distance > 0.5)
             and abs(route_direction) >= self.PIVOT_HEADING_ERROR_RAD
         ):
             vyaw = self._pivot_yaw_rate(route_direction)
@@ -1057,7 +1062,7 @@ class LocalPlanner:
         base_speed = self._modulate_speed(self.max_linear_speed, nearest)
 
         # Slow down when close to goal
-        if goal_distance < 0.5:
+        if slow_for_arrival and goal_distance < 0.5:
             base_speed = min(base_speed, 0.1)
 
         # Compute velocity command
@@ -1167,10 +1172,12 @@ class LocalPlanner:
         goal_direction: float,
         goal_distance: float,
         path_nearest: float,
+        *,
+        slow_for_arrival: bool = True,
     ) -> VelocityCommand:
         """Drive the mapped path directly when the path corridor is clear."""
         if (
-            goal_distance > 0.5
+            (not slow_for_arrival or goal_distance > 0.5)
             and abs(goal_direction) >= self.PIVOT_HEADING_ERROR_RAD
         ):
             vyaw = self._pivot_yaw_rate(goal_direction)
@@ -1178,7 +1185,7 @@ class LocalPlanner:
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
 
         base_speed = self._modulate_speed(self.max_linear_speed, path_nearest)
-        if goal_distance < 0.5:
+        if slow_for_arrival and goal_distance < 0.5:
             base_speed = min(base_speed, 0.1)
 
         vyaw = float(np.clip(goal_direction, -self.max_yaw_rate, self.max_yaw_rate))
@@ -3914,6 +3921,7 @@ class NavCore:
         # 3. Compute velocity command
         if state == NavState.NAVIGATING:
             accepted_landmark = False
+            slow_for_arrival = True
             metric_route = (
                 goal.goal_type == "semantic"
                 and self._topo_map.metric_map is not None
@@ -3940,6 +3948,7 @@ class NavCore:
                     self._complete_navigation(goal)
                     return
                 target_x, target_y = waypoint.x, waypoint.y
+                slow_for_arrival = "metric_transit" not in waypoint.tags
             else:
                 target_x, target_y = goal.x, goal.y
 
@@ -3951,7 +3960,12 @@ class NavCore:
             goal_dir = math.atan2(math.sin(goal_dir), math.cos(goal_dir))
             goal_dist = math.hypot(target_x - pose.x, target_y - pose.y)
 
-            cmd = self._local_planner.compute_velocity(grid, goal_dir, goal_dist)
+            cmd = self._local_planner.compute_velocity(
+                grid,
+                goal_dir,
+                goal_dist,
+                slow_for_arrival=slow_for_arrival,
+            )
             if goal.goal_type == "semantic":
                 cmd = self._local_planner.apply_corridor_course_correction(cmd, grid)
 
