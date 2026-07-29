@@ -185,14 +185,44 @@ def _ensure_onboard_speaker_enabled(device: str) -> None:
         errors: list[Exception] = []
         for root in ("unitree_sdk2_python.unitree_sdk2py", "unitree_sdk2py"):
             try:
+                channel_module = __import__(
+                    f"{root}.core.channel",
+                    fromlist=["ChannelFactoryInitialize"],
+                )
                 vui_module = __import__(
                     f"{root}.go2.vui.vui_client",
                     fromlist=["VuiClient"],
                 )
-                client = vui_module.VuiClient()
-                client.SetTimeout(3.0)
-                client.Init()
-                code = client.SetSwitch(1)
+
+                def enable_speaker():
+                    client = vui_module.VuiClient()
+                    client.SetTimeout(3.0)
+                    client.Init()
+                    result = client.SetSwitch(1)
+                    return client, result
+
+                try:
+                    client, code = enable_speaker()
+                except AttributeError as exc:
+                    if "_ref" not in str(exc):
+                        raise
+                    # The Flask TTS worker may not share the DDS initialization
+                    # performed by the agent subprocess. Initialize this process
+                    # exactly as the successful standalone speaker probe does.
+                    network_interface = (
+                        os.environ.get("GO2_NETWORK_INTERFACE")
+                        or os.environ.get("CYCLONEDDS_NETWORK_INTERFACE")
+                    )
+                    if network_interface:
+                        channel_module.ChannelFactoryInitialize(0, network_interface)
+                    else:
+                        channel_module.ChannelFactoryInitialize(0)
+                    logging.info(
+                        "GO2_TTS: initialized Unitree DDS%s",
+                        f" on {network_interface}" if network_interface else "",
+                    )
+                    client, code = enable_speaker()
+
                 if code != 0:
                     raise RuntimeError(f"VUI SetSwitch failed with code {code}")
                 volume_code, volume = client.GetVolume()
@@ -267,6 +297,11 @@ def _openai_say_streaming(
     ) as response:
         if system == "Linux":
             output_rate = ONBOARD_PCM_RATE if _is_onboard_audio_device(device) else OPENAI_PCM_RATE
+            logging.info(
+                "GO2_TTS: streaming PCM to %s at %d Hz",
+                device,
+                output_rate,
+            )
             # Stream directly to aplay
             aplay_cmd = [
                 "aplay",
@@ -405,6 +440,11 @@ async def _openai_say_streaming_async(
     ) as response:
         if system == "Linux":
             output_rate = ONBOARD_PCM_RATE if _is_onboard_audio_device(device) else OPENAI_PCM_RATE
+            logging.info(
+                "GO2_TTS: async streaming PCM to %s at %d Hz",
+                device,
+                output_rate,
+            )
             aplay_cmd = [
                 "aplay",
                 "-D", device,
