@@ -15,7 +15,8 @@ NavCore - Navigation Engine for Unitree Go2 EDU
 
 Provides autonomous navigation for the CAIL-E robot dog:
 - Local reactive obstacle avoidance (VFH+ algorithm)
-- Global path planning on topological maps (Dijkstra)
+- Clearance-aware occupancy planning with live-obstacle overlays
+- Semantic destinations with topological fallback for simulation maps
 - Safety monitoring with emergency stop
 - Odometry tracking via Unitree SDK2 DDS
 - Background navigation loop at configurable frequency
@@ -59,6 +60,7 @@ from coded_tools.unigo2.obstacle_grid_utils import (
     occupied_xy_points,
 )
 from coded_tools.unigo2.obstacle_provider import create_default_obstacle_provider
+from coded_tools.unigo2.metric_navigation import MetricOccupancyMap
 
 logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -267,7 +269,7 @@ class MapEdge:
 # ---------------------------------------------------------------------------
 
 class TopologicalMap:
-    """Graph-based semantic map loaded from JSON."""
+    """Semantic destinations plus an optional metric occupancy map."""
 
     def __init__(self):
         """Initialize an empty topological map."""
@@ -276,13 +278,19 @@ class TopologicalMap:
         self.edges: List[MapEdge] = []
         self._adjacency: Dict[str, List[Tuple[str, float]]] = {}
         self._node_aliases: Dict[str, str] = {}
+        self.metric_map: Optional[MetricOccupancyMap] = None
+        self.metric_map_required: bool = False
+        self.metric_map_error: Optional[str] = None
 
     def load_from_file(self, path: str) -> bool:
         """Load map from a JSON file. Returns True if at least one node was loaded."""
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return self._parse(data)
+            parsed = self._parse(data)
+            if parsed:
+                self._load_metric_map(data, Path(path).resolve().parent)
+            return self.is_loaded
         except Exception as exc:
             logger.error("TopologicalMap: failed to load %s: %s", path, exc)
             return False
@@ -298,6 +306,12 @@ class TopologicalMap:
         self.edges.clear()
         self._adjacency.clear()
         self._node_aliases.clear()
+        self.metric_map = None
+        self.metric_map_error = None
+        occupancy_config = data.get("occupancy_map", {})
+        if not isinstance(occupancy_config, dict):
+            occupancy_config = {}
+        self.metric_map_required = bool(occupancy_config.get("required", False))
 
         for node_data in data.get("nodes", []):
             name = node_data["name"]
@@ -351,6 +365,42 @@ class TopologicalMap:
             self.name, len(self.nodes), len(self.edges),
         )
         return len(self.nodes) > 0
+
+    def _load_metric_map(self, data: Dict[str, Any], base_directory: Path) -> None:
+        """Load the runtime occupancy grid declared by a map file."""
+        config = data.get("occupancy_map")
+        if not isinstance(config, dict) or not config.get("file"):
+            return
+        metric_path = base_directory / str(config["file"])
+        try:
+            self.metric_map = MetricOccupancyMap.load(
+                metric_path,
+                robot_clearance_m=(
+                    float(config["robot_clearance_m"])
+                    if config.get("robot_clearance_m") is not None
+                    else None
+                ),
+                preferred_clearance_m=(
+                    float(config["preferred_clearance_m"])
+                    if config.get("preferred_clearance_m") is not None
+                    else None
+                ),
+            )
+            logger.info(
+                "TopologicalMap: loaded metric occupancy %s (%dx%d at %.2fm)",
+                metric_path,
+                self.metric_map.occupied.shape[1],
+                self.metric_map.occupied.shape[0],
+                self.metric_map.resolution_m,
+            )
+        except Exception as exc:
+            self.metric_map = None
+            self.metric_map_error = str(exc)
+            logger.error(
+                "TopologicalMap: failed to load metric occupancy %s: %s",
+                metric_path,
+                exc,
+            )
 
     def save_to_file(self, path: str):
         """Serialize the map to a JSON file, creating parent directories if needed."""
@@ -429,7 +479,9 @@ class TopologicalMap:
     @property
     def is_loaded(self) -> bool:
         """True if the map has at least one node."""
-        return len(self.nodes) > 0
+        return len(self.nodes) > 0 and (
+            not self.metric_map_required or self.metric_map is not None
+        )
 
     @staticmethod
     def _normalize_node_name(name: str) -> str:
@@ -487,7 +539,7 @@ class TopologicalMap:
 # ---------------------------------------------------------------------------
 
 class GlobalPlanner:
-    """Dijkstra path planning on the topological map."""
+    """Metric occupancy planning with topological fallback for simple maps."""
 
     def __init__(self, topo_map: TopologicalMap):
         """Initialize the global planner with a topological map reference."""
@@ -495,8 +547,13 @@ class GlobalPlanner:
         self._current_path: List[MapNode] = []
         self._waypoint_index: int = 0
 
-    def plan_path(self, current_pose: RobotPose, goal_label: str) -> Optional[List[MapNode]]:
-        """Plan a path from the nearest node to current_pose to the goal node.
+    def plan_path(
+        self,
+        current_pose: RobotPose,
+        goal_label: str,
+        dynamic_obstacles_xy: Optional[np.ndarray] = None,
+    ) -> Optional[List[MapNode]]:
+        """Plan a collision-free path from the current pose to a named goal.
 
         Returns:
             List of MapNodes from start to goal, or None if unreachable/unknown.
@@ -505,6 +562,13 @@ class GlobalPlanner:
         if goal_node is None:
             logger.warning("GlobalPlanner: unknown destination '%s'", goal_label)
             return None
+
+        if self._map.metric_map is not None:
+            return self._plan_metric_path(
+                current_pose,
+                goal_node,
+                dynamic_obstacles_xy=dynamic_obstacles_xy,
+            )
 
         start_node = self._map.find_nearest_node(current_pose.x, current_pose.y)
         if start_node is None:
@@ -526,6 +590,86 @@ class GlobalPlanner:
         path = [self._map.nodes[n] for n in path_names]
         self._current_path = path
         self._waypoint_index = 1  # skip start node
+        return path
+
+    def _plan_metric_path(
+        self,
+        current_pose: RobotPose,
+        goal_node: MapNode,
+        dynamic_obstacles_xy: Optional[np.ndarray] = None,
+    ) -> Optional[List[MapNode]]:
+        """Plan dense transient waypoints over free space to a semantic goal."""
+        metric_map = self._map.metric_map
+        if metric_map is None:
+            return None
+        points = metric_map.plan_path(
+            (current_pose.x, current_pose.y),
+            (goal_node.x, goal_node.y),
+            dynamic_obstacles_xy=dynamic_obstacles_xy,
+        )
+        if not points:
+            return None
+
+        path = [
+            MapNode(
+                name="__metric_start__",
+                x=points[0][0],
+                y=points[0][1],
+                description="Current position",
+                tags=["metric_transit"],
+                arrival_tolerance_m=0.30,
+                pass_through_tolerance_m=0.45,
+            )
+        ]
+        for index, (x_m, y_m) in enumerate(points[1:-1], start=1):
+            path.append(
+                MapNode(
+                    name=f"__metric_{index:03d}__",
+                    x=x_m,
+                    y=y_m,
+                    description="Collision-free route point",
+                    tags=["metric_transit"],
+                    arrival_tolerance_m=0.30,
+                    pass_through_tolerance_m=0.45,
+                )
+            )
+        safe_goal_x, safe_goal_y = points[-1]
+        path.append(replace(goal_node, x=safe_goal_x, y=safe_goal_y))
+        self._current_path = path
+        self._waypoint_index = 1 if len(path) > 1 else 0
+        route_length = sum(
+            math.hypot(second.x - first.x, second.y - first.y)
+            for first, second in zip(path, path[1:])
+        )
+        logger.info(
+            "GlobalPlanner: metric route to '%s' has %d targets over %.2fm",
+            goal_node.name,
+            max(0, len(path) - 1),
+            route_length,
+        )
+        return path
+
+    def replan_path_around_obstacles(
+        self,
+        current_pose: RobotPose,
+        goal_label: str,
+        dynamic_obstacles_xy: Optional[np.ndarray] = None,
+    ) -> Optional[List[MapNode]]:
+        """Replace the remaining metric route using the latest obstacle scan."""
+        if self._map.metric_map is None:
+            return self.replan_path_preserving_progress(current_pose, goal_label)
+        goal_node = self._map.get_node(goal_label)
+        if goal_node is None:
+            return None
+        path = self._plan_metric_path(
+            current_pose,
+            goal_node,
+            dynamic_obstacles_xy=dynamic_obstacles_xy,
+        )
+        if path is not None:
+            logger.info(
+                "GlobalPlanner: replaced stalled route with a fresh metric route"
+            )
         return path
 
     def replan_path_preserving_progress(
@@ -768,6 +912,14 @@ class LocalPlanner:
         "NAV_ROUTE_CENTER_MAX_HEADING_RAD",
         math.radians(40.0),
     )
+    ROUTE_CENTER_GOAL_PRIORITY_RAD = _env_float(
+        "NAV_ROUTE_CENTER_GOAL_PRIORITY_RAD",
+        math.radians(25.0),
+    )
+    ROUTE_CENTER_MAX_CHANGE_RAD = _env_float(
+        "NAV_ROUTE_CENTER_MAX_CHANGE_RAD",
+        math.radians(10.0),
+    )
     ROUTE_CENTER_STEP_RAD = math.radians(5.0)
     ROUTE_CENTER_CLEARANCE_MARGIN_M = 0.12
     ROUTE_CENTER_MIN_BLOCKING_POINTS = 3
@@ -797,6 +949,12 @@ class LocalPlanner:
         self.safety_distance = safety_distance
         self.avoidance_distance = avoidance_distance
         self._prev_heading = 0.0
+        self._route_center_heading: Optional[float] = None
+
+    def reset_navigation_state(self) -> None:
+        """Forget steering history after a new route or waypoint transition."""
+        self._prev_heading = 0.0
+        self._route_center_heading = None
 
     def compute_velocity(
         self,
@@ -892,15 +1050,18 @@ class LocalPlanner:
     ) -> float:
         """Aim through the middle of visible open space unless the goal lane is wide."""
         max_heading = self.ROUTE_CENTER_MAX_HEADING_RAD
-        if abs(goal_direction) >= max_heading:
+        if abs(goal_direction) >= self.ROUTE_CENTER_GOAL_PRIORITY_RAD:
+            self._route_center_heading = None
             return goal_direction
 
         points = occupied_xy_points(obstacle_grid)
         if points.size == 0:
+            self._route_center_heading = None
             return goal_direction
 
         direct_clearance = self._swept_route_clearance(points, goal_direction)
         if direct_clearance >= self.ROUTE_CENTER_LOOKAHEAD_M:
+            self._route_center_heading = None
             return goal_direction
 
         headings = np.arange(
@@ -943,7 +1104,18 @@ class LocalPlanner:
             centered_heading = float(
                 np.clip(centered_heading, -translating_limit, translating_limit)
             )
-        return float(np.clip(centered_heading, -max_heading, max_heading))
+        centered_heading = float(np.clip(centered_heading, -max_heading, max_heading))
+        if self._route_center_heading is not None:
+            change = float(
+                np.clip(
+                    centered_heading - self._route_center_heading,
+                    -self.ROUTE_CENTER_MAX_CHANGE_RAD,
+                    self.ROUTE_CENTER_MAX_CHANGE_RAD,
+                )
+            )
+            centered_heading = self._route_center_heading + change
+        self._route_center_heading = centered_heading
+        return centered_heading
 
     def _swept_route_clearance(
         self,
@@ -1808,7 +1980,7 @@ class NavCore:
         "NAV_SEMANTIC_ARRIVAL_TOLERANCE",
         0.65,
     )
-    STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 10.0)
+    STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 6.0)
     MAX_STUCK_RECOVERY_ATTEMPTS: int = 2
     PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.0)
     FORWARD_HAZARD_CONE_RAD: float = _env_float(
@@ -1897,6 +2069,26 @@ class NavCore:
         "NAV_STALL_ESCAPE_COMMAND_PERIOD",
         0.10,
     )
+    METRIC_LOCALIZATION_INTERVAL_S: float = _env_float(
+        "NAV_METRIC_LOCALIZATION_INTERVAL",
+        2.0,
+    )
+    METRIC_LOCALIZATION_MAX_TRANSLATION_M: float = _env_float(
+        "NAV_METRIC_LOCALIZATION_MAX_TRANSLATION",
+        0.12,
+    )
+    METRIC_LOCALIZATION_MAX_YAW_RAD: float = _env_float(
+        "NAV_METRIC_LOCALIZATION_MAX_YAW_RAD",
+        math.radians(2.5),
+    )
+    METRIC_BLOCKED_REPLAN_DELAY_S: float = _env_float(
+        "NAV_METRIC_BLOCKED_REPLAN_DELAY",
+        1.0,
+    )
+    METRIC_REPLAN_COOLDOWN_S: float = _env_float(
+        "NAV_METRIC_REPLAN_COOLDOWN",
+        3.0,
+    )
 
     @classmethod
     def get_instance(cls) -> "NavCore":
@@ -1971,12 +2163,15 @@ class NavCore:
             bearing_tolerance_rad=self.PATH_OBSTACLE_BEARING_TOLERANCE_RAD,
         )
         self._path_obstacle_active = False
+        self._path_obstacle_active_since: Optional[float] = None
         self._path_obstacle_clear_since: Optional[float] = None
         self._obstacle_grid_unavailable_since: Optional[float] = None
         self._obstacle_grid_unavailable_notified = False
         self._manual_override_active = False
         self._obstacle_memory = LocalObstacleMemory(self.OBSTACLE_MEMORY_SECONDS)
         self._last_obstacle_telemetry_time = 0.0
+        self._last_metric_localization_time = time.monotonic()
+        self._last_metric_replan_time = 0.0
 
         # Go2 macros (lazy init)
         self._go2 = None
@@ -2085,14 +2280,19 @@ class NavCore:
         self._reset_center_only_close_confirmation()
         self._reset_path_obstacle_confirmation()
         self._path_obstacle_active = False
+        self._path_obstacle_active_since = None
         self._path_obstacle_clear_since = None
         self._obstacle_grid_unavailable_since = None
         self._obstacle_grid_unavailable_notified = False
         self._last_stall_scan_direction = None
         self._obstacle_memory.clear()
+        self._local_planner.reset_navigation_state()
 
     def _notify_waypoint_advance(self, reached: MapNode, upcoming: MapNode) -> None:
         """Publish topological progress without exposing noisy coordinates."""
+        self._local_planner.reset_navigation_state()
+        if "metric_transit" in reached.tags or "metric_transit" in upcoming.tags:
+            return
         reached_label = self._topo_map.get_node_label(reached)
         upcoming_label = self._topo_map.get_node_label(upcoming)
         self._notify_status_change(
@@ -2162,6 +2362,7 @@ class NavCore:
             )
             upcoming = advanced[1] if advanced is not None else None
             self._path_obstacle_active = False
+            self._path_obstacle_active_since = None
             self._path_obstacle_clear_since = None
             self._reset_progress_tracker()
             logger.info(
@@ -2183,6 +2384,7 @@ class NavCore:
         now = time.monotonic()
         if in_avoidance_band and not self._path_obstacle_active:
             self._path_obstacle_active = True
+            self._path_obstacle_active_since = now
             self._path_obstacle_clear_since = None
             self._notify_status_change(
                 f"I encountered an obstacle in my path at {path_distance_m:.2f} meters "
@@ -2209,11 +2411,69 @@ class NavCore:
 
         if now - self._path_obstacle_clear_since >= self.PATH_OBSTACLE_CLEAR_CONFIRM_S:
             self._path_obstacle_active = False
+            self._path_obstacle_active_since = None
             self._path_obstacle_clear_since = None
             self._notify_status_change(
                 f"The path is clear again, and I am continuing toward "
                 f"{self._goal_display_name(goal)}."
             )
+
+    def _maybe_replan_blocked_metric_route(
+        self,
+        goal: NavGoal,
+        pose: RobotPose,
+        grid: Optional[ObstacleGrid],
+    ) -> bool:
+        """Proactively route around a persistent live obstacle before stalling."""
+        metric_map = self._topo_map.metric_map
+        active_since = self._path_obstacle_active_since
+        if (
+            metric_map is None
+            or goal.goal_type != "semantic"
+            or grid is None
+            or not self._path_obstacle_active
+            or active_since is None
+        ):
+            return False
+        now = time.monotonic()
+        if now - active_since < self.METRIC_BLOCKED_REPLAN_DELAY_S:
+            return False
+        if now - self._last_metric_replan_time < self.METRIC_REPLAN_COOLDOWN_S:
+            return False
+        self._last_metric_replan_time = now
+
+        world_obstacles = metric_map.robot_points_to_world(
+            occupied_xy_points(grid),
+            pose.x,
+            pose.y,
+            pose.yaw,
+        )
+        path = self._global_planner.replan_path_around_obstacles(
+            pose,
+            goal.label or "",
+            world_obstacles,
+        )
+        if path is None:
+            logger.warning(
+                "NavCore: proactive metric replan could not find another route to '%s'",
+                self._goal_display_name(goal),
+            )
+            return False
+
+        goal.x = path[-1].x
+        goal.y = path[-1].y
+        # Keep the transition active so the same physical obstacle does not
+        # generate another agent-facing "encountered" event on the next frame.
+        self._path_obstacle_active = True
+        self._path_obstacle_active_since = now
+        self._path_obstacle_clear_since = None
+        self._local_planner.reset_navigation_state()
+        self._reset_progress_tracker(reset_recovery_attempts=False)
+        logger.info(
+            "NavCore: proactively rerouted around a persistent obstacle toward '%s'",
+            self._goal_display_name(goal),
+        )
+        return True
 
     def _abort_active_navigation(
         self,
@@ -2656,12 +2916,32 @@ class NavCore:
             pose, scan_direction = scanned
 
         if goal.goal_type == "semantic":
-            path = self._global_planner.replan_path_preserving_progress(
-                pose,
-                goal.label or "",
-            )
+            dynamic_obstacles = None
+            metric_map = self._topo_map.metric_map
+            if metric_map is not None and latest_grid is not None:
+                robot_points = occupied_xy_points(latest_grid)
+                dynamic_obstacles = metric_map.robot_points_to_world(
+                    robot_points,
+                    pose.x,
+                    pose.y,
+                    pose.yaw,
+                )
+            if metric_map is None:
+                path = self._global_planner.replan_path_preserving_progress(
+                    pose,
+                    goal.label or "",
+                )
+            else:
+                path = self._global_planner.replan_path_around_obstacles(
+                    pose,
+                    goal.label or "",
+                    dynamic_obstacles,
+                )
             if path is None:
                 return False
+            goal.x = path[-1].x
+            goal.y = path[-1].y
+            self._local_planner.reset_navigation_state()
 
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
@@ -2676,6 +2956,7 @@ class NavCore:
             self._state = NavState.NAVIGATING
             self._last_stop_reason = None
             self._path_obstacle_active = False
+            self._path_obstacle_active_since = None
             self._path_obstacle_clear_since = None
             self._reset_progress_tracker(reset_recovery_attempts=False)
 
@@ -2765,7 +3046,8 @@ class NavCore:
     def navigate_to(self, destination: str) -> bool:
         """Navigate to a named location on the topological map.
 
-        Plans a global path via Dijkstra, then the nav loop handles local avoidance.
+        Plans over the static occupancy map with current obstacles overlaid, then
+        the nav loop handles local avoidance and proactive replanning.
         Returns False if no map loaded or destination unreachable.
         """
         if not self._topo_map.is_loaded:
@@ -2828,18 +3110,6 @@ class NavCore:
             self._stop_depth_when_idle()
             return True
 
-        path = self._global_planner.plan_path(pose, destination)
-        if path is None:
-            with self._state_lock:
-                self._state = NavState.IDLE
-                self._goal = None
-                self._last_stop_reason = f"No route to {goal_label}"
-                self._clear_planner_and_obstacle_state()
-            self._notify_status_change(
-                f"I did not move because I do not have a mapped route to {goal_label}."
-            )
-            return False
-
         if not self._wait_for_depth_grid(self.DEPTH_READY_TIMEOUT_S):
             reason = "E-STOP: obstacle grid unavailable"
             self._ensure_go2()
@@ -2857,6 +3127,35 @@ class NavCore:
             self._stop_depth_when_idle()
             return False
 
+        dynamic_obstacles = None
+        initial_grid = self._fresh_obstacle_grid(
+            self._depth_processor.get_obstacle_grid()
+        )
+        if self._topo_map.metric_map is not None and initial_grid is not None:
+            dynamic_obstacles = self._topo_map.metric_map.robot_points_to_world(
+                occupied_xy_points(initial_grid),
+                pose.x,
+                pose.y,
+                pose.yaw,
+            )
+        path = self._global_planner.plan_path(
+            pose,
+            destination,
+            dynamic_obstacles_xy=dynamic_obstacles,
+        )
+        if path is None:
+            with self._state_lock:
+                self._state = NavState.IDLE
+                self._goal = None
+                self._last_stop_reason = f"No route to {goal_label}"
+                self._clear_planner_and_obstacle_state()
+            self._notify_status_change(
+                f"I did not move because I do not have a collision-free route to "
+                f"{goal_label}."
+            )
+            self._stop_depth_when_idle()
+            return False
+
         with self._state_lock:
             self._goal = NavGoal(
                 goal_type="semantic",
@@ -2868,6 +3167,7 @@ class NavCore:
             self._last_stop_reason = None
             self._current_location_name = None
             self._reset_progress_tracker()
+            self._local_planner.reset_navigation_state()
 
         self._ensure_running()
         logger.info("NavCore: navigating to '%s' via %d waypoints", destination, len(path))
@@ -3316,6 +3616,70 @@ class NavCore:
         self._notify_status_change(status_message)
         return False
 
+    def _maybe_correct_metric_pose(
+        self,
+        grid: Optional[ObstacleGrid],
+        pose: RobotPose,
+    ) -> RobotPose:
+        """Apply a small, high-confidence depth-to-map odometry correction."""
+        metric_map = self._topo_map.metric_map
+        if metric_map is None or grid is None:
+            return pose
+        now = time.monotonic()
+        if (
+            self.METRIC_LOCALIZATION_INTERVAL_S > 0.0
+            and now - self._last_metric_localization_time
+            < self.METRIC_LOCALIZATION_INTERVAL_S
+        ):
+            return pose
+        self._last_metric_localization_time = now
+
+        correction = metric_map.match_pose(
+            occupied_xy_points(grid),
+            pose.x,
+            pose.y,
+            pose.yaw,
+        )
+        if correction is None:
+            return pose
+
+        dx = correction.x - pose.x
+        dy = correction.y - pose.y
+        distance = math.hypot(dx, dy)
+        if distance > self.METRIC_LOCALIZATION_MAX_TRANSLATION_M > 0.0:
+            scale = self.METRIC_LOCALIZATION_MAX_TRANSLATION_M / distance
+            dx *= scale
+            dy *= scale
+        yaw_delta = math.atan2(
+            math.sin(correction.yaw - pose.yaw),
+            math.cos(correction.yaw - pose.yaw),
+        )
+        yaw_delta = float(
+            np.clip(
+                yaw_delta,
+                -self.METRIC_LOCALIZATION_MAX_YAW_RAD,
+                self.METRIC_LOCALIZATION_MAX_YAW_RAD,
+            )
+        )
+        corrected = RobotPose(
+            x=pose.x + dx,
+            y=pose.y + dy,
+            yaw=pose.yaw + yaw_delta,
+            timestamp=time.time(),
+        )
+        self._odometry.set_pose(corrected.x, corrected.y, corrected.yaw)
+        logger.info(
+            "NavCore: metric pose correction dx=%+.2fm dy=%+.2fm yaw=%+.1fdeg "
+            "score=%.2fm improvement=%.2fm matched=%.0f%%",
+            dx,
+            dy,
+            math.degrees(yaw_delta),
+            correction.score_m,
+            correction.improvement_m,
+            100.0 * correction.matched_fraction,
+        )
+        return corrected
+
     def _nav_cycle(self, state: NavState, goal: NavGoal):
         """Execute one navigation cycle: sense -> plan -> safety filter -> actuate."""
         if state in {NavState.IDLE, NavState.STUCK, NavState.E_STOP}:
@@ -3326,6 +3690,7 @@ class NavCore:
             self._depth_processor.get_obstacle_grid()
         )
         pose = self._odometry.get_pose()
+        pose = self._maybe_correct_metric_pose(raw_grid, pose)
         geometry_grid = self._obstacle_memory.update(raw_grid, pose)
         grid = self._filter_transient_path_obstacle(geometry_grid)
         self._log_obstacle_telemetry(raw_grid, geometry_grid, pose)
@@ -3358,6 +3723,13 @@ class NavCore:
         # 3. Compute velocity command
         if state == NavState.NAVIGATING:
             accepted_landmark = False
+            metric_route = (
+                goal.goal_type == "semantic"
+                and self._topo_map.metric_map is not None
+            )
+            if metric_route:
+                self._update_path_obstacle_event(path_dist, goal)
+                self._maybe_replan_blocked_metric_route(goal, pose, grid)
             if goal.goal_type == "semantic":
                 waypoint = self._global_planner.get_next_waypoint(
                     pose,
@@ -3379,7 +3751,7 @@ class NavCore:
             else:
                 target_x, target_y = goal.x, goal.y
 
-            if not accepted_landmark:
+            if not accepted_landmark and not metric_route:
                 self._update_path_obstacle_event(path_dist, goal)
 
             goal_dir = math.atan2(target_y - pose.y, target_x - pose.x) - pose.yaw

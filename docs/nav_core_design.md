@@ -25,7 +25,8 @@ This section evaluates existing navigation approaches for quadruped robots and s
 Lightweight standalone navigation stack inspired by **Nav2's layered architecture** (global planner -> local planner -> controller) combined with **CMU ABS's safety-supervisor pattern**. Key characteristics:
 
 - **No ROS2 dependency**: Fits our existing standalone DDS stack
-- **Topological maps** instead of metric SLAM: avoids heavy compute on Orin Nano
+- **Hybrid semantic + metric map**: named destinations remain simple JSON nodes,
+  while a compact floor-plan occupancy grid prevents routes through walls
 - **VFH+ local planner**: proven, efficient, debuggable
 - **Safety monitor**: every velocity command filtered before reaching the robot
 - **Incremental build**: start with local obstacle avoidance, add global planning later
@@ -154,10 +155,12 @@ def estimate_obstacle_distance_from_bbox(
 ### High-Level (Global) Planning
 
 - **Input**: Semantic goal ("go to the kitchen")
-- **Output**: Waypoint sequence through the environment
-- **Algorithm**: Dijkstra's shortest path on a topological graph map
-- **Frequency**: Once per goal (replan on failure)
-- **Compute**: ~1ms (negligible)
+- **Output**: Collision-free metric targets ending at the semantic destination
+- **Algorithm**: Clearance-aware A* over the static floor plan, with current
+  RealSense obstacles overlaid during initial planning and replanning
+- **Frequency**: Once per goal, proactively after persistent blockage, and after
+  a no-progress recovery
+- **Compute**: Normally under 200ms for the full office map
 
 ### Low-Level (Local) Planning
 
@@ -176,9 +179,9 @@ def estimate_obstacle_distance_from_bbox(
 
 ---
 
-## 5. Global Planning: Topological Maps
+## 5. Global Planning: Hybrid Semantic and Occupancy Maps
 
-### Why topological maps instead of metric SLAM?
+### Why a floor-plan occupancy map instead of waypoint-only routing or metric SLAM?
 
 | Factor | Topological Map | Metric SLAM (e.g., RTABMap) |
 |--------|----------------|---------------------------|
@@ -189,11 +192,18 @@ def estimate_obstacle_distance_from_bbox(
 | Accuracy | Approximate (sufficient for room-level) | Precise (centimeter-level) |
 | Sufficient for "go to room X" | Yes | Overkill |
 
-**Decision**: Topological maps for now. Can upgrade to metric maps in a future phase if centimeter-level precision becomes necessary.
+**Decision**: Use named topological nodes only for destinations and human-readable
+status. Use a 10cm static occupancy grid for actual global routing. This supplies
+wall geometry without the compute and operational complexity of continuous SLAM.
+The local depth grid handles people, chairs, calibration error, and other live
+changes. Scan-to-map matching applies only small, high-confidence odometry
+corrections.
 
 ### Map Structure
 
-Maps are stored as JSON files in a `maps/` directory. Each map is a graph of named locations (nodes) connected by traversable paths (edges).
+Maps are stored as JSON files in a `maps/` directory. Each map contains named
+locations and references a generated NPZ occupancy grid. Edges remain available
+as a fallback for small test/simulation maps that do not declare occupancy.
 
 ```json
 {
@@ -235,7 +245,10 @@ Maps are stored as JSON files in a `maps/` directory. Each map is a graph of nam
 
 ### Path Finding
 
-Dijkstra's algorithm on the graph. Example: "go to kitchen" from charging_station -> `[charging_station, main_desk_area, kitchen]`. Each node has (x, y) coordinates in the odometry frame, so the local planner knows which direction to steer.
+Clearance-aware A* finds a route through free floor-plan cells and penalizes
+cells close to walls, naturally favoring the middle of an opening. Line-of-sight
+smoothing and targets spaced about 0.8m apart keep the robot moving efficiently.
+Dijkstra remains the compatibility fallback for maps without an occupancy grid.
 
 ---
 
@@ -423,7 +436,8 @@ The Go2 EDU has a built-in **Unitree L1 4D LiDAR** that is not yet accessed in t
 | **Depth processing** | **~10ms** | **CPU (numpy)** | Downsample + threshold + project + inflate |
 | **LiDAR processing** | **~5ms** | **CPU** | Point cloud filter + project (Phase 4) |
 | **Local planner (VFH+)** | **~1ms** | **CPU** | Histogram build + sector selection |
-| **Global planner (Dijkstra)** | **~1ms** | **CPU** | Only on new goal or replan |
+| **Global planner (occupancy A*)** | **5-200ms** | **CPU** | Only on new goal or replan; outside the 10Hz hot path |
+| **Depth-to-map correction** | **periodic** | **CPU** | Bounded scan match every 2 seconds |
 | **Odometry subscription** | **~0ms** | **DDS callback** | Async, negligible processing |
 | **Safety monitor** | **~0.1ms** | **CPU** | Simple distance comparisons |
 | **Total nav_core** | **~17ms** | **CPU only** | **Fits comfortably in 10 Hz (100ms) loop** |
@@ -453,10 +467,10 @@ Nav_core is **CPU-only**. It leaves the GPU entirely available for vision_core's
               |         |          |          |           |
               |    LocalPlanner  Global   Safety     Odometry
               |     (VFH+)     Planner   Monitor    Provider
-              |         |       (Dijkstra)    |
+              |         |         (A*)       |
               |         |          |          |
-              |    ObstacleGrid  Topological  |
-              |         |         Map         |
+              |    ObstacleGrid  Occupancy +  |
+              |         |       semantic map  |
               |    +----+----+               |
               |    |         |               |
               | DepthProc  LidarProc         |
@@ -471,7 +485,8 @@ Nav_core is **CPU-only**. It leaves the GPU entirely available for vision_core's
 
 1. **Sensors** (depth camera, LiDAR, odometry) feed raw data into processors
 2. **DepthProcessor** and **LidarProcessor** produce an **ObstacleGrid**
-3. **GlobalPlanner** produces waypoint sequences from the **TopologicalMap**
+3. **GlobalPlanner** produces collision-free metric targets from the static
+   **occupancy map**, overlaying the current ObstacleGrid during replans
 4. **LocalPlanner** (VFH+) combines ObstacleGrid + waypoint direction into velocity commands
 5. **SafetyMonitor** filters every velocity command before it reaches the robot
 6. **Go2Macros.move(vx, vy, vyaw)** sends the command to the Unitree SDK
@@ -485,7 +500,9 @@ Nav_core is **CPU-only**. It leaves the GPU entirely available for vision_core's
 
 | File | Purpose | Est. Lines |
 |------|---------|-----------|
-| `coded_tools/unigo2/nav_core.py` | Main navigation engine: state machine, nav loop, LocalPlanner (VFH+), GlobalPlanner (Dijkstra), SafetyMonitor, OdometryProvider | ~1500-2000 |
+| `coded_tools/unigo2/nav_core.py` | Main navigation engine: state machine, local planner, global-planner integration, safety, recovery, and odometry | ~1500-2000 |
+| `coded_tools/unigo2/metric_navigation.py` | Occupancy A*, route smoothing, dynamic overlays, and conservative scan-to-map matching | ~500 |
+| `maps/build_occupancy_map.py` | Offline floor-plan-to-occupancy generator; runtime does not require Pillow | ~200 |
 | `coded_tools/unigo2/depth_processor.py` | Depth camera access (pyrealsense2), obstacle grid generation, LiDAR processing, ground plane detection | ~600-800 |
 | `coded_tools/unigo2/nav_planner.py` | Neuro SAN CodedTool wrapper for navigation commands and queries | ~150-200 |
 | `maps/cail_lab.json` | Initial topological map for the CAIL lab | ~50 |
@@ -775,7 +792,10 @@ Following existing patterns from `vision_core.py` (`_env_flag()`, `_env_float()`
 | `NAV_MAP_FILE` | str | repo `maps/cail_lab.json` on robot, `""` in simulation | Path to topological map JSON file |
 | `NAV_SIMULATION_MODE` | bool | `False` | Desktop testing with synthetic obstacles |
 | `NAV_GOAL_TOLERANCE` | float | `0.15` | Distance to consider goal reached (meters) |
-| `NAV_STUCK_TIMEOUT` | float | `10.0` | Seconds without progress before STUCK state |
+| `NAV_STUCK_TIMEOUT` | float | `6.0` | Seconds without progress before guarded physical recovery |
+| `NAV_METRIC_BLOCKED_REPLAN_DELAY` | float | `1.0` | Persistent-obstacle delay before proactive metric replan |
+| `NAV_METRIC_REPLAN_COOLDOWN` | float | `3.0` | Minimum time between proactive metric replans |
+| `NAV_METRIC_LOCALIZATION_INTERVAL` | float | `2.0` | Depth-to-map correction interval |
 | `NAV_PATH_CORRIDOR_HALF_WIDTH` | float | `0.27` | Robot half-width plus swept-path clearance (meters) |
 | `NAV_WALL_CLEARANCE` | float | `0.55` | Target clearance from a reliable one-sided wall (meters) |
 | `NAV_OBSTACLE_MEMORY_SECONDS` | float | `0.8` | Lifetime of odometry-aligned steering geometry |
@@ -792,7 +812,7 @@ Add to `requirements.txt`:
 ```
 # Navigation dependencies (nav_core)
 pyrealsense2>=2.50; sys_platform == "linux"   # Intel RealSense depth camera (Jetson only)
-scipy>=1.10                                    # Spatial algorithms (Dijkstra, KDTree)
+# Metric planning uses NumPy only; Pillow is needed only to regenerate the map.
 ```
 
 ### Notes

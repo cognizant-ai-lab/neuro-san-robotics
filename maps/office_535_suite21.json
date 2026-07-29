@@ -41,6 +41,23 @@
       43.76
     ]
   ],
+  "navigable_boundary": [
+    [4.5, 0.0],
+    [22.3, 0.0],
+    [26.58, 7.7],
+    [26.58, 36.3],
+    [22.3, 43.76],
+    [4.5, 43.76],
+    [0.0, 36.3],
+    [0.0, 7.7]
+  ],
+  "occupancy_map": {
+    "file": "cail_lab_occupancy.npz",
+    "required": true,
+    "robot_clearance_m": 0.34,
+    "preferred_clearance_m": 0.75,
+    "description": "Static walls, large fixtures, exterior boundary, and no-bot zones extracted from 535-mission-map.png"
+  },
   "nodes": [
     {
       "name": "kitchen_entrance",

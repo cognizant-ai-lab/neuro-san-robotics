@@ -151,14 +151,21 @@ specific robot really needs a temporary override.
 | `NAV_WALL_CLEARANCE` | `0.55` | Target lateral clearance from a reliably fitted one-sided wall. |
 | `NAV_OBSTACLE_MEMORY_SECONDS` | `0.8` | Retains recent wall geometry and aligns it using odometry; current depth remains authoritative for safety. |
 | `NAV_OBSTACLE_TELEMETRY_SECONDS` | `1.0` | Interval for directional-clearance and wall-fit log messages; set to `0` to disable. |
+| `NAV_STUCK_TIMEOUT` | `6.0` | No-progress interval before guarded physical recovery. |
+| `NAV_METRIC_BLOCKED_REPLAN_DELAY` | `1.0` | Persistent-obstacle delay before a live-obstacle route is calculated. |
+| `NAV_METRIC_REPLAN_COOLDOWN` | `3.0` | Minimum interval between proactive route replacements. |
+| `NAV_METRIC_LOCALIZATION_INTERVAL` | `2.0` | Interval for conservative RealSense-to-floor-plan pose correction. |
 
-Map nodes may declare `arrival_tolerance_m` and `pass_through_tolerance_m` so an
-entrance or turn can be accepted despite modest odometry drift. Pass-through acceptance
-requires crossing the waypoint plane while remaining inside its route corridor. Nodes
-may also declare directional `arrival_landmarks`. A confirmed transverse wall can
-correct the robot's along-track pose and advance its route only within that landmark's
-configured longitudinal, lateral, and sensor-distance bounds. Otherwise it remains an
-ordinary obstacle for the local planner to circumnavigate.
+The production map references a 10cm occupancy grid generated from the office floor
+plan. Named map nodes remain the destination interface, while clearance-aware A*
+routes around static walls and fixtures. RealSense obstacles are overlaid for initial
+planning and replanning; small, high-confidence scan-to-map corrections limit odometry
+drift. Intermediate metric targets are internal and do not generate agent-network
+events. Maps without an occupancy grid retain the topological-edge fallback.
+
+Map nodes may still declare `arrival_tolerance_m`, `pass_through_tolerance_m`, and
+directional `arrival_landmarks` for compatibility and destination-specific arrival
+behavior.
 
 ## Setup
 
