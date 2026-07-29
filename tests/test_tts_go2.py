@@ -1,5 +1,7 @@
 import asyncio
+import io
 import unittest
+import wave
 from unittest.mock import patch
 
 from coded_tools.unigo2 import tts_go2
@@ -44,6 +46,15 @@ class Go2TtsFallbackTests(unittest.TestCase):
             device="plughw:4,0",
         )
         self.assertEqual(prepared, source)
+
+    def test_pcm_is_wrapped_as_48khz_mono_wav(self):
+        source = b"\x01\x00\x02\x00"
+        wav_data = tts_go2._pcm_to_wav_bytes(source, 48_000)
+        with wave.open(io.BytesIO(wav_data), "rb") as wav_file:
+            self.assertEqual(wav_file.getnchannels(), 1)
+            self.assertEqual(wav_file.getsampwidth(), 2)
+            self.assertEqual(wav_file.getframerate(), 48_000)
+            self.assertEqual(wav_file.readframes(2), source)
 
     def test_say_non_chunked_falls_back_to_offline_tts_in_auto_mode(self):
         with (

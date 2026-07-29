@@ -35,6 +35,7 @@ Environment Variables:
 import argparse
 import asyncio
 import fcntl
+import io
 import logging
 import os
 import platform
@@ -42,7 +43,9 @@ import queue
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
+import wave
 from typing import Any, Callable, Dict, List, Optional
 
 from neuro_san.interfaces.coded_tool import CodedTool
@@ -169,6 +172,54 @@ def _prepare_openai_pcm_chunk(chunk: bytes, gain: float, device: str) -> bytes:
     # 24-kHz PCM, so duplicate each 16-bit sample for a streaming-safe 2x
     # upsample without adding an ffmpeg/sox runtime dependency.
     return b"".join(amplified[index:index + 2] * 2 for index in range(0, len(amplified), 2))
+
+
+def _pcm_to_wav_bytes(pcm_data: bytes, sample_rate: int) -> bytes:
+    """Wrap mono 16-bit PCM in a WAV container for reliable APE playback."""
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
+    return output.getvalue()
+
+
+def _play_onboard_wav(pcm_data: bytes, device: str) -> None:
+    """Play buffered PCM through the same WAV-file path as the hardware probe."""
+    wav_data = _pcm_to_wav_bytes(pcm_data, ONBOARD_PCM_RATE)
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="go2-tts-",
+            suffix=".wav",
+            delete=False,
+        ) as temp_file:
+            temp_file.write(wav_data)
+            temp_path = temp_file.name
+
+        logging.info(
+            "GO2_TTS: playing onboard WAV (%d PCM bytes, %d WAV bytes)",
+            len(pcm_data),
+            len(wav_data),
+        )
+        result = subprocess.run(
+            ["aplay", "-D", device, temp_path],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"aplay returned {result.returncode}: "
+                f"{result.stderr.decode(errors='ignore')}"
+            )
+        logging.info("GO2_TTS: onboard WAV playback completed")
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
 
 
 def _ensure_onboard_speaker_enabled(device: str) -> None:
@@ -302,6 +353,17 @@ def _openai_say_streaming(
                 device,
                 output_rate,
             )
+            if _is_onboard_audio_device(device):
+                pcm_data = b"".join(
+                    _prepare_openai_pcm_chunk(chunk, gain, device)
+                    for chunk in response.iter_bytes(chunk_size=4096)
+                )
+                if not pcm_data:
+                    raise RuntimeError("OpenAI TTS returned no PCM audio")
+                _play_onboard_wav(pcm_data, device)
+                logging.info("GO2_TTS: OpenAI streaming complete")
+                return
+
             # Stream directly to aplay
             aplay_cmd = [
                 "aplay",
@@ -445,6 +507,18 @@ async def _openai_say_streaming_async(
                 device,
                 output_rate,
             )
+            if _is_onboard_audio_device(device):
+                chunks = []
+                async for chunk in response.iter_bytes(chunk_size=4096):
+                    chunks.append(_prepare_openai_pcm_chunk(chunk, gain, device))
+                pcm_data = b"".join(chunks)
+                if not pcm_data:
+                    raise RuntimeError("OpenAI TTS returned no PCM audio")
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _play_onboard_wav, pcm_data, device)
+                logging.info("GO2_TTS: OpenAI async streaming complete")
+                return
+
             aplay_cmd = [
                 "aplay",
                 "-D", device,
