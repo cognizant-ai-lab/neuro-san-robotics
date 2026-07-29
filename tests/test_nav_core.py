@@ -1000,6 +1000,30 @@ class TestTopologicalMap(unittest.TestCase):
             math.radians(45.0),
         )
 
+    def test_default_map_blocks_false_marker_4_to_f_core_shortcut(self):
+        topo = TopologicalMap()
+        self.assertTrue(topo.load_from_file(str(DEFAULT_MAP_FILE)))
+        marker_4 = topo.get_node("entrance")
+        immersive = topo.get_node("immersive_room")
+
+        path = topo.metric_map.plan_path(
+            (marker_4.x, marker_4.y),
+            (immersive.x, immersive.y),
+        )
+
+        self.assertIsNotNone(path)
+        self.assertFalse(
+            any(
+                9.9 <= x <= 16.9 and 10.0 <= y <= 30.2
+                for x, y in path
+            )
+        )
+        self.assertLess(
+            min(y for _x, y in path),
+            9.5,
+            "The shortest valid route from marker 4 should go around the kitchen side",
+        )
+
     def test_loads_map_declared_arrival_landmark(self):
         topo = TopologicalMap()
         topo.load_from_dict({

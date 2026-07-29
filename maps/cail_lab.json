@@ -476,6 +476,25 @@
   ],
   "exclusion_zones": [
     {
+      "name": "central_elevator_glass_core",
+      "type": "polygon",
+      "reason": "Elevator bank, service rooms, and glass doors separate the lower corridor near marker 4 from the upper corridor near marker F; there is no through walkway",
+      "tags": ["transparent_wall", "building_core", "no_bot_zone"],
+      "points": [
+        [9.9, 10.0],
+        [16.9, 10.0],
+        [16.9, 30.2],
+        [9.9, 30.2]
+      ],
+      "source_pixels": [
+        {"x": 2892, "y": 1470},
+        {"x": 2892, "y": 895},
+        {"x": 1233, "y": 895},
+        {"x": 1233, "y": 1470}
+      ],
+      "buffer_m": 0.0
+    },
+    {
       "name": "glass_enclosure_21_002_21_018",
       "type": "polygon",
       "reason": "Glass enclosure around 21-002 and 21-018 - robot cannot detect transparent barriers",
