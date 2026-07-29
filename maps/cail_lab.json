@@ -495,6 +495,63 @@
       "buffer_m": 0.0
     },
     {
+      "name": "conference_table_21_028",
+      "type": "polygon",
+      "reason": "Fixed conference table and surrounding chairs beyond marker B",
+      "tags": ["static_furniture", "table", "chairs", "no_bot_zone"],
+      "points": [
+        [15.5, 1.3],
+        [17.9, 1.3],
+        [17.9, 5.5],
+        [15.5, 5.5]
+      ],
+      "source_pixels": [
+        {"x": 3606, "y": 1010},
+        {"x": 3606, "y": 813},
+        {"x": 3261, "y": 813},
+        {"x": 3261, "y": 1010}
+      ],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "ping_pong_table_21_009",
+      "type": "polygon",
+      "reason": "Fixed ping-pong table near marker C",
+      "tags": ["static_furniture", "table", "no_bot_zone"],
+      "points": [
+        [17.7, 6.8],
+        [20.6, 6.8],
+        [20.6, 8.7],
+        [17.7, 8.7]
+      ],
+      "source_pixels": [
+        {"x": 3154, "y": 829},
+        {"x": 3154, "y": 591},
+        {"x": 2998, "y": 591},
+        {"x": 2998, "y": 829}
+      ],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "immersive_half_circle_desk",
+      "type": "polygon",
+      "reason": "Fixed half-circle desk and chairs facing the immersive room",
+      "tags": ["static_furniture", "desk", "chairs", "no_bot_zone"],
+      "points": [
+        [18.8, 13.2],
+        [25.5, 13.2],
+        [25.5, 17.5],
+        [18.8, 17.5]
+      ],
+      "source_pixels": [
+        {"x": 2629, "y": 739},
+        {"x": 2629, "y": 189},
+        {"x": 2276, "y": 189},
+        {"x": 2276, "y": 739}
+      ],
+      "buffer_m": 0.0
+    },
+    {
       "name": "glass_enclosure_21_002_21_018",
       "type": "polygon",
       "reason": "Glass enclosure around 21-002 and 21-018 - robot cannot detect transparent barriers",

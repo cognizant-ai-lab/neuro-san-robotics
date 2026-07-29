@@ -1018,11 +1018,37 @@ class TestTopologicalMap(unittest.TestCase):
                 for x, y in path
             )
         )
-        self.assertLess(
-            min(y for _x, y in path),
-            9.5,
-            "The shortest valid route from marker 4 should go around the kitchen side",
+
+    def test_default_map_routes_clear_of_fixed_furniture(self):
+        topo = TopologicalMap()
+        self.assertTrue(topo.load_from_file(str(DEFAULT_MAP_FILE)))
+        charging = topo.get_node("charging_station")
+        immersive = topo.get_node("immersive_room")
+        furniture = {
+            "conference table beyond B": (15.5, 17.9, 1.3, 5.5),
+            "ping-pong table": (17.7, 20.6, 6.8, 8.7),
+            "immersive-room half-circle desk": (18.8, 25.5, 13.2, 17.5),
+        }
+
+        path = topo.metric_map.plan_path(
+            (charging.x, charging.y),
+            (immersive.x, immersive.y),
         )
+
+        self.assertIsNotNone(path)
+        for name, (x0, x1, y0, y1) in furniture.items():
+            center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+            row, col = topo.metric_map.world_to_cell(*center)
+            self.assertTrue(topo.metric_map.occupied[row, col], name)
+            margin = 0.25
+            self.assertFalse(
+                any(
+                    x0 - margin <= x <= x1 + margin
+                    and y0 - margin <= y <= y1 + margin
+                    for x, y in path
+                ),
+                name,
+            )
 
     def test_loads_map_declared_arrival_landmark(self):
         topo = TopologicalMap()

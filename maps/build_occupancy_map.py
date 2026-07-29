@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Sequence, Tuple
 
 import numpy as np
-from PIL import Image
 
 
 def _long_runs(mask: np.ndarray, dr: int, dc: int, minimum: int) -> np.ndarray:
@@ -45,6 +44,64 @@ def _long_runs(mask: np.ndarray, dr: int, dc: int, minimum: int) -> np.ndarray:
         if len(run) >= minimum:
             rr, cc = zip(*run)
             kept[rr, cc] = True
+    return kept
+
+
+def _compact_structures(
+    mask: np.ndarray,
+    *,
+    minimum_area_cells: int,
+    minimum_span_cells: int,
+) -> np.ndarray:
+    """Keep connected compact shapes while rejecting isolated plan text strokes.
+
+    Walls and long furniture edges are retained by :func:`_long_runs`. Chairs,
+    small tables, cabinets, and desk-pod outlines can be shorter in every
+    direction, so retain 8-connected components only when they have meaningful
+    area and span in both axes. Individual characters and dimension ticks are
+    normally too narrow or too small to pass both gates.
+    """
+    rows, cols = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    kept = np.zeros_like(mask, dtype=bool)
+    neighbors = (
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1), (0, 1),
+        (1, -1), (1, 0), (1, 1),
+    )
+
+    for start_row, start_col in zip(*np.nonzero(mask & ~visited)):
+        if visited[start_row, start_col]:
+            continue
+        stack = [(int(start_row), int(start_col))]
+        visited[start_row, start_col] = True
+        component = []
+        min_row = max_row = int(start_row)
+        min_col = max_col = int(start_col)
+        while stack:
+            row, col = stack.pop()
+            component.append((row, col))
+            min_row, max_row = min(min_row, row), max(max_row, row)
+            min_col, max_col = min(min_col, col), max(max_col, col)
+            for dr, dc in neighbors:
+                next_row, next_col = row + dr, col + dc
+                if (
+                    0 <= next_row < rows
+                    and 0 <= next_col < cols
+                    and mask[next_row, next_col]
+                    and not visited[next_row, next_col]
+                ):
+                    visited[next_row, next_col] = True
+                    stack.append((next_row, next_col))
+
+        if (
+            len(component) >= minimum_area_cells
+            and max_row - min_row + 1 >= minimum_span_cells
+            and max_col - min_col + 1 >= minimum_span_cells
+        ):
+            rr, cc = zip(*component)
+            kept[rr, cc] = True
+
     return kept
 
 
@@ -94,6 +151,8 @@ def build_occupancy(
     gray_threshold: int,
     minimum_structure_length_m: float,
 ) -> Tuple[np.ndarray, dict]:
+    from PIL import Image
+
     data = json.loads(map_json.read_text(encoding="utf-8"))
     coordinates = data["coordinate_system"]
     bbox = coordinates["source_floor_bbox_px"]
@@ -134,6 +193,11 @@ def build_occupancy(
     occupied = np.zeros_like(dark)
     for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
         occupied |= _long_runs(dark, dr, dc, minimum_cells)
+    occupied |= _compact_structures(
+        dark,
+        minimum_area_cells=6,
+        minimum_span_cells=3,
+    )
 
     yy, xx = np.indices(occupied.shape, dtype=np.float32)
     world_x = (xx + 0.5) * resolution_m
