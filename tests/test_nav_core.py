@@ -3073,6 +3073,55 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_navigate_to_keeps_initial_global_route_independent_of_live_scan(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            nav._topo_map.load_from_dict({
+                "name": "suite21",
+                "nodes": [
+                    {"name": "charging_station", "x": 0.0, "y": 0.0},
+                    {"name": "immersive_room", "x": 4.0, "y": 0.0},
+                ],
+                "edges": [
+                    {"from": "charging_station", "to": "immersive_room", "distance": 4.0},
+                ],
+            })
+            metric_map = MagicMock()
+            nav._topo_map.metric_map = metric_map
+            nav._odometry.set_pose(0.0, 0.0, 0.0)
+
+            fake_depth = MagicMock()
+            fake_depth.is_available = True
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(0.6)
+            nav._depth_processor = fake_depth
+            planned_path = [
+                MapNode(name="__metric_start__", x=0.0, y=0.0, tags=["metric_transit"]),
+                MapNode(name="immersive_room", x=4.0, y=0.0),
+            ]
+            nav._global_planner = MagicMock()
+            nav._global_planner.plan_path.return_value = planned_path
+            nav._ensure_running = MagicMock()
+
+            self.assertTrue(nav.navigate_to("immersive room"))
+
+            nav._global_planner.plan_path.assert_called_once()
+            plan_call = nav._global_planner.plan_path.call_args
+            self.assertEqual(plan_call.args[1], "immersive room")
+            self.assertIsNone(plan_call.kwargs["dynamic_obstacles_xy"])
+            metric_map.robot_points_to_world.assert_not_called()
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_navigate_to_reports_depth_grid_unavailable_before_moving(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True

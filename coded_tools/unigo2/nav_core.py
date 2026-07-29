@@ -3198,8 +3198,8 @@ class NavCore:
     def navigate_to(self, destination: str) -> bool:
         """Navigate to a named location on the topological map.
 
-        Plans over the static occupancy map with current obstacles overlaid, then
-        the nav loop handles local avoidance and proactive replanning.
+        Plans over the static occupancy map, then the nav loop handles live
+        obstacle avoidance and confirmed blocked-route replanning.
         Returns False if no map loaded or destination unreachable.
         """
         if not self._topo_map.is_loaded:
@@ -3279,21 +3279,15 @@ class NavCore:
             self._stop_depth_when_idle()
             return False
 
-        dynamic_obstacles = None
-        initial_grid = self._fresh_obstacle_grid(
-            self._depth_processor.get_obstacle_grid()
-        )
-        if self._topo_map.metric_map is not None and initial_grid is not None:
-            dynamic_obstacles = self._topo_map.metric_map.robot_points_to_world(
-                occupied_xy_points(initial_grid),
-                pose.x,
-                pose.y,
-                pose.yaw,
-            )
+        # Do not let a single robot-frame scan redefine the global route at
+        # startup. Nearby mapped walls and furniture are already represented in
+        # the occupancy map, while pose/heading error can project them across the
+        # correct exit corridor. Live depth still gates every motion cycle and is
+        # included by the confirmed blocked-route replanner.
         path = self._global_planner.plan_path(
             pose,
             destination,
-            dynamic_obstacles_xy=dynamic_obstacles,
+            dynamic_obstacles_xy=None,
         )
         if path is None:
             with self._state_lock:
