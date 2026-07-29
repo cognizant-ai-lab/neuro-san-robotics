@@ -25,6 +25,7 @@ Environment Variables:
 - GO2_TTS_ENGINE: "openai", "piper", "espeak", or "auto" (default: "auto")
 - GO2_TTS_DEVICE: "onboard" (default), "usb", "auto", or an ALSA device name
 - GO2_ONBOARD_TTS_DEVICE: Onboard ALSA device (default: "plughw:CARD=APE,DEV=0")
+- GO2_TTS_WAV_PATH: Retained onboard TTS WAV (default: "/tmp/go2_tts_last.wav")
 - OPENAI_API_KEY: Required for OpenAI TTS
 - GO2_OPENAI_VOICE: OpenAI voice (default: "coral")
 - GO2_OPENAI_MODEL: OpenAI model (default: "gpt-4o-mini-tts")
@@ -87,6 +88,7 @@ ONBOARD_ALSA_DEVICE = os.environ.get(
     "plughw:CARD=APE,DEV=0",
 )
 DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "onboard")
+ONBOARD_WAV_PATH = os.environ.get("GO2_TTS_WAV_PATH", "/tmp/go2_tts_last.wav").strip()
 
 # ALSA mixer control name for volume (common names: "Master", "PCM", "Speaker")
 # Set via env var if the default doesn't work on your hardware
@@ -189,14 +191,24 @@ def _play_onboard_wav(pcm_data: bytes, device: str) -> None:
     """Play buffered PCM through the same WAV-file path as the hardware probe."""
     wav_data = _pcm_to_wav_bytes(pcm_data, ONBOARD_PCM_RATE)
     temp_path = ""
+    retain_wav = bool(ONBOARD_WAV_PATH)
     try:
-        with tempfile.NamedTemporaryFile(
-            prefix="go2-tts-",
-            suffix=".wav",
-            delete=False,
-        ) as temp_file:
-            temp_file.write(wav_data)
-            temp_path = temp_file.name
+        if retain_wav:
+            temp_path = os.path.abspath(os.path.expanduser(ONBOARD_WAV_PATH))
+            parent_dir = os.path.dirname(temp_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            with open(temp_path, "wb") as output_file:
+                output_file.write(wav_data)
+            logging.info("GO2_TTS: retained onboard WAV at %s", temp_path)
+        else:
+            with tempfile.NamedTemporaryFile(
+                prefix="go2-tts-",
+                suffix=".wav",
+                delete=False,
+            ) as temp_file:
+                temp_file.write(wav_data)
+                temp_path = temp_file.name
 
         logging.info(
             "GO2_TTS: playing onboard WAV (%d PCM bytes, %d WAV bytes)",
@@ -215,7 +227,7 @@ def _play_onboard_wav(pcm_data: bytes, device: str) -> None:
             )
         logging.info("GO2_TTS: onboard WAV playback completed")
     finally:
-        if temp_path:
+        if temp_path and not retain_wav:
             try:
                 os.unlink(temp_path)
             except FileNotFoundError:
