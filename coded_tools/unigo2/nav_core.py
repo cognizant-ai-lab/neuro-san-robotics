@@ -630,7 +630,7 @@ class GlobalPlanner:
                 y=points[0][1],
                 description="Current position",
                 tags=["metric_transit"],
-                arrival_tolerance_m=0.30,
+                arrival_tolerance_m=0.45,
                 pass_through_tolerance_m=0.45,
             )
         ]
@@ -642,7 +642,7 @@ class GlobalPlanner:
                     y=y_m,
                     description="Collision-free route point",
                     tags=["metric_transit"],
-                    arrival_tolerance_m=0.30,
+                    arrival_tolerance_m=0.45,
                     pass_through_tolerance_m=0.45,
                 )
             )
@@ -919,6 +919,14 @@ class LocalPlanner:
     WIDE_VALLEY_MIN_SECTORS = 6    # minimum sectors for a "wide" valley
     SMOOTHING_WEIGHT = 0.3         # heading change smoothing
     PIVOT_HEADING_ERROR_RAD = _env_float("NAV_PIVOT_HEADING_ERROR_RAD", math.radians(20.0))
+    PIVOT_ENTER_HEADING_ERROR_RAD = _env_float(
+        "NAV_PIVOT_ENTER_HEADING_ERROR_RAD",
+        math.radians(35.0),
+    )
+    PIVOT_EXIT_HEADING_ERROR_RAD = _env_float(
+        "NAV_PIVOT_EXIT_HEADING_ERROR_RAD",
+        math.radians(12.0),
+    )
     FORWARD_HAZARD_CONE_RAD = _env_float("NAV_FORWARD_HAZARD_CONE_RAD", math.radians(20.0))
     DEFAULT_PIVOT_YAW_RATE = _env_float(
         "NAV_PIVOT_YAW_RATE",
@@ -976,11 +984,26 @@ class LocalPlanner:
         self.avoidance_distance = avoidance_distance
         self._prev_heading = 0.0
         self._route_center_heading: Optional[float] = None
+        self._pivoting = False
 
     def reset_navigation_state(self) -> None:
         """Forget steering history after a new route or waypoint transition."""
         self._prev_heading = 0.0
         self._route_center_heading = None
+        self._pivoting = False
+
+    def _should_pivot(self, heading_error: float, goal_distance: float) -> bool:
+        """Use hysteresis so ordinary route corrections cannot oscillate in place."""
+        if goal_distance <= 0.5:
+            self._pivoting = False
+            return False
+        error = abs(heading_error)
+        if self._pivoting:
+            if error <= self.PIVOT_EXIT_HEADING_ERROR_RAD:
+                self._pivoting = False
+        elif error >= self.PIVOT_ENTER_HEADING_ERROR_RAD:
+            self._pivoting = True
+        return self._pivoting
 
     def compute_velocity(
         self,
@@ -1038,10 +1061,7 @@ class LocalPlanner:
                 vyaw=self._pivot_yaw_rate(target_heading),
             )
 
-        if (
-            goal_distance > 0.5
-            and abs(route_direction) >= self.PIVOT_HEADING_ERROR_RAD
-        ):
+        if self._should_pivot(route_direction, goal_distance):
             vyaw = self._pivot_yaw_rate(route_direction)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
@@ -1176,10 +1196,7 @@ class LocalPlanner:
         slow_for_arrival: bool = True,
     ) -> VelocityCommand:
         """Drive the mapped path directly when the path corridor is clear."""
-        if (
-            goal_distance > 0.5
-            and abs(goal_direction) >= self.PIVOT_HEADING_ERROR_RAD
-        ):
+        if self._should_pivot(goal_direction, goal_distance):
             vyaw = self._pivot_yaw_rate(goal_direction)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
@@ -2040,6 +2057,10 @@ class NavCore:
     )
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 6.0)
     MAX_STUCK_RECOVERY_ATTEMPTS: int = 2
+    CLEAR_STALL_TRANSIT_SKIP_M: float = _env_float(
+        "NAV_CLEAR_STALL_TRANSIT_SKIP",
+        0.65,
+    )
     PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.0)
     FORWARD_HAZARD_CONE_RAD: float = _env_float(
         "NAV_FORWARD_HAZARD_CONE_RAD",
@@ -3033,6 +3054,48 @@ class NavCore:
         grid: Optional[ObstacleGrid],
     ) -> bool:
         """Change position safely, then replan while preserving the destination."""
+        planner = getattr(self, "_global_planner", None)
+        waypoint = planner.get_current_waypoint() if planner is not None else None
+        waypoint_distance = (
+            math.hypot(waypoint.x - pose.x, waypoint.y - pose.y)
+            if isinstance(waypoint, MapNode)
+            else float("inf")
+        )
+        if (
+            self._stuck_recovery_attempts == 0
+            and grid is not None
+            and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+            and isinstance(waypoint, MapNode)
+            and "metric_transit" in waypoint.tags
+            and waypoint_distance <= self.CLEAR_STALL_TRANSIT_SKIP_M
+        ):
+            advanced = planner.advance_current_waypoint(
+                on_advance=self._notify_waypoint_advance,
+            )
+            if advanced is not None and advanced[1] is not None:
+                self._ensure_go2()
+                if self._go2 and getattr(self._go2, "available", False):
+                    try:
+                        self._go2.stop_move()
+                    except Exception:
+                        logger.debug(
+                            "NavCore: stop_move failed while advancing clear route",
+                            exc_info=True,
+                        )
+                with self._state_lock:
+                    self._stuck_recovery_attempts = 1
+                    self._state = NavState.NAVIGATING
+                    self._last_stop_reason = None
+                    self._local_planner.reset_navigation_state()
+                    self._reset_progress_tracker(reset_recovery_attempts=False)
+                logger.warning(
+                    "NavCore: clear-path stall %.2fm from transit point '%s'; "
+                    "advancing along the existing route without obstacle rerouting",
+                    waypoint_distance,
+                    waypoint.name,
+                )
+                return True
+
         if self._stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
             return False
 
@@ -3985,13 +4048,18 @@ class NavCore:
             safety_bearing,
         )
         now = time.monotonic()
-        # Heading changes let a normal planned pivot finish, but they must not
-        # postpone stall detection forever when the robot only oscillates or
-        # turns beside an obstacle. Ten seconds is longer than a 180-degree
-        # pivot at the configured pivot rate.
-        seconds_since_progress = max(
-            now - self._last_progress_time,
-            now - self._last_translation_progress_time,
+        # A commanded pivot is making useful progress when measured yaw changes;
+        # a translating command must produce measured position change. Mixing the
+        # two clocks made valid turns expire on the translation-only timeout.
+        pivot_only = (
+            abs(cmd.vx) < 1e-3
+            and abs(cmd.vy) < 1e-3
+            and abs(cmd.vyaw) > 1e-3
+        )
+        seconds_since_progress = (
+            now - self._last_progress_time
+            if pivot_only
+            else now - self._last_translation_progress_time
         )
         cmd, event = self._safety.filter_command(
             cmd,

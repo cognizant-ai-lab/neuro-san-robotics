@@ -387,6 +387,43 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertAlmostEqual(cmd.vx, 0.0)
         self.assertGreater(cmd.vyaw, 0.0)
 
+    def test_moderate_transit_correction_keeps_moving(self):
+        planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
+
+        cmd = planner.compute_velocity(
+            _empty_grid(),
+            goal_direction=math.radians(24.0),
+            goal_distance=0.65,
+            slow_for_arrival=False,
+        )
+
+        self.assertGreater(cmd.vx, 0.0)
+        self.assertGreater(cmd.vyaw, 0.0)
+
+    def test_pivot_hysteresis_finishes_turn_without_threshold_oscillation(self):
+        planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
+        grid = _empty_grid()
+
+        entering = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(40.0),
+            goal_distance=1.0,
+        )
+        continuing = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(18.0),
+            goal_distance=1.0,
+        )
+        finished = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(10.0),
+            goal_distance=1.0,
+        )
+
+        self.assertAlmostEqual(entering.vx, 0.0)
+        self.assertAlmostEqual(continuing.vx, 0.0)
+        self.assertGreater(finished.vx, 0.0)
+
     def test_pivot_uses_configured_pivot_rate_independent_of_steering_limit(self):
         planner = LocalPlanner(
             max_linear_speed=0.3,
@@ -689,6 +726,20 @@ class TestSafetyMonitor(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestGlobalPlanner(unittest.TestCase):
+
+    def test_metric_transit_point_advances_within_route_following_tolerance(self):
+        topo = _create_test_map()
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (0.8, 0.0), (3.0, 0.0)],
+        )
+
+        waypoint = planner.get_next_waypoint(RobotPose(0.40, 0.0, 0.0))
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "C")
 
     def test_metric_map_routes_around_static_wall(self):
         topo = _create_test_map()
@@ -2316,7 +2367,7 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
-    def test_nav_cycle_pivot_only_cannot_mask_translation_stall(self, mock_go2):
+    def test_nav_cycle_measured_pivot_progress_does_not_trigger_translation_stall(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
         mock_go2.return_value = fake_go2
@@ -2354,15 +2405,10 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.NAVIGATING)
-            self.assertEqual(
-                events,
-                [
-                    "I stalled while heading to Kitchen. I stepped left, turned "
-                    "right, rerouted, and am continuing."
-                ],
-            )
-            fake_go2.stop_move.assert_called()
-            fake_go2.move.assert_not_called()
+            self.assertEqual(events, [])
+            fake_go2.move.assert_called()
+            self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
+            self.assertGreater(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
@@ -2576,6 +2622,51 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._notify_status_change.call_args.args[0],
         )
 
+    def test_clear_stall_near_transit_point_advances_without_escape_or_replan(self):
+        nav = NavCore.__new__(NavCore)
+        nav.MAX_STUCK_RECOVERY_ATTEMPTS = 2
+        nav.CLEAR_STALL_TRANSIT_SKIP_M = 0.65
+        nav.AVOIDANCE_DISTANCE_M = 0.75
+        nav._stuck_recovery_attempts = 0
+        nav._state = NavState.NAVIGATING
+        nav._state_lock = threading.Lock()
+        nav._go2 = MagicMock(available=True)
+        nav._ensure_go2 = MagicMock()
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        nav._notify_waypoint_advance = MagicMock()
+        nav._execute_stall_escape = MagicMock()
+        transit = MapNode(
+            name="__metric_003__",
+            x=0.55,
+            y=0.0,
+            tags=["metric_transit"],
+        )
+        upcoming = MapNode(
+            name="__metric_004__",
+            x=1.35,
+            y=0.0,
+            tags=["metric_transit"],
+        )
+        nav._global_planner = MagicMock()
+        nav._global_planner.get_current_waypoint.return_value = transit
+        nav._global_planner.advance_current_waypoint.return_value = (
+            transit,
+            upcoming,
+        )
+
+        recovered = nav._recover_from_stall(
+            NavGoal(goal_type="semantic", label="immersive_room"),
+            RobotPose(),
+            _empty_grid(),
+        )
+
+        self.assertTrue(recovered)
+        nav._execute_stall_escape.assert_not_called()
+        nav._global_planner.advance_current_waypoint.assert_called_once()
+        nav._local_planner.reset_navigation_state.assert_called_once()
+        self.assertEqual(nav._stuck_recovery_attempts, 1)
+
     def test_rotation_does_not_reset_stall_recovery_attempts(self):
         nav = NavCore.__new__(NavCore)
         nav._last_progress_pose = RobotPose(0.0, 0.0, 0.0)
@@ -2634,6 +2725,10 @@ class TestNavCoreStatus(unittest.TestCase):
                 nav._goal = goal
                 nav._last_progress_pose = nav._odometry.get_pose()
                 nav._last_progress_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+                nav._last_translation_progress_pose = nav._odometry.get_pose()
+                nav._last_translation_progress_time = (
+                    time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+                )
 
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
@@ -2686,6 +2781,10 @@ class TestNavCoreStatus(unittest.TestCase):
                 nav._stuck_recovery_attempts = nav.MAX_STUCK_RECOVERY_ATTEMPTS
                 nav._last_progress_pose = nav._odometry.get_pose()
                 nav._last_progress_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+                nav._last_translation_progress_pose = nav._odometry.get_pose()
+                nav._last_translation_progress_time = (
+                    time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+                )
 
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
