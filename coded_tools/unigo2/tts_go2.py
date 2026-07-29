@@ -65,6 +65,8 @@ OPENAI_INSTRUCTIONS = os.environ.get(
 # Volume gain for OpenAI TTS (1.0 = normal, 2.0 = 2x louder, etc.)
 # This applies software amplification to the PCM audio data
 OPENAI_VOLUME_GAIN = float(os.environ.get("GO2_OPENAI_VOLUME_GAIN", "3.0"))
+OPENAI_PCM_RATE = 24_000
+ONBOARD_PCM_RATE = 48_000
 
 # Piper TTS configuration
 PIPER_MODEL = os.environ.get(
@@ -92,6 +94,8 @@ DEFAULT_VOLUME_PERCENT = int(os.environ.get("GO2_TTS_VOLUME", "100"))
 
 # Lock file for TTS to prevent audio overlap
 TTS_LOCK_FILE = "/tmp/go2_tts.lock"
+_ONBOARD_SPEAKER_LOCK = threading.Lock()
+_ONBOARD_SPEAKER_ENABLED = False
 
 
 def _env_float(name: str, default: float) -> float:
@@ -148,6 +152,65 @@ def _amplify_pcm_chunk(chunk: bytes, gain: float) -> bytes:
     return struct.pack(f"<{num_samples}h", *amplified)
 
 
+def _is_onboard_audio_device(device: str) -> bool:
+    """Return whether an ALSA device targets the Jetson APE speaker route."""
+    normalized = device.replace(" ", "").lower()
+    onboard = ONBOARD_ALSA_DEVICE.replace(" ", "").lower()
+    return normalized == onboard or "card=ape" in normalized
+
+
+def _prepare_openai_pcm_chunk(chunk: bytes, gain: float, device: str) -> bytes:
+    """Amplify OpenAI PCM and upsample it for the fixed-rate APE route."""
+    amplified = _amplify_pcm_chunk(chunk, gain)
+    if not _is_onboard_audio_device(device):
+        return amplified
+
+    # The internal speaker route was verified at 48 kHz. OpenAI supplies
+    # 24-kHz PCM, so duplicate each 16-bit sample for a streaming-safe 2x
+    # upsample without adding an ffmpeg/sox runtime dependency.
+    return b"".join(amplified[index:index + 2] * 2 for index in range(0, len(amplified), 2))
+
+
+def _ensure_onboard_speaker_enabled(device: str) -> None:
+    """Enable the Go2 internal speaker through VUI before APE playback."""
+    global _ONBOARD_SPEAKER_ENABLED
+
+    if not _is_onboard_audio_device(device) or _ONBOARD_SPEAKER_ENABLED:
+        return
+
+    with _ONBOARD_SPEAKER_LOCK:
+        if _ONBOARD_SPEAKER_ENABLED:
+            return
+
+        errors: list[Exception] = []
+        for root in ("unitree_sdk2_python.unitree_sdk2py", "unitree_sdk2py"):
+            try:
+                vui_module = __import__(
+                    f"{root}.go2.vui.vui_client",
+                    fromlist=["VuiClient"],
+                )
+                client = vui_module.VuiClient()
+                client.SetTimeout(3.0)
+                client.Init()
+                code = client.SetSwitch(1)
+                if code != 0:
+                    raise RuntimeError(f"VUI SetSwitch failed with code {code}")
+                volume_code, volume = client.GetVolume()
+                if volume_code == 0:
+                    logging.info("GO2_TTS: onboard speaker enabled; VUI volume=%s", volume)
+                else:
+                    logging.info("GO2_TTS: onboard speaker enabled")
+                _ONBOARD_SPEAKER_ENABLED = True
+                return
+            except Exception as exc:
+                errors.append(exc)
+
+        logging.warning(
+            "GO2_TTS: could not enable onboard speaker through VUI: %s",
+            "; ".join(str(error) for error in errors),
+        )
+
+
 def _openai_say_streaming(
     text: str,
     voice: str = OPENAI_VOICE,
@@ -189,6 +252,7 @@ def _openai_say_streaming(
 
     # Set ALSA volume before playback
     if system == "Linux":
+        _ensure_onboard_speaker_enabled(device)
         volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
         _set_alsa_volume(volume_percent)
 
@@ -202,11 +266,12 @@ def _openai_say_streaming(
         response_format="pcm",
     ) as response:
         if system == "Linux":
+            output_rate = ONBOARD_PCM_RATE if _is_onboard_audio_device(device) else OPENAI_PCM_RATE
             # Stream directly to aplay
             aplay_cmd = [
                 "aplay",
                 "-D", device,
-                "-r", "24000",  # OpenAI PCM is 24kHz
+                "-r", str(output_rate),
                 "-f", "S16_LE",
                 "-c", "1",
                 "-t", "raw",
@@ -222,7 +287,7 @@ def _openai_say_streaming(
                 for chunk in response.iter_bytes(chunk_size=4096):
                     if aplay_proc.stdin:
                         # Apply volume gain to PCM audio
-                        amplified_chunk = _amplify_pcm_chunk(chunk, gain)
+                        amplified_chunk = _prepare_openai_pcm_chunk(chunk, gain, device)
                         aplay_proc.stdin.write(amplified_chunk)
             finally:
                 try:
@@ -327,6 +392,7 @@ async def _openai_say_streaming_async(
 
     # Set ALSA volume before playback
     if system == "Linux":
+        _ensure_onboard_speaker_enabled(device)
         volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
         _set_alsa_volume(volume_percent)
 
@@ -338,10 +404,11 @@ async def _openai_say_streaming_async(
         response_format="pcm",
     ) as response:
         if system == "Linux":
+            output_rate = ONBOARD_PCM_RATE if _is_onboard_audio_device(device) else OPENAI_PCM_RATE
             aplay_cmd = [
                 "aplay",
                 "-D", device,
-                "-r", "24000",
+                "-r", str(output_rate),
                 "-f", "S16_LE",
                 "-c", "1",
                 "-t", "raw",
@@ -357,7 +424,7 @@ async def _openai_say_streaming_async(
                 async for chunk in response.iter_bytes(chunk_size=4096):
                     if aplay_proc.stdin:
                         # Apply volume gain to PCM audio
-                        amplified_chunk = _amplify_pcm_chunk(chunk, gain)
+                        amplified_chunk = _prepare_openai_pcm_chunk(chunk, gain, device)
                         aplay_proc.stdin.write(amplified_chunk)
                         await aplay_proc.stdin.drain()
             finally:

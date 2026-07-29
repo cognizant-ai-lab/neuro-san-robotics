@@ -27,6 +27,24 @@ class Go2TtsFallbackTests(unittest.TestCase):
     def test_explicit_alsa_device_is_unchanged(self):
         self.assertEqual(tts_go2._resolve_alsa_device("plughw:7,1"), "plughw:7,1")
 
+    def test_onboard_pcm_is_upsampled_to_48khz(self):
+        source = b"\x01\x00\x02\x00"
+        prepared = tts_go2._prepare_openai_pcm_chunk(
+            source,
+            gain=1.0,
+            device="plughw:CARD=APE,DEV=0",
+        )
+        self.assertEqual(prepared, b"\x01\x00\x01\x00\x02\x00\x02\x00")
+
+    def test_usb_pcm_keeps_openai_sample_rate(self):
+        source = b"\x01\x00\x02\x00"
+        prepared = tts_go2._prepare_openai_pcm_chunk(
+            source,
+            gain=1.0,
+            device="plughw:4,0",
+        )
+        self.assertEqual(prepared, source)
+
     def test_say_non_chunked_falls_back_to_offline_tts_in_auto_mode(self):
         with (
             patch.object(tts_go2, "_should_use_openai", return_value=True),
