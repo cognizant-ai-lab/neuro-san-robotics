@@ -531,7 +531,7 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertAlmostEqual(cmd.vx, 0.3)
 
-    def test_close_intermediate_route_point_still_pivots_for_real_corner(self):
+    def test_close_intermediate_route_point_steers_through_without_pivoting(self):
         planner = LocalPlanner(
             max_linear_speed=0.3,
             max_yaw_rate=0.08,
@@ -546,8 +546,8 @@ class TestLocalPlanner(unittest.TestCase):
             slow_for_arrival=False,
         )
 
-        self.assertAlmostEqual(cmd.vx, 0.0)
-        self.assertAlmostEqual(cmd.vyaw, 0.5)
+        self.assertGreater(cmd.vx, 0.1)
+        self.assertAlmostEqual(cmd.vyaw, 0.08)
 
     def test_avoidance_turns_away_from_obstacle(self):
         planner = LocalPlanner()

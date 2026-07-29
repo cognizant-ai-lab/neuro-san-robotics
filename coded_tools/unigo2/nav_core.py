@@ -1039,7 +1039,7 @@ class LocalPlanner:
             )
 
         if (
-            (not slow_for_arrival or goal_distance > 0.5)
+            goal_distance > 0.5
             and abs(route_direction) >= self.PIVOT_HEADING_ERROR_RAD
         ):
             vyaw = self._pivot_yaw_rate(route_direction)
@@ -1177,7 +1177,7 @@ class LocalPlanner:
     ) -> VelocityCommand:
         """Drive the mapped path directly when the path corridor is clear."""
         if (
-            (not slow_for_arrival or goal_distance > 0.5)
+            goal_distance > 0.5
             and abs(goal_direction) >= self.PIVOT_HEADING_ERROR_RAD
         ):
             vyaw = self._pivot_yaw_rate(goal_direction)
