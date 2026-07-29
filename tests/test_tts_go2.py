@@ -6,6 +6,27 @@ from coded_tools.unigo2 import tts_go2
 
 
 class Go2TtsFallbackTests(unittest.TestCase):
+    def test_onboard_device_resolves_to_ape_output(self):
+        with patch.object(tts_go2, "ONBOARD_ALSA_DEVICE", "plughw:CARD=APE,DEV=0"):
+            self.assertEqual(
+                tts_go2._resolve_alsa_device("onboard"),
+                "plughw:CARD=APE,DEV=0",
+            )
+
+    def test_auto_prefers_onboard_device(self):
+        with patch.object(tts_go2, "ONBOARD_ALSA_DEVICE", "plughw:CARD=APE,DEV=0"):
+            self.assertEqual(
+                tts_go2._resolve_alsa_device("auto"),
+                "plughw:CARD=APE,DEV=0",
+            )
+
+    def test_usb_device_still_supports_auto_detection(self):
+        with patch.object(tts_go2, "_detect_usb_audio_device", return_value="plughw:4,0"):
+            self.assertEqual(tts_go2._resolve_alsa_device("usb"), "plughw:4,0")
+
+    def test_explicit_alsa_device_is_unchanged(self):
+        self.assertEqual(tts_go2._resolve_alsa_device("plughw:7,1"), "plughw:7,1")
+
     def test_say_non_chunked_falls_back_to_offline_tts_in_auto_mode(self):
         with (
             patch.object(tts_go2, "_should_use_openai", return_value=True),

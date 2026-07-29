@@ -23,6 +23,8 @@ Features:
 
 Environment Variables:
 - GO2_TTS_ENGINE: "openai", "piper", "espeak", or "auto" (default: "auto")
+- GO2_TTS_DEVICE: "onboard" (default), "usb", "auto", or an ALSA device name
+- GO2_ONBOARD_TTS_DEVICE: Onboard ALSA device (default: "plughw:CARD=APE,DEV=0")
 - OPENAI_API_KEY: Required for OpenAI TTS
 - GO2_OPENAI_VOICE: OpenAI voice (default: "coral")
 - GO2_OPENAI_MODEL: OpenAI model (default: "gpt-4o-mini-tts")
@@ -75,7 +77,11 @@ PIPER_CONFIG = os.environ.get(
     "/home/unitree/piper_models/en_GB-cori-high.onnx.json",
 )
 
-DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "auto")
+ONBOARD_ALSA_DEVICE = os.environ.get(
+    "GO2_ONBOARD_TTS_DEVICE",
+    "plughw:CARD=APE,DEV=0",
+)
+DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "onboard")
 
 # ALSA mixer control name for volume (common names: "Master", "PCM", "Speaker")
 # Set via env var if the default doesn't work on your hardware
@@ -697,8 +703,12 @@ def _detect_usb_audio_device() -> str:
 
 
 def _resolve_alsa_device(device: str) -> str:
-    """Resolve an ALSA device string, auto-detecting if set to 'auto'."""
-    if device == "auto":
+    """Resolve friendly output names to ALSA device strings."""
+    normalized = device.strip().lower()
+    if normalized in {"onboard", "internal", "auto"}:
+        logging.info("Using onboard audio device: %s", ONBOARD_ALSA_DEVICE)
+        return ONBOARD_ALSA_DEVICE
+    if normalized == "usb":
         return _detect_usb_audio_device()
     return device
 
