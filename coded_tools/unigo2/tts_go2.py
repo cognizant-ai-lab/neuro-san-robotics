@@ -23,7 +23,7 @@ Features:
 
 Environment Variables:
 - GO2_TTS_ENGINE: "openai", "piper", "espeak", or "auto" (default: "auto")
-- GO2_TTS_DEVICE: "onboard" (default), "usb", "auto", or an ALSA device name
+- GO2_TTS_DEVICE: "auto" (default), "usb", "onboard", or an ALSA device name
 - GO2_ONBOARD_TTS_DEVICE: Onboard ALSA device (default: "plughw:CARD=APE,DEV=0")
 - GO2_TTS_WAV_PATH: Retained onboard TTS WAV (default: "/tmp/go2_tts_last.wav")
 - OPENAI_API_KEY: Required for OpenAI TTS
@@ -87,7 +87,7 @@ ONBOARD_ALSA_DEVICE = os.environ.get(
     "GO2_ONBOARD_TTS_DEVICE",
     "plughw:CARD=APE,DEV=0",
 )
-DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "onboard")
+DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "auto")
 ONBOARD_WAV_PATH = os.environ.get("GO2_TTS_WAV_PATH", "/tmp/go2_tts_last.wav").strip()
 
 # ALSA mixer control name for volume (common names: "Master", "PCM", "Speaker")
@@ -904,10 +904,10 @@ def _detect_usb_audio_device() -> str:
 def _resolve_alsa_device(device: str) -> str:
     """Resolve friendly output names to ALSA device strings."""
     normalized = device.strip().lower()
-    if normalized in {"onboard", "internal", "auto"}:
+    if normalized in {"onboard", "internal"}:
         logging.info("Using onboard audio device: %s", ONBOARD_ALSA_DEVICE)
         return ONBOARD_ALSA_DEVICE
-    if normalized == "usb":
+    if normalized in {"usb", "auto"}:
         return _detect_usb_audio_device()
     return device
 

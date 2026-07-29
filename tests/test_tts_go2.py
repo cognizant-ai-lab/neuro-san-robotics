@@ -15,12 +15,9 @@ class Go2TtsFallbackTests(unittest.TestCase):
                 "plughw:CARD=APE,DEV=0",
             )
 
-    def test_auto_prefers_onboard_device(self):
-        with patch.object(tts_go2, "ONBOARD_ALSA_DEVICE", "plughw:CARD=APE,DEV=0"):
-            self.assertEqual(
-                tts_go2._resolve_alsa_device("auto"),
-                "plughw:CARD=APE,DEV=0",
-            )
+    def test_auto_uses_usb_detection(self):
+        with patch.object(tts_go2, "_detect_usb_audio_device", return_value="plughw:4,0"):
+            self.assertEqual(tts_go2._resolve_alsa_device("auto"), "plughw:4,0")
 
     def test_usb_device_still_supports_auto_detection(self):
         with patch.object(tts_go2, "_detect_usb_audio_device", return_value="plughw:4,0"):
