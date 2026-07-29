@@ -315,6 +315,54 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertLess(corrected.vyaw, 0.0)
 
+    def test_route_heading_centers_before_reaching_close_right_wall(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = self._corridor_grid(slope=0.0, center_offset=0.18)
+
+        heading = planner._centered_route_heading(grid, goal_direction=0.0)
+
+        self.assertGreater(heading, 0.0)
+
+    def test_route_heading_keeps_direct_goal_when_robot_width_lane_is_open(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.30, 1.80, 31):
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col + round(0.70 / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        goal_heading = math.radians(8.0)
+        heading = planner._centered_route_heading(grid, goal_heading)
+
+        self.assertAlmostEqual(heading, goal_heading)
+
+    def test_velocity_steers_toward_widest_open_route_before_avoidance_band(self):
+        planner = LocalPlanner(
+            max_linear_speed=0.30,
+            max_yaw_rate=0.08,
+            avoidance_distance=0.75,
+        )
+        grid = self._corridor_grid(slope=0.0, center_offset=0.18)
+        grid.path_obstacle_m = float("inf")
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=0.0,
+            goal_distance=3.0,
+        )
+
+        self.assertGreater(cmd.vx, 0.0)
+        self.assertGreater(cmd.vyaw, 0.0)
+
+    def test_metric_turn_is_not_overridden_by_open_space_centering(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = self._corridor_grid(slope=0.0, center_offset=0.18)
+        goal_heading = math.radians(30.0)
+
+        heading = planner._centered_route_heading(grid, goal_heading)
+
+        self.assertAlmostEqual(heading, goal_heading)
+
 
     def test_drives_toward_goal_in_clear_space(self):
         planner = LocalPlanner(max_linear_speed=0.3, safety_distance=0.4, avoidance_distance=0.8)
@@ -610,6 +658,27 @@ class TestSafetyMonitor(unittest.TestCase):
 
 class TestGlobalPlanner(unittest.TestCase):
 
+    def test_metric_map_routes_around_static_wall(self):
+        topo = _create_test_map()
+        occupied = np.zeros((30, 50), dtype=bool)
+        occupied[:22, 20] = True
+        from coded_tools.unigo2.metric_navigation import MetricOccupancyMap
+        topo.metric_map = MetricOccupancyMap(
+            occupied,
+            resolution_m=0.10,
+            robot_clearance_m=0.10,
+        )
+        topo.nodes["B"].x = 4.0
+        topo.nodes["B"].y = 0.5
+        planner = GlobalPlanner(topo)
+
+        path = planner.plan_path(RobotPose(0.5, 0.5, 0.0), "B")
+
+        self.assertIsNotNone(path)
+        self.assertTrue(all("metric_transit" in node.tags for node in path[:-1]))
+        self.assertEqual(path[-1].name, "B")
+        self.assertTrue(any(node.y > 2.2 for node in path))
+
     def test_projects_remote_correction_onto_active_segment(self):
         planner = GlobalPlanner(_create_test_map())
         planner.plan_path(RobotPose(0.0, 0.0, 0.0), "C")
@@ -763,6 +832,15 @@ class TestTopologicalMap(unittest.TestCase):
         self.assertTrue(topo.is_loaded)
         self.assertEqual(len(topo.nodes), 3)
         self.assertEqual(len(topo.edges), 2)
+
+    def test_default_map_loads_required_metric_occupancy(self):
+        topo = TopologicalMap()
+
+        loaded = topo.load_from_file(str(DEFAULT_MAP_FILE))
+
+        self.assertTrue(loaded)
+        self.assertIsNotNone(topo.metric_map)
+        self.assertGreater(topo.metric_map.occupied.size, 100_000)
 
     def test_loads_map_declared_arrival_landmark(self):
         topo = TopologicalMap()
@@ -1064,6 +1142,54 @@ class TestOdometryProvider(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestNavCoreStatus(unittest.TestCase):
+
+    def test_metric_transit_does_not_emit_agent_status_events(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._local_planner = MagicMock()
+        core._notify_status_change = MagicMock()
+        transit = MapNode(
+            name="__metric_001__",
+            x=1.0,
+            y=1.0,
+            tags=["metric_transit"],
+        )
+
+        core._notify_waypoint_advance(transit, core._topo_map.nodes["B"])
+
+        core._local_planner.reset_navigation_state.assert_called_once_with()
+        core._notify_status_change.assert_not_called()
+
+    def test_persistent_obstacle_proactively_replaces_metric_route(self):
+        core = NavCore.__new__(NavCore)
+        metric_map = MagicMock()
+        metric_map.robot_points_to_world.return_value = np.asarray([[1.0, 0.0]])
+        core._topo_map = SimpleNamespace(metric_map=metric_map)
+        core._global_planner = MagicMock()
+        safe_goal = MapNode(name="kitchen", x=3.8, y=1.2)
+        core._global_planner.replan_path_around_obstacles.return_value = [safe_goal]
+        core._local_planner = MagicMock()
+        core._reset_progress_tracker = MagicMock()
+        core._path_obstacle_active = True
+        core._path_obstacle_active_since = time.monotonic() - 2.0
+        core._path_obstacle_clear_since = None
+        core._last_metric_replan_time = 0.0
+        goal = NavGoal(goal_type="semantic", x=4.0, y=1.0, label="Kitchen")
+        pose = RobotPose(0.0, 0.0, 0.0)
+
+        replanned = core._maybe_replan_blocked_metric_route(
+            goal,
+            pose,
+            _grid_with_wall_ahead(0.6),
+        )
+
+        self.assertTrue(replanned)
+        self.assertEqual((goal.x, goal.y), (3.8, 1.2))
+        core._global_planner.replan_path_around_obstacles.assert_called_once()
+        core._local_planner.reset_navigation_state.assert_called_once_with()
+        core._reset_progress_tracker.assert_called_once_with(
+            reset_recovery_attempts=False
+        )
 
     def test_remote_control_release_accepts_current_route_segment(self):
         core = NavCore.__new__(NavCore)
