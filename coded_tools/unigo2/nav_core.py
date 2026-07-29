@@ -957,6 +957,7 @@ class LocalPlanner:
     ROUTE_CENTER_STEP_RAD = math.radians(5.0)
     ROUTE_CENTER_CLEARANCE_MARGIN_M = 0.12
     ROUTE_CENTER_MIN_BLOCKING_POINTS = 3
+    MIN_TRANSIT_SPEED_MPS = _env_float("NAV_MIN_TRANSIT_SPEED", 0.28)
 
     def __init__(
         self,
@@ -1208,6 +1209,8 @@ class LocalPlanner:
         vyaw = float(np.clip(goal_direction, -self.max_yaw_rate, self.max_yaw_rate))
         turn_factor = 1.0 - min(abs(vyaw) / max(self.max_yaw_rate, 1e-6), 1.0) * 0.5
         vx = base_speed * turn_factor
+        if not slow_for_arrival and goal_distance > 0.5:
+            vx = max(vx, min(self.max_linear_speed, self.MIN_TRANSIT_SPEED_MPS))
         self._prev_heading = vyaw
         return VelocityCommand(vx=vx, vy=0.0, vyaw=vyaw)
 
@@ -2056,7 +2059,15 @@ class NavCore:
         0.65,
     )
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 6.0)
+    CLEAR_MOTION_ACK_TIMEOUT_S: float = _env_float(
+        "NAV_CLEAR_MOTION_ACK_TIMEOUT",
+        3.0,
+    )
     MAX_STUCK_RECOVERY_ATTEMPTS: int = 2
+    MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS: int = _env_int(
+        "NAV_MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS",
+        2,
+    )
     CLEAR_STALL_TRANSIT_SKIP_M: float = _env_float(
         "NAV_CLEAR_STALL_TRANSIT_SKIP",
         0.65,
@@ -2236,6 +2247,7 @@ class NavCore:
         self._last_translation_progress_pose = RobotPose()
         self._last_translation_progress_time = time.monotonic()
         self._stuck_recovery_attempts = 0
+        self._clear_motion_recovery_attempts = 0
         self._last_stall_scan_direction: Optional[float] = None
         self._close_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
@@ -3061,40 +3073,59 @@ class NavCore:
             if isinstance(waypoint, MapNode)
             else float("inf")
         )
-        if (
-            self._stuck_recovery_attempts == 0
-            and grid is not None
-            and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
-            and isinstance(waypoint, MapNode)
-            and "metric_transit" in waypoint.tags
-            and waypoint_distance <= self.CLEAR_STALL_TRANSIT_SKIP_M
-        ):
-            advanced = planner.advance_current_waypoint(
-                on_advance=self._notify_waypoint_advance,
-            )
-            if advanced is not None and advanced[1] is not None:
-                self._ensure_go2()
-                if self._go2 and getattr(self._go2, "available", False):
-                    try:
-                        self._go2.stop_move()
-                    except Exception:
-                        logger.debug(
-                            "NavCore: stop_move failed while advancing clear route",
-                            exc_info=True,
-                        )
-                with self._state_lock:
-                    self._stuck_recovery_attempts = 1
-                    self._state = NavState.NAVIGATING
-                    self._last_stop_reason = None
-                    self._local_planner.reset_navigation_state()
-                    self._reset_progress_tracker(reset_recovery_attempts=False)
-                logger.warning(
-                    "NavCore: clear-path stall %.2fm from transit point '%s'; "
-                    "advancing along the existing route without obstacle rerouting",
-                    waypoint_distance,
-                    waypoint.name,
+        if grid is not None and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M:
+            clear_attempts = getattr(self, "_clear_motion_recovery_attempts", 0)
+            if (
+                clear_attempts
+                >= self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS
+            ):
+                return False
+
+            advanced_name = None
+            if (
+                isinstance(waypoint, MapNode)
+                and "metric_transit" in waypoint.tags
+                and waypoint_distance <= self.CLEAR_STALL_TRANSIT_SKIP_M
+            ):
+                advanced = planner.advance_current_waypoint(
+                    on_advance=self._notify_waypoint_advance,
                 )
-                return True
+                if advanced is not None and advanced[1] is not None:
+                    advanced_name = waypoint.name
+
+            self._ensure_go2()
+            recovered = False
+            if self._go2 and getattr(self._go2, "available", False):
+                recover = getattr(self._go2, "recover_locomotion", None)
+                try:
+                    if callable(recover):
+                        recovered = bool(recover())
+                    else:
+                        self._go2.stop_move()
+                except Exception:
+                    logger.exception("NavCore: locomotion-mode recovery failed")
+
+            with self._state_lock:
+                self._clear_motion_recovery_attempts = clear_attempts + 1
+                attempt = self._clear_motion_recovery_attempts
+                self._state = NavState.NAVIGATING
+                self._last_stop_reason = None
+                self._last_motion_command = VelocityCommand()
+                self._local_planner.reset_navigation_state()
+                self._reset_progress_tracker(reset_recovery_attempts=False)
+            logger.warning(
+                "NavCore: clear path but commanded translation was not measured; "
+                "locomotion recovery %d/%d %s%s",
+                attempt,
+                self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS,
+                "succeeded" if recovered else "was requested",
+                (
+                    f"; advanced past nearby transit point '{advanced_name}'"
+                    if advanced_name
+                    else ""
+                ),
+            )
+            return True
 
         if self._stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
             return False
@@ -4061,6 +4092,22 @@ class NavCore:
             if pivot_only
             else now - self._last_translation_progress_time
         )
+        translation_requested = abs(cmd.vx) >= 0.03 or abs(cmd.vy) >= 0.03
+        measured_translation = self._odometry.has_confirmed_translation()
+        if (
+            translation_requested
+            and measured_translation
+            and grid is not None
+            and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+            and seconds_since_progress >= self.CLEAR_MOTION_ACK_TIMEOUT_S
+        ):
+            # The SDK accepted the command, but measured odometry did not follow
+            # it. Trigger the clear-path locomotion recovery promptly rather than
+            # waiting for the longer spatial-obstruction timeout.
+            seconds_since_progress = max(
+                seconds_since_progress,
+                self.STUCK_TIMEOUT_S,
+            )
         cmd, event = self._safety.filter_command(
             cmd,
             nearest_obstacle_m=safety_dist,
@@ -4100,12 +4147,29 @@ class NavCore:
             elif event.startswith("stuck"):
                 if self._recover_from_stall(goal, pose, grid):
                     return
-                reason = "Stuck: no progress toward the goal"
+                clear_motion_failure = (
+                    grid is not None
+                    and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                    and self._clear_motion_recovery_attempts
+                    >= self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS
+                )
+                reason = (
+                    "Locomotion failure: accepted commands produced no measured motion"
+                    if clear_motion_failure
+                    else "Stuck: no progress toward the goal"
+                )
+                message = (
+                    f"I stopped before reaching {self._goal_display_name(goal)} "
+                    "because the path was clear but my motion commands did not "
+                    "move the robot after retrying locomotion."
+                    if clear_motion_failure
+                    else f"I stopped before reaching {self._goal_display_name(goal)} "
+                    "because I was not making progress."
+                )
                 self._abort_active_navigation(
                     goal,
                     reason,
-                    f"I stopped before reaching {self._goal_display_name(goal)} "
-                    "because I was not making progress.",
+                    message,
                 )
                 return
 
@@ -4461,6 +4525,7 @@ class NavCore:
         self._last_translation_progress_time = now
         if reset_recovery_attempts:
             self._stuck_recovery_attempts = 0
+            self._clear_motion_recovery_attempts = 0
             self._last_stall_scan_direction = None
         self._reset_close_obstacle_confirmation()
         self._reset_center_only_close_confirmation()
@@ -4490,6 +4555,7 @@ class NavCore:
             self._last_translation_progress_pose = current_pose
             self._last_translation_progress_time = time.monotonic()
             self._stuck_recovery_attempts = 0
+            self._clear_motion_recovery_attempts = 0
             self._last_stall_scan_direction = None
 
     # ------------------------------------------------------------------

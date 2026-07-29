@@ -398,6 +398,7 @@ class TestLocalPlanner(unittest.TestCase):
         )
 
         self.assertGreater(cmd.vx, 0.0)
+        self.assertGreaterEqual(cmd.vx, planner.MIN_TRANSIT_SPEED_MPS)
         self.assertGreater(cmd.vyaw, 0.0)
 
     def test_pivot_hysteresis_finishes_turn_without_threshold_oscillation(self):
@@ -2610,7 +2611,9 @@ class TestNavCoreStatus(unittest.TestCase):
         nav._notify_status_change = MagicMock()
         goal = NavGoal(goal_type="semantic", label="Kitchen")
 
-        recovered = nav._recover_from_stall(goal, RobotPose(), _empty_grid())
+        blocked_grid = _empty_grid()
+        blocked_grid.path_obstacle_m = 0.50
+        recovered = nav._recover_from_stall(goal, RobotPose(), blocked_grid)
 
         self.assertTrue(recovered)
         self.assertEqual(nav._stuck_recovery_attempts, 1)
@@ -2628,9 +2631,11 @@ class TestNavCoreStatus(unittest.TestCase):
         nav.CLEAR_STALL_TRANSIT_SKIP_M = 0.65
         nav.AVOIDANCE_DISTANCE_M = 0.75
         nav._stuck_recovery_attempts = 0
+        nav._clear_motion_recovery_attempts = 0
         nav._state = NavState.NAVIGATING
         nav._state_lock = threading.Lock()
         nav._go2 = MagicMock(available=True)
+        nav._go2.recover_locomotion.return_value = True
         nav._ensure_go2 = MagicMock()
         nav._local_planner = MagicMock()
         nav._reset_progress_tracker = MagicMock()
@@ -2665,7 +2670,9 @@ class TestNavCoreStatus(unittest.TestCase):
         nav._execute_stall_escape.assert_not_called()
         nav._global_planner.advance_current_waypoint.assert_called_once()
         nav._local_planner.reset_navigation_state.assert_called_once()
-        self.assertEqual(nav._stuck_recovery_attempts, 1)
+        self.assertEqual(nav._stuck_recovery_attempts, 0)
+        self.assertEqual(nav._clear_motion_recovery_attempts, 1)
+        nav._go2.recover_locomotion.assert_called_once()
 
     def test_rotation_does_not_reset_stall_recovery_attempts(self):
         nav = NavCore.__new__(NavCore)
@@ -2696,8 +2703,11 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._go2 = fake_go2
 
             fake_depth = MagicMock()
-            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            blocked_grid = _empty_grid()
+            blocked_grid.path_obstacle_m = 0.50
+            fake_depth.get_obstacle_grid.return_value = blocked_grid
             nav._depth_processor = fake_depth
+            nav._filter_transient_path_obstacle = lambda grid: grid
             nav._local_planner = MagicMock()
             nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
             nav._local_planner.apply_corridor_course_correction.side_effect = (
@@ -2737,6 +2747,8 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertEqual(
                 events,
                 [
+                    "I encountered an obstacle in my path at 0.50 meters while "
+                    "heading to Kitchen. My local planner is navigating around it.",
                     "I stalled while heading to Kitchen. I stepped left, turned "
                     "right, rerouted, and am continuing."
                 ],
@@ -2769,8 +2781,11 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._go2 = fake_go2
 
             fake_depth = MagicMock()
-            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            blocked_grid = _empty_grid()
+            blocked_grid.path_obstacle_m = 0.50
+            fake_depth.get_obstacle_grid.return_value = blocked_grid
             nav._depth_processor = fake_depth
+            nav._filter_transient_path_obstacle = lambda grid: grid
             nav._local_planner = MagicMock()
             nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
 
@@ -2792,12 +2807,104 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertIsNone(nav._goal)
             self.assertEqual(
                 events,
-                ["I stopped before reaching Kitchen because I was not making progress."],
+                [
+                    "I encountered an obstacle in my path at 0.50 meters while "
+                    "heading to Kitchen. My local planner is navigating around it.",
+                    "I stopped before reaching Kitchen because I was not making progress.",
+                ],
             )
             fake_depth.stop.assert_called()
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_clear_path_motion_failure_never_uses_obstacle_recovery(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
+            nav._execute_stall_escape = MagicMock()
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            stale_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._clear_motion_recovery_attempts = (
+                    nav.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS
+                )
+                nav._last_progress_time = stale_time
+                nav._last_translation_progress_time = stale_time
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.STUCK)
+            nav._execute_stall_escape.assert_not_called()
+            self.assertEqual(
+                events,
+                [
+                    "I stopped before reaching Kitchen because the path was clear "
+                    "but my motion commands did not move the robot after retrying "
+                    "locomotion."
+                ],
+            )
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_clear_path_motion_watchdog_recovers_before_general_stall_timeout(
+        self,
+        mock_go2,
+    ):
+        fake_go2 = MagicMock(available=True)
+        fake_go2.recover_locomotion.return_value = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
+            nav._execute_stall_escape = MagicMock()
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._last_translation_progress_time = (
+                    time.monotonic() - nav.CLEAR_MOTION_ACK_TIMEOUT_S - 0.1
+                )
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            fake_go2.recover_locomotion.assert_called_once()
+            nav._execute_stall_escape.assert_not_called()
+            self.assertEqual(nav._clear_motion_recovery_attempts, 1)
+            nav.shutdown()
+        finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 

@@ -151,6 +151,22 @@ class Go2MacrosInitializationTests(unittest.TestCase):
             [("Move", 0.2, 0.0, 0.0), ("Move", 0.3, 0.0, 0.0)],
         )
 
+    def test_recover_locomotion_stops_and_reenters_motion_mode(self):
+        with (
+            patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
+            patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros.time, "sleep"),
+        ):
+            bot = go2_macros.Go2Macros()
+            bot.move(vx=0.2)
+            recovered = bot.recover_locomotion()
+
+        client = FakeSportClient.instances[0]
+        self.assertTrue(recovered)
+        self.assertEqual(client.calls.count(("StopMove",)), 1)
+        self.assertEqual(client.calls.count(("RecoveryStand",)), 2)
+        self.assertEqual(client.calls.count(("BalanceStand",)), 2)
+
     def test_continuous_move_raises_when_sdk_rejects_command(self):
         with (
             patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),

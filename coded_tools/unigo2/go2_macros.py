@@ -250,6 +250,18 @@ class Go2Macros:
             self._log("Preparing locomotion for navigation")
             return self._prepare_locomotion()
 
+    def recover_locomotion(self):
+        """Re-enter a known locomotion mode after accepted commands stop moving."""
+        if not self.cli:
+            return False
+        with _ROBOT_INIT_LOCK:
+            self._log("Recovering locomotion after unacknowledged motion commands")
+            try:
+                self._call("StopMove", self.cli.StopMove)
+            finally:
+                _ROBOT_INIT_STATE["locomotion_ready"] = False
+            return self._prepare_locomotion()
+
     def _timed_move(
         self,
         vx: float,
