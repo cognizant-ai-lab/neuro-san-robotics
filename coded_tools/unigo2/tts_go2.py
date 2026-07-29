@@ -101,6 +101,7 @@ DEFAULT_VOLUME_PERCENT = int(os.environ.get("GO2_TTS_VOLUME", "100"))
 TTS_LOCK_FILE = "/tmp/go2_tts.lock"
 _ONBOARD_SPEAKER_LOCK = threading.Lock()
 _ONBOARD_SPEAKER_ENABLED = False
+_ONBOARD_SPEAKER_CLIENT: Any = None
 
 
 def _env_float(name: str, default: float) -> float:
@@ -236,7 +237,7 @@ def _play_onboard_wav(pcm_data: bytes, device: str) -> None:
 
 def _ensure_onboard_speaker_enabled(device: str) -> None:
     """Enable the Go2 internal speaker through VUI before APE playback."""
-    global _ONBOARD_SPEAKER_ENABLED
+    global _ONBOARD_SPEAKER_CLIENT, _ONBOARD_SPEAKER_ENABLED
 
     if not _is_onboard_audio_device(device) or _ONBOARD_SPEAKER_ENABLED:
         return
@@ -293,6 +294,11 @@ def _ensure_onboard_speaker_enabled(device: str) -> None:
                     logging.info("GO2_TTS: onboard speaker enabled; VUI volume=%s", volume)
                 else:
                     logging.info("GO2_TTS: onboard speaker enabled")
+                # Keep the VUI RPC client alive while ALSA uses the APE route.
+                # The standalone hardware probe retains this reference through
+                # playback; releasing it early leaves the route silent even
+                # though aplay accepts every sample.
+                _ONBOARD_SPEAKER_CLIENT = client
                 _ONBOARD_SPEAKER_ENABLED = True
                 return
             except Exception as exc:

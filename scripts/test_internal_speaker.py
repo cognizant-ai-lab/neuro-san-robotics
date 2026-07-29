@@ -100,6 +100,11 @@ def main() -> int:
         action="store_true",
         help="Play the ALSA tone without contacting the Go2 VUI service",
     )
+    parser.add_argument(
+        "--wav",
+        type=Path,
+        help="Play this WAV file instead of generating a test tone",
+    )
     args = parser.parse_args()
 
     if not shutil.which("aplay"):
@@ -112,9 +117,15 @@ def main() -> int:
             client, old_volume = _configure_robot_speaker(args.interface, args.robot_volume)
 
         with tempfile.TemporaryDirectory(prefix="go2-speaker-test-") as temp_dir:
-            tone_path = Path(temp_dir) / "test-tone.wav"
-            _write_test_tone(tone_path)
-            print(f"Playing a 1.5-second test tone through {args.device} ...")
+            if args.wav:
+                tone_path = args.wav.expanduser().resolve()
+                if not tone_path.is_file():
+                    parser.error(f"WAV file does not exist: {tone_path}")
+                print(f"Playing {tone_path} through {args.device} ...")
+            else:
+                tone_path = Path(temp_dir) / "test-tone.wav"
+                _write_test_tone(tone_path)
+                print(f"Playing a 1.5-second test tone through {args.device} ...")
             result = subprocess.run(
                 ["aplay", "-D", args.device, str(tone_path)],
                 check=False,
