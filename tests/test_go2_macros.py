@@ -85,6 +85,7 @@ def reset_robot_init_state():
             "avoidance_client": None,
             "channel_initialized": False,
             "last_failure_at": 0.0,
+            "locomotion_ready": False,
         }
     )
     FakeSportClient.instances.clear()
@@ -125,7 +126,55 @@ class Go2MacrosInitializationTests(unittest.TestCase):
         self.assertIn(("SwitchSet", False), first.avoidance_cli.calls)
         self.assertIn(("SwitchGet",), first.avoidance_cli.calls)
         self.assertIs(first.avoidance_cli, second.avoidance_cli)
-        self.assertEqual(first._move_log_interval_s, -1.0)
+        self.assertEqual(first._move_log_interval_s, 1.0)
+
+    def test_continuous_move_prepares_locomotion_once(self):
+        with (
+            patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
+            patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros.time, "sleep"),
+        ):
+            bot = go2_macros.Go2Macros()
+            bot.move(vx=0.2)
+            bot.move(vx=0.3)
+
+        client = FakeSportClient.instances[0]
+        self.assertEqual(client.calls.count(("RecoveryStand",)), 1)
+        self.assertEqual(client.calls.count(("BalanceStand",)), 1)
+        first_move_index = next(
+            index for index, call in enumerate(client.calls) if call[0] == "Move"
+        )
+        self.assertLess(client.calls.index(("RecoveryStand",)), first_move_index)
+        self.assertLess(client.calls.index(("BalanceStand",)), first_move_index)
+        self.assertEqual(
+            [call for call in client.calls if call[0] == "Move"],
+            [("Move", 0.2, 0.0, 0.0), ("Move", 0.3, 0.0, 0.0)],
+        )
+
+    def test_continuous_move_raises_when_sdk_rejects_command(self):
+        with (
+            patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
+            patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros.time, "sleep"),
+        ):
+            bot = go2_macros.Go2Macros()
+            bot.cli.Move = MagicMock(return_value=401001)
+            with self.assertRaisesRegex(RuntimeError, "Move command failed"):
+                bot.move(vx=0.2)
+
+    def test_continuous_move_does_not_run_when_locomotion_preparation_fails(self):
+        with (
+            patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
+            patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros.time, "sleep"),
+        ):
+            bot = go2_macros.Go2Macros()
+            bot.cli.RecoveryStand = MagicMock(return_value=401001)
+            bot.cli.Move = MagicMock(return_value=0)
+            with self.assertRaisesRegex(RuntimeError, "could not be prepared"):
+                bot.move(vx=0.2)
+
+        bot.cli.Move.assert_not_called()
 
     def test_missing_avoidance_service_does_not_disable_robot_control(self):
         with (

@@ -47,6 +47,7 @@ _ROBOT_INIT_STATE = {
     "avoidance_client": None,
     "channel_initialized": False,
     "last_failure_at": 0.0,
+    "locomotion_ready": False,
 }
 _ROBOT_INIT_LOCK = threading.Lock()
 
@@ -85,7 +86,7 @@ class Go2Macros:
         self.cli = None
         self.avoidance_cli = None
         self.available = False
-        self._move_log_interval_s = _env_float("GO2_MOVE_LOG_INTERVAL_SECONDS", -1.0)
+        self._move_log_interval_s = _env_float("GO2_MOVE_LOG_INTERVAL_SECONDS", 1.0)
         self._last_move_log_at = 0.0
 
         if not self.use_robot or sport_client is None or ChannelFactoryInitialize is None:
@@ -145,6 +146,7 @@ class Go2Macros:
                         "avoidance_client": self.avoidance_cli,
                         "channel_initialized": True,
                         "last_failure_at": 0.0,
+                        "locomotion_ready": False,
                     }
                 )
                 self._log("✅ SportClient initialized and ready")
@@ -159,6 +161,7 @@ class Go2Macros:
                         "client": None,
                         "avoidance_client": None,
                         "last_failure_at": time.monotonic(),
+                        "locomotion_ready": False,
                     }
                 )
                 self._log(f"❌ Failed to initialize: {e}")
@@ -223,12 +226,29 @@ class Go2Macros:
 
     def _prepare_locomotion(self):
         if not self.cli:
-            return
+            return False
 
-        self._call("RecoveryStand", self.cli.RecoveryStand)
+        recovery_ret = self._call("RecoveryStand", self.cli.RecoveryStand)
         time.sleep(_env_float("GO2_RECOVERY_STAND_SETTLE_SECONDS", 1.5))
-        self._call("BalanceStand", self.cli.BalanceStand)
+        balance_ret = self._call("BalanceStand", self.cli.BalanceStand)
         time.sleep(_env_float("GO2_BALANCE_STAND_SETTLE_SECONDS", 0.5))
+        recovery_code, _ = _coerce_status(recovery_ret)
+        balance_code, _ = _coerce_status(balance_ret)
+        ready = recovery_code in (0, None) and balance_code in (0, None)
+        _ROBOT_INIT_STATE["locomotion_ready"] = ready
+        return ready
+
+    def ensure_locomotion_ready(self):
+        """Prepare the robot once before accepting continuous navigation commands."""
+        if not self.cli:
+            return False
+        if _ROBOT_INIT_STATE.get("locomotion_ready"):
+            return True
+        with _ROBOT_INIT_LOCK:
+            if _ROBOT_INIT_STATE.get("locomotion_ready"):
+                return True
+            self._log("Preparing locomotion for navigation")
+            return self._prepare_locomotion()
 
     def _timed_move(
         self,
@@ -327,8 +347,14 @@ class Go2Macros:
     # ----------------------------
     def move(self, vx=0.0, vy=0.0, vyaw=0.0):
         """Continuous movement command. Call stop_move() to stop."""
+        command_active = abs(vx) > 1e-3 or abs(vy) > 1e-3 or abs(vyaw) > 1e-3
+        if command_active and not self.ensure_locomotion_ready():
+            raise RuntimeError("Robot locomotion could not be prepared")
         if self.cli:
-            self._call("Move", self.cli.Move, vx=vx, vy=vy, vyaw=vyaw)
+            ret = self._call("Move", self.cli.Move, vx=vx, vy=vy, vyaw=vyaw)
+            code, _ = _coerce_status(ret)
+            if code not in (0, None):
+                raise RuntimeError(f"Robot Move command failed with status {ret!r}")
         self._log_move_command(vx, vy, vyaw)
 
     def step_forward(self, vx=None, t=None):
