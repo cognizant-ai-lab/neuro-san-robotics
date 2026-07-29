@@ -1,11 +1,58 @@
 import asyncio
+import io
 import unittest
+import wave
 from unittest.mock import patch
 
 from coded_tools.unigo2 import tts_go2
 
 
 class Go2TtsFallbackTests(unittest.TestCase):
+    def test_onboard_device_resolves_to_ape_output(self):
+        with patch.object(tts_go2, "ONBOARD_ALSA_DEVICE", "plughw:CARD=APE,DEV=0"):
+            self.assertEqual(
+                tts_go2._resolve_alsa_device("onboard"),
+                "plughw:CARD=APE,DEV=0",
+            )
+
+    def test_auto_uses_usb_detection(self):
+        with patch.object(tts_go2, "_detect_usb_audio_device", return_value="plughw:4,0"):
+            self.assertEqual(tts_go2._resolve_alsa_device("auto"), "plughw:4,0")
+
+    def test_usb_device_still_supports_auto_detection(self):
+        with patch.object(tts_go2, "_detect_usb_audio_device", return_value="plughw:4,0"):
+            self.assertEqual(tts_go2._resolve_alsa_device("usb"), "plughw:4,0")
+
+    def test_explicit_alsa_device_is_unchanged(self):
+        self.assertEqual(tts_go2._resolve_alsa_device("plughw:7,1"), "plughw:7,1")
+
+    def test_onboard_pcm_is_upsampled_to_48khz(self):
+        source = b"\x01\x00\x02\x00"
+        prepared = tts_go2._prepare_openai_pcm_chunk(
+            source,
+            gain=1.0,
+            device="plughw:CARD=APE,DEV=0",
+        )
+        self.assertEqual(prepared, b"\x01\x00\x01\x00\x02\x00\x02\x00")
+
+    def test_usb_pcm_keeps_openai_sample_rate(self):
+        source = b"\x01\x00\x02\x00"
+        prepared = tts_go2._prepare_openai_pcm_chunk(
+            source,
+            gain=1.0,
+            device="plughw:4,0",
+        )
+        self.assertEqual(prepared, source)
+
+    def test_pcm_is_wrapped_as_48khz_mono_wav(self):
+        source = b"\x01\x00\x02\x00"
+        wav_data = tts_go2._pcm_to_wav_bytes(source, 48_000)
+        with wave.open(io.BytesIO(wav_data), "rb") as wav_file:
+            self.assertEqual(wav_file.getnchannels(), 1)
+            self.assertEqual(wav_file.getsampwidth(), 2)
+            self.assertEqual(wav_file.getframerate(), 48_000)
+            self.assertEqual(wav_file.readframes(2), source)
+
     def test_say_non_chunked_falls_back_to_offline_tts_in_auto_mode(self):
         with (
             patch.object(tts_go2, "_should_use_openai", return_value=True),

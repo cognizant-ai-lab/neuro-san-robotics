@@ -23,6 +23,9 @@ Features:
 
 Environment Variables:
 - GO2_TTS_ENGINE: "openai", "piper", "espeak", or "auto" (default: "auto")
+- GO2_TTS_DEVICE: "auto" (default), "usb", "onboard", or an ALSA device name
+- GO2_ONBOARD_TTS_DEVICE: Onboard ALSA device (default: "plughw:CARD=APE,DEV=0")
+- GO2_TTS_WAV_PATH: Retained onboard TTS WAV (default: "/tmp/go2_tts_last.wav")
 - OPENAI_API_KEY: Required for OpenAI TTS
 - GO2_OPENAI_VOICE: OpenAI voice (default: "coral")
 - GO2_OPENAI_MODEL: OpenAI model (default: "gpt-4o-mini-tts")
@@ -33,6 +36,7 @@ Environment Variables:
 import argparse
 import asyncio
 import fcntl
+import io
 import logging
 import os
 import platform
@@ -40,7 +44,9 @@ import queue
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
+import wave
 from typing import Any, Callable, Dict, List, Optional
 
 from neuro_san.interfaces.coded_tool import CodedTool
@@ -63,6 +69,8 @@ OPENAI_INSTRUCTIONS = os.environ.get(
 # Volume gain for OpenAI TTS (1.0 = normal, 2.0 = 2x louder, etc.)
 # This applies software amplification to the PCM audio data
 OPENAI_VOLUME_GAIN = float(os.environ.get("GO2_OPENAI_VOLUME_GAIN", "3.0"))
+OPENAI_PCM_RATE = 24_000
+ONBOARD_PCM_RATE = 48_000
 
 # Piper TTS configuration
 PIPER_MODEL = os.environ.get(
@@ -75,7 +83,12 @@ PIPER_CONFIG = os.environ.get(
     "/home/unitree/piper_models/en_GB-cori-high.onnx.json",
 )
 
+ONBOARD_ALSA_DEVICE = os.environ.get(
+    "GO2_ONBOARD_TTS_DEVICE",
+    "plughw:CARD=APE,DEV=0",
+)
 DEFAULT_ALSA_DEVICE = os.environ.get("GO2_TTS_DEVICE", "auto")
+ONBOARD_WAV_PATH = os.environ.get("GO2_TTS_WAV_PATH", "/tmp/go2_tts_last.wav").strip()
 
 # ALSA mixer control name for volume (common names: "Master", "PCM", "Speaker")
 # Set via env var if the default doesn't work on your hardware
@@ -86,6 +99,9 @@ DEFAULT_VOLUME_PERCENT = int(os.environ.get("GO2_TTS_VOLUME", "100"))
 
 # Lock file for TTS to prevent audio overlap
 TTS_LOCK_FILE = "/tmp/go2_tts.lock"
+_ONBOARD_SPEAKER_LOCK = threading.Lock()
+_ONBOARD_SPEAKER_ENABLED = False
+_ONBOARD_SPEAKER_CLIENT: Any = None
 
 
 def _env_float(name: str, default: float) -> float:
@@ -142,6 +158,158 @@ def _amplify_pcm_chunk(chunk: bytes, gain: float) -> bytes:
     return struct.pack(f"<{num_samples}h", *amplified)
 
 
+def _is_onboard_audio_device(device: str) -> bool:
+    """Return whether an ALSA device targets the Jetson APE speaker route."""
+    normalized = device.replace(" ", "").lower()
+    onboard = ONBOARD_ALSA_DEVICE.replace(" ", "").lower()
+    return normalized == onboard or "card=ape" in normalized
+
+
+def _prepare_openai_pcm_chunk(chunk: bytes, gain: float, device: str) -> bytes:
+    """Amplify OpenAI PCM and upsample it for the fixed-rate APE route."""
+    amplified = _amplify_pcm_chunk(chunk, gain)
+    if not _is_onboard_audio_device(device):
+        return amplified
+
+    # The internal speaker route was verified at 48 kHz. OpenAI supplies
+    # 24-kHz PCM, so duplicate each 16-bit sample for a streaming-safe 2x
+    # upsample without adding an ffmpeg/sox runtime dependency.
+    return b"".join(amplified[index:index + 2] * 2 for index in range(0, len(amplified), 2))
+
+
+def _pcm_to_wav_bytes(pcm_data: bytes, sample_rate: int) -> bytes:
+    """Wrap mono 16-bit PCM in a WAV container for reliable APE playback."""
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
+    return output.getvalue()
+
+
+def _play_onboard_wav(pcm_data: bytes, device: str) -> None:
+    """Play buffered PCM through the same WAV-file path as the hardware probe."""
+    wav_data = _pcm_to_wav_bytes(pcm_data, ONBOARD_PCM_RATE)
+    temp_path = ""
+    retain_wav = bool(ONBOARD_WAV_PATH)
+    try:
+        if retain_wav:
+            temp_path = os.path.abspath(os.path.expanduser(ONBOARD_WAV_PATH))
+            parent_dir = os.path.dirname(temp_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            with open(temp_path, "wb") as output_file:
+                output_file.write(wav_data)
+            logging.info("GO2_TTS: retained onboard WAV at %s", temp_path)
+        else:
+            with tempfile.NamedTemporaryFile(
+                prefix="go2-tts-",
+                suffix=".wav",
+                delete=False,
+            ) as temp_file:
+                temp_file.write(wav_data)
+                temp_path = temp_file.name
+
+        logging.info(
+            "GO2_TTS: playing onboard WAV (%d PCM bytes, %d WAV bytes)",
+            len(pcm_data),
+            len(wav_data),
+        )
+        result = subprocess.run(
+            ["aplay", "-D", device, temp_path],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"aplay returned {result.returncode}: "
+                f"{result.stderr.decode(errors='ignore')}"
+            )
+        logging.info("GO2_TTS: onboard WAV playback completed")
+    finally:
+        if temp_path and not retain_wav:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+
+def _ensure_onboard_speaker_enabled(device: str) -> None:
+    """Enable the Go2 internal speaker through VUI before APE playback."""
+    global _ONBOARD_SPEAKER_CLIENT, _ONBOARD_SPEAKER_ENABLED
+
+    if not _is_onboard_audio_device(device) or _ONBOARD_SPEAKER_ENABLED:
+        return
+
+    with _ONBOARD_SPEAKER_LOCK:
+        if _ONBOARD_SPEAKER_ENABLED:
+            return
+
+        errors: list[Exception] = []
+        for root in ("unitree_sdk2_python.unitree_sdk2py", "unitree_sdk2py"):
+            try:
+                channel_module = __import__(
+                    f"{root}.core.channel",
+                    fromlist=["ChannelFactoryInitialize"],
+                )
+                vui_module = __import__(
+                    f"{root}.go2.vui.vui_client",
+                    fromlist=["VuiClient"],
+                )
+
+                def enable_speaker():
+                    client = vui_module.VuiClient()
+                    client.SetTimeout(3.0)
+                    client.Init()
+                    result = client.SetSwitch(1)
+                    return client, result
+
+                try:
+                    client, code = enable_speaker()
+                except AttributeError as exc:
+                    if "_ref" not in str(exc):
+                        raise
+                    # The Flask TTS worker may not share the DDS initialization
+                    # performed by the agent subprocess. Initialize this process
+                    # exactly as the successful standalone speaker probe does.
+                    network_interface = (
+                        os.environ.get("GO2_NETWORK_INTERFACE")
+                        or os.environ.get("CYCLONEDDS_NETWORK_INTERFACE")
+                    )
+                    if network_interface:
+                        channel_module.ChannelFactoryInitialize(0, network_interface)
+                    else:
+                        channel_module.ChannelFactoryInitialize(0)
+                    logging.info(
+                        "GO2_TTS: initialized Unitree DDS%s",
+                        f" on {network_interface}" if network_interface else "",
+                    )
+                    client, code = enable_speaker()
+
+                if code != 0:
+                    raise RuntimeError(f"VUI SetSwitch failed with code {code}")
+                volume_code, volume = client.GetVolume()
+                if volume_code == 0:
+                    logging.info("GO2_TTS: onboard speaker enabled; VUI volume=%s", volume)
+                else:
+                    logging.info("GO2_TTS: onboard speaker enabled")
+                # Keep the VUI RPC client alive while ALSA uses the APE route.
+                # The standalone hardware probe retains this reference through
+                # playback; releasing it early leaves the route silent even
+                # though aplay accepts every sample.
+                _ONBOARD_SPEAKER_CLIENT = client
+                _ONBOARD_SPEAKER_ENABLED = True
+                return
+            except Exception as exc:
+                errors.append(exc)
+
+        logging.warning(
+            "GO2_TTS: could not enable onboard speaker through VUI: %s",
+            "; ".join(str(error) for error in errors),
+        )
+
+
 def _openai_say_streaming(
     text: str,
     voice: str = OPENAI_VOICE,
@@ -183,6 +351,7 @@ def _openai_say_streaming(
 
     # Set ALSA volume before playback
     if system == "Linux":
+        _ensure_onboard_speaker_enabled(device)
         volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
         _set_alsa_volume(volume_percent)
 
@@ -196,11 +365,28 @@ def _openai_say_streaming(
         response_format="pcm",
     ) as response:
         if system == "Linux":
+            output_rate = ONBOARD_PCM_RATE if _is_onboard_audio_device(device) else OPENAI_PCM_RATE
+            logging.info(
+                "GO2_TTS: streaming PCM to %s at %d Hz",
+                device,
+                output_rate,
+            )
+            if _is_onboard_audio_device(device):
+                pcm_data = b"".join(
+                    _prepare_openai_pcm_chunk(chunk, gain, device)
+                    for chunk in response.iter_bytes(chunk_size=4096)
+                )
+                if not pcm_data:
+                    raise RuntimeError("OpenAI TTS returned no PCM audio")
+                _play_onboard_wav(pcm_data, device)
+                logging.info("GO2_TTS: OpenAI streaming complete")
+                return
+
             # Stream directly to aplay
             aplay_cmd = [
                 "aplay",
                 "-D", device,
-                "-r", "24000",  # OpenAI PCM is 24kHz
+                "-r", str(output_rate),
                 "-f", "S16_LE",
                 "-c", "1",
                 "-t", "raw",
@@ -216,7 +402,7 @@ def _openai_say_streaming(
                 for chunk in response.iter_bytes(chunk_size=4096):
                     if aplay_proc.stdin:
                         # Apply volume gain to PCM audio
-                        amplified_chunk = _amplify_pcm_chunk(chunk, gain)
+                        amplified_chunk = _prepare_openai_pcm_chunk(chunk, gain, device)
                         aplay_proc.stdin.write(amplified_chunk)
             finally:
                 try:
@@ -321,6 +507,7 @@ async def _openai_say_streaming_async(
 
     # Set ALSA volume before playback
     if system == "Linux":
+        _ensure_onboard_speaker_enabled(device)
         volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
         _set_alsa_volume(volume_percent)
 
@@ -332,10 +519,28 @@ async def _openai_say_streaming_async(
         response_format="pcm",
     ) as response:
         if system == "Linux":
+            output_rate = ONBOARD_PCM_RATE if _is_onboard_audio_device(device) else OPENAI_PCM_RATE
+            logging.info(
+                "GO2_TTS: async streaming PCM to %s at %d Hz",
+                device,
+                output_rate,
+            )
+            if _is_onboard_audio_device(device):
+                chunks = []
+                async for chunk in response.iter_bytes(chunk_size=4096):
+                    chunks.append(_prepare_openai_pcm_chunk(chunk, gain, device))
+                pcm_data = b"".join(chunks)
+                if not pcm_data:
+                    raise RuntimeError("OpenAI TTS returned no PCM audio")
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _play_onboard_wav, pcm_data, device)
+                logging.info("GO2_TTS: OpenAI async streaming complete")
+                return
+
             aplay_cmd = [
                 "aplay",
                 "-D", device,
-                "-r", "24000",
+                "-r", str(output_rate),
                 "-f", "S16_LE",
                 "-c", "1",
                 "-t", "raw",
@@ -351,7 +556,7 @@ async def _openai_say_streaming_async(
                 async for chunk in response.iter_bytes(chunk_size=4096):
                     if aplay_proc.stdin:
                         # Apply volume gain to PCM audio
-                        amplified_chunk = _amplify_pcm_chunk(chunk, gain)
+                        amplified_chunk = _prepare_openai_pcm_chunk(chunk, gain, device)
                         aplay_proc.stdin.write(amplified_chunk)
                         await aplay_proc.stdin.drain()
             finally:
@@ -697,8 +902,12 @@ def _detect_usb_audio_device() -> str:
 
 
 def _resolve_alsa_device(device: str) -> str:
-    """Resolve an ALSA device string, auto-detecting if set to 'auto'."""
-    if device == "auto":
+    """Resolve friendly output names to ALSA device strings."""
+    normalized = device.strip().lower()
+    if normalized in {"onboard", "internal"}:
+        logging.info("Using onboard audio device: %s", ONBOARD_ALSA_DEVICE)
+        return ONBOARD_ALSA_DEVICE
+    if normalized in {"usb", "auto"}:
         return _detect_usb_audio_device()
     return device
 
