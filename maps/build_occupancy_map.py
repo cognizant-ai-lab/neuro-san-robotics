@@ -65,6 +65,27 @@ def _inside_polygon(
     return inside
 
 
+def _dilate_mask(mask: np.ndarray, radius_px: int) -> np.ndarray:
+    """Expand annotation-colored pixels to cover their dark outlines and text."""
+    if radius_px <= 0:
+        return mask.copy()
+    expanded = mask.copy()
+    rows, cols = mask.shape
+    for dr in range(-radius_px, radius_px + 1):
+        for dc in range(-radius_px, radius_px + 1):
+            if dr * dr + dc * dc > radius_px * radius_px:
+                continue
+            source_r0, source_r1 = max(0, -dr), min(rows, rows - dr)
+            source_c0, source_c1 = max(0, -dc), min(cols, cols - dc)
+            target_r0, target_r1 = source_r0 + dr, source_r1 + dr
+            target_c0, target_c1 = source_c0 + dc, source_c1 + dc
+            expanded[target_r0:target_r1, target_c0:target_c1] |= mask[
+                source_r0:source_r1,
+                source_c0:source_c1,
+            ]
+    return expanded
+
+
 def build_occupancy(
     map_json: Path,
     floor_plan: Path,
@@ -84,14 +105,15 @@ def build_occupancy(
         int(bbox["left"]):int(bbox["right"]),
     ].copy()
 
-    # Red circles and labels are annotations, not physical obstacles.  Their
-    # black borders are removed later by the minimum structural-run filter.
+    # Red circles and labels are annotations, not physical obstacles. Expand
+    # their red fill enough to erase the black outline and dark character too;
+    # otherwise a marker centered on the robot becomes a false enclosing wall.
     red = (
         (crop[:, :, 0] >= 145)
         & (crop[:, :, 0] >= crop[:, :, 1].astype(np.int16) * 1.35)
         & (crop[:, :, 0] >= crop[:, :, 2].astype(np.int16) * 1.35)
     )
-    crop[red] = 255
+    crop[_dilate_mask(red, radius_px=10)] = 255
 
     width_cells = int(math.ceil(float(dimensions["east_west"]) / resolution_m))
     height_cells = int(math.ceil(float(dimensions["north_south"]) / resolution_m))

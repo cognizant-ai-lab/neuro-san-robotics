@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import unittest
+from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -842,6 +843,30 @@ class TestTopologicalMap(unittest.TestCase):
         self.assertIsNotNone(topo.metric_map)
         self.assertGreater(topo.metric_map.occupied.size, 100_000)
 
+    def test_charging_pose_is_not_enclosed_by_its_map_annotation(self):
+        topo = TopologicalMap()
+        self.assertTrue(topo.load_from_file(str(DEFAULT_MAP_FILE)))
+        charging = topo.get_node("charging_station")
+        immersive = topo.get_node("immersive_room")
+
+        start_cell = topo.metric_map.world_to_cell(charging.x, charging.y)
+        self.assertGreater(float(topo.metric_map.distance_m[start_cell]), 0.75)
+        path = topo.metric_map.plan_path(
+            (charging.x, charging.y),
+            (immersive.x, immersive.y),
+        )
+
+        self.assertIsNotNone(path)
+        first_bearing = math.atan2(
+            path[1][1] - charging.y,
+            path[1][0] - charging.x,
+        )
+        heading = math.radians(charging.heading_degrees)
+        self.assertLess(
+            abs(math.atan2(math.sin(first_bearing - heading), math.cos(first_bearing - heading))),
+            math.radians(45.0),
+        )
+
     def test_loads_map_declared_arrival_landmark(self):
         topo = TopologicalMap()
         topo.load_from_dict({
@@ -1091,6 +1116,27 @@ class TestOdometryProvider(unittest.TestCase):
         self.assertAlmostEqual(pose.x, 6.0, places=2)
         self.assertAlmostEqual(pose.y, 10.0, places=2)
 
+    def test_metric_correction_preserves_confirmed_sdk_odometry(self):
+        odom = SdkSportModeOdometryProvider(start_subscriber=False)
+        odom.set_pose(5.0, 10.0, 0.0)
+        odom._handle_sample(SimpleNamespace(
+            position=[0.0, 0.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0]),
+        ))
+        odom._handle_sample(SimpleNamespace(
+            position=[1.0, 0.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.1]),
+        ))
+
+        odom.apply_pose_correction(6.1, 10.1, 0.08)
+
+        self.assertTrue(odom._sdk_translation_confirmed)
+        self.assertTrue(odom._sdk_yaw_confirmed)
+        self.assertTrue(odom.has_confirmed_translation())
+        pose = odom.get_pose()
+        self.assertAlmostEqual(pose.x, 6.1, places=2)
+        self.assertAlmostEqual(pose.y, 10.1, places=2)
+
     def test_sdk_translation_can_be_disabled_explicitly(self):
         with patch.dict(os.environ, {"NAV_USE_SDK_TRANSLATION_ODOMETRY": "0"}):
             odom = SdkSportModeOdometryProvider(start_subscriber=False)
@@ -1160,20 +1206,33 @@ class TestNavCoreStatus(unittest.TestCase):
         core._local_planner.reset_navigation_state.assert_called_once_with()
         core._notify_status_change.assert_not_called()
 
-    def test_persistent_obstacle_proactively_replaces_metric_route(self):
+    def test_persistent_obstacle_schedules_background_metric_route(self):
         core = NavCore.__new__(NavCore)
         metric_map = MagicMock()
         metric_map.robot_points_to_world.return_value = np.asarray([[1.0, 0.0]])
-        core._topo_map = SimpleNamespace(metric_map=metric_map)
-        core._global_planner = MagicMock()
         safe_goal = MapNode(name="kitchen", x=3.8, y=1.2)
-        core._global_planner.replan_path_around_obstacles.return_value = [safe_goal]
+        core._topo_map = SimpleNamespace(
+            metric_map=metric_map,
+            get_node=MagicMock(return_value=safe_goal),
+        )
+        core._global_planner = MagicMock()
+        core._global_planner.get_current_waypoint.return_value = MapNode(
+            name="__metric_001__", x=2.0, y=0.0
+        )
+        core._global_planner.remaining_metric_route.return_value = (4.0, 0.0)
         core._local_planner = MagicMock()
         core._reset_progress_tracker = MagicMock()
+        core._metric_replan_executor = MagicMock()
+        pending = Future()
+        core._metric_replan_executor.submit.return_value = pending
+        core._metric_replan_future = None
+        core._metric_replan_context = None
         core._path_obstacle_active = True
-        core._path_obstacle_active_since = time.monotonic() - 2.0
+        core._path_obstacle_active_since = time.monotonic() - 3.0
         core._path_obstacle_clear_since = None
         core._last_metric_replan_time = 0.0
+        core._last_translation_progress_time = time.monotonic() - 3.0
+        core._last_motion_command = VelocityCommand(vx=0.2)
         goal = NavGoal(goal_type="semantic", x=4.0, y=1.0, label="Kitchen")
         pose = RobotPose(0.0, 0.0, 0.0)
 
@@ -1184,12 +1243,34 @@ class TestNavCoreStatus(unittest.TestCase):
         )
 
         self.assertTrue(replanned)
-        self.assertEqual((goal.x, goal.y), (3.8, 1.2))
-        core._global_planner.replan_path_around_obstacles.assert_called_once()
-        core._local_planner.reset_navigation_state.assert_called_once_with()
-        core._reset_progress_tracker.assert_called_once_with(
-            reset_recovery_attempts=False
+        self.assertIs(core._metric_replan_future, pending)
+        self.assertEqual((goal.x, goal.y), (4.0, 1.0))
+        core._metric_replan_executor.submit.assert_called_once()
+        core._local_planner.reset_navigation_state.assert_not_called()
+
+    def test_metric_replan_is_not_scheduled_during_route_pivot(self):
+        core = NavCore.__new__(NavCore)
+        metric_map = MagicMock()
+        core._topo_map = SimpleNamespace(metric_map=metric_map)
+        core._global_planner = MagicMock()
+        core._global_planner.get_current_waypoint.return_value = MapNode(
+            name="__metric_001__", x=0.0, y=2.0
         )
+        core._metric_replan_future = None
+        core._path_obstacle_active = True
+        core._path_obstacle_active_since = time.monotonic() - 3.0
+        core._last_metric_replan_time = 0.0
+        core._last_translation_progress_time = time.monotonic() - 3.0
+        core._last_motion_command = VelocityCommand(vyaw=0.5)
+
+        scheduled = core._maybe_replan_blocked_metric_route(
+            NavGoal(goal_type="semantic", x=4.0, y=1.0, label="Kitchen"),
+            RobotPose(0.0, 0.0, 0.0),
+            _grid_with_wall_ahead(0.6),
+        )
+
+        self.assertFalse(scheduled)
+        metric_map.robot_points_to_world.assert_not_called()
 
     def test_remote_control_release_accepts_current_route_segment(self):
         core = NavCore.__new__(NavCore)
