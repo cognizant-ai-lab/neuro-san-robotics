@@ -315,6 +315,45 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertLess(corrected.vyaw, 0.0)
 
+    def test_route_heading_centers_before_reaching_close_right_wall(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = self._corridor_grid(slope=0.0, center_offset=0.18)
+
+        heading = planner._centered_route_heading(grid, goal_direction=0.0)
+
+        self.assertGreater(heading, 0.0)
+
+    def test_route_heading_keeps_direct_goal_when_robot_width_lane_is_open(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.30, 1.80, 31):
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col + round(0.70 / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        goal_heading = math.radians(8.0)
+        heading = planner._centered_route_heading(grid, goal_heading)
+
+        self.assertAlmostEqual(heading, goal_heading)
+
+    def test_velocity_steers_toward_widest_open_route_before_avoidance_band(self):
+        planner = LocalPlanner(
+            max_linear_speed=0.30,
+            max_yaw_rate=0.08,
+            avoidance_distance=0.75,
+        )
+        grid = self._corridor_grid(slope=0.0, center_offset=0.18)
+        grid.path_obstacle_m = float("inf")
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=0.0,
+            goal_distance=3.0,
+        )
+
+        self.assertGreater(cmd.vx, 0.0)
+        self.assertGreater(cmd.vyaw, 0.0)
+
 
     def test_drives_toward_goal_in_clear_space(self):
         planner = LocalPlanner(max_linear_speed=0.3, safety_distance=0.4, avoidance_distance=0.8)

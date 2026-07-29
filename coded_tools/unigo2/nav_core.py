@@ -762,6 +762,15 @@ class LocalPlanner:
     CORRIDOR_MIN_WIDTH_M = 0.55
     CORRIDOR_MAX_WIDTH_M = 2.50
     SINGLE_WALL_TARGET_CLEARANCE_M = _env_float("NAV_WALL_CLEARANCE", 0.55)
+    ROUTE_CENTER_LOOKAHEAD_M = _env_float("NAV_ROUTE_CENTER_LOOKAHEAD", 1.50)
+    ROUTE_CENTER_HALF_WIDTH_M = _env_float("NAV_ROUTE_CENTER_HALF_WIDTH", 0.42)
+    ROUTE_CENTER_MAX_HEADING_RAD = _env_float(
+        "NAV_ROUTE_CENTER_MAX_HEADING_RAD",
+        math.radians(40.0),
+    )
+    ROUTE_CENTER_STEP_RAD = math.radians(5.0)
+    ROUTE_CENTER_CLEARANCE_MARGIN_M = 0.12
+    ROUTE_CENTER_MIN_BLOCKING_POINTS = 3
 
     def __init__(
         self,
@@ -806,9 +815,17 @@ class LocalPlanner:
             VelocityCommand with speed modulated by obstacle proximity and goal distance.
         """
         path_nearest = obstacle_grid.path_obstacle_m
+        route_direction = self._centered_route_heading(
+            obstacle_grid,
+            goal_direction,
+        )
 
         if path_nearest > self.avoidance_distance:
-            return self._compute_direct_velocity(goal_direction, goal_distance, path_nearest)
+            return self._compute_direct_velocity(
+                route_direction,
+                goal_distance,
+                path_nearest,
+            )
 
         histogram = self._build_histogram(obstacle_grid)
         free_sectors = self._find_free_sectors(histogram)
@@ -821,9 +838,9 @@ class LocalPlanner:
 
         if (
             path_nearest <= self.safety_distance
-            and abs(goal_direction) < self.PIVOT_HEADING_ERROR_RAD
+            and abs(route_direction) < self.PIVOT_HEADING_ERROR_RAD
         ):
-            goal_sector = self._angle_to_sector(goal_direction)
+            goal_sector = self._angle_to_sector(route_direction)
             best_sector = self._select_best_sector(free_sectors, goal_sector)
             target_heading = self._sector_to_angle(best_sector)
             return VelocityCommand(
@@ -834,13 +851,13 @@ class LocalPlanner:
 
         if (
             goal_distance > 0.5
-            and abs(goal_direction) >= self.PIVOT_HEADING_ERROR_RAD
+            and abs(route_direction) >= self.PIVOT_HEADING_ERROR_RAD
         ):
-            vyaw = self._pivot_yaw_rate(goal_direction)
+            vyaw = self._pivot_yaw_rate(route_direction)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
 
-        goal_sector = self._angle_to_sector(goal_direction)
+        goal_sector = self._angle_to_sector(route_direction)
         best_sector = self._select_best_sector(free_sectors, goal_sector)
         target_heading = self._sector_to_angle(best_sector)
 
@@ -867,6 +884,85 @@ class LocalPlanner:
         vx = base_speed * turn_factor
 
         return VelocityCommand(vx=vx, vy=0.0, vyaw=float(vyaw))
+
+    def _centered_route_heading(
+        self,
+        obstacle_grid: ObstacleGrid,
+        goal_direction: float,
+    ) -> float:
+        """Aim through the middle of visible open space unless the goal lane is wide."""
+        max_heading = self.ROUTE_CENTER_MAX_HEADING_RAD
+        if abs(goal_direction) >= max_heading:
+            return goal_direction
+
+        points = occupied_xy_points(obstacle_grid)
+        if points.size == 0:
+            return goal_direction
+
+        direct_clearance = self._swept_route_clearance(points, goal_direction)
+        if direct_clearance >= self.ROUTE_CENTER_LOOKAHEAD_M:
+            return goal_direction
+
+        headings = np.arange(
+            -max_heading,
+            max_heading + 0.5 * self.ROUTE_CENTER_STEP_RAD,
+            self.ROUTE_CENTER_STEP_RAD,
+        )
+        clearances = np.asarray(
+            [self._swept_route_clearance(points, float(heading)) for heading in headings]
+        )
+        best_clearance = float(np.max(clearances))
+        open_enough = (
+            clearances >= best_clearance - self.ROUTE_CENTER_CLEARANCE_MARGIN_M
+        )
+
+        runs: List[Tuple[int, int]] = []
+        run_start: Optional[int] = None
+        for index, is_open in enumerate(open_enough):
+            if is_open and run_start is None:
+                run_start = index
+            if run_start is not None and (not is_open or index == len(open_enough) - 1):
+                run_end = index if is_open else index - 1
+                runs.append((run_start, run_end))
+                run_start = None
+
+        if not runs:
+            return goal_direction
+
+        def run_rank(run: Tuple[int, int]) -> Tuple[int, float]:
+            start, end = run
+            center = 0.5 * (float(headings[start]) + float(headings[end]))
+            return end - start + 1, -abs(center - goal_direction)
+
+        best_run = max(runs, key=run_rank)
+        centered_heading = 0.5 * (
+            float(headings[best_run[0]]) + float(headings[best_run[1]])
+        )
+        if abs(goal_direction) < self.PIVOT_HEADING_ERROR_RAD:
+            translating_limit = 0.95 * self.PIVOT_HEADING_ERROR_RAD
+            centered_heading = float(
+                np.clip(centered_heading, -translating_limit, translating_limit)
+            )
+        return float(np.clip(centered_heading, -max_heading, max_heading))
+
+    def _swept_route_clearance(
+        self,
+        points: np.ndarray,
+        heading: float,
+    ) -> float:
+        """Return clearance for the robot-width corridor along a candidate heading."""
+        cos_heading = math.cos(heading)
+        sin_heading = math.sin(heading)
+        forward = points[:, 0] * cos_heading + points[:, 1] * sin_heading
+        lateral = -points[:, 0] * sin_heading + points[:, 1] * cos_heading
+        blocking = forward[
+            (forward >= 0.10)
+            & (forward <= self.ROUTE_CENTER_LOOKAHEAD_M)
+            & (np.abs(lateral) <= self.ROUTE_CENTER_HALF_WIDTH_M)
+        ]
+        if blocking.size < self.ROUTE_CENTER_MIN_BLOCKING_POINTS:
+            return self.ROUTE_CENTER_LOOKAHEAD_M
+        return float(np.percentile(blocking, 10))
 
     def _compute_direct_velocity(
         self,
