@@ -3203,7 +3203,21 @@ class NavCore:
             return False
 
         escaped = self._execute_stall_escape(goal, grid)
+        escape_direction = None
+        scan_direction = None
         if escaped is None:
+            # A close obstacle can prevent every translational escape even when
+            # one turning sector is open.  Do not spend all recovery attempts
+            # waiting in the same pose: pivot to inspect that sector, then
+            # replan from the new heading.
+            latest_grid = self._fresh_obstacle_grid(
+                self._depth_processor.get_obstacle_grid()
+            )
+            scanned = self._execute_stall_turn_scan(goal, latest_grid)
+            if scanned is not None:
+                pose, scan_direction = scanned
+
+        if escaped is None and scan_direction is None:
             with self._state_lock:
                 self._stuck_recovery_attempts += 1
                 attempt = self._stuck_recovery_attempts
@@ -3222,15 +3236,21 @@ class NavCore:
                 "try again."
             )
             return True
-        pose, escape_direction = escaped
+        if escaped is not None:
+            pose, escape_direction = escaped
+            latest_grid = self._fresh_obstacle_grid(
+                self._depth_processor.get_obstacle_grid()
+            )
+            scanned = self._execute_stall_turn_scan(goal, latest_grid)
+            if scanned is not None:
+                pose, scan_direction = scanned
 
+        # Use a view captured in the recovered orientation when projecting
+        # depth points into the map.  Reusing the pre-turn view rotates dynamic
+        # obstacles into the wrong world locations and can reject a valid path.
         latest_grid = self._fresh_obstacle_grid(
             self._depth_processor.get_obstacle_grid()
         )
-        scanned = self._execute_stall_turn_scan(goal, latest_grid)
-        scan_direction = None
-        if scanned is not None:
-            pose, scan_direction = scanned
 
         if goal.goal_type == "semantic":
             dynamic_obstacles = None
@@ -3314,8 +3334,16 @@ class NavCore:
         )
         self._notify_status_change(
             f"I stalled while heading to {self._goal_display_name(goal)}. "
-            f"I stepped {escape_direction}"
-            + (f", turned {scan_direction}" if scan_direction else "")
+            + (
+                f"I stepped {escape_direction}"
+                if escape_direction
+                else f"I turned {scan_direction}"
+            )
+            + (
+                f", turned {scan_direction}"
+                if escape_direction and scan_direction
+                else ""
+            )
             + ", rerouted, and am continuing."
         )
         return True

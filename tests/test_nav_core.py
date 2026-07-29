@@ -1026,6 +1026,16 @@ class TestTopologicalMap(unittest.TestCase):
         immersive = topo.get_node("immersive_room")
         furniture = {
             "conference table beyond B": (15.5, 17.9, 1.3, 5.5),
+            "kitchen table beside marker 0": (5.20, 8.40, 1.30, 4.70),
+            "south kitchen table": (2.60, 5.60, 0.00, 3.10),
+            "desk cluster near marker 9": (1.30, 5.70, 3.30, 7.35),
+            "desk cluster near marker 7": (1.20, 5.70, 8.30, 12.70),
+            "desk cluster near marker 2": (1.20, 5.70, 14.40, 18.00),
+            "desk cluster near marker 5": (0.60, 5.70, 23.70, 28.30),
+            "desk cluster near marker M": (0.50, 5.70, 28.50, 33.70),
+            "gathering-area tables": (3.00, 6.40, 38.60, 42.50),
+            "immersive flower desk": (21.00, 25.90, 7.60, 11.80),
+            "immersive lounge tables": (19.00, 26.30, 0.80, 6.60),
             "ping-pong table": (17.7, 20.6, 6.8, 8.7),
             "immersive-room half-circle desk": (18.8, 25.5, 13.2, 17.5),
         }
@@ -2763,11 +2773,13 @@ class TestNavCoreStatus(unittest.TestCase):
         nav._state = NavState.NAVIGATING
         nav._state_lock = threading.Lock()
         nav._execute_stall_escape = MagicMock(return_value=None)
+        nav._execute_stall_turn_scan = MagicMock(return_value=None)
+        nav._depth_processor = MagicMock()
+        nav._depth_processor.get_obstacle_grid.return_value = blocked_grid = _empty_grid()
         nav._reset_progress_tracker = MagicMock()
         nav._notify_status_change = MagicMock()
         goal = NavGoal(goal_type="semantic", label="Kitchen")
 
-        blocked_grid = _empty_grid()
         blocked_grid.path_obstacle_m = 0.50
         recovered = nav._recover_from_stall(goal, RobotPose(), blocked_grid)
 
@@ -2778,6 +2790,47 @@ class TestNavCoreStatus(unittest.TestCase):
         )
         self.assertIn(
             "pause and try again",
+            nav._notify_status_change.call_args.args[0],
+        )
+
+    def test_failed_translation_escape_turns_and_reroutes(self):
+        nav = NavCore.__new__(NavCore)
+        nav.MAX_STUCK_RECOVERY_ATTEMPTS = 2
+        nav._stuck_recovery_attempts = 0
+        nav._state = NavState.NAVIGATING
+        nav._state_lock = threading.Lock()
+        nav._last_stop_reason = None
+        nav._path_obstacle_active = True
+        nav._path_obstacle_active_since = 1.0
+        nav._path_obstacle_clear_since = None
+        nav._execute_stall_escape = MagicMock(return_value=None)
+        turned_pose = RobotPose(1.0, 2.0, math.radians(-35.0))
+        nav._execute_stall_turn_scan = MagicMock(
+            return_value=(turned_pose, "right")
+        )
+        blocked_grid = _empty_grid()
+        blocked_grid.path_obstacle_m = 0.20
+        nav._depth_processor = MagicMock()
+        nav._depth_processor.get_obstacle_grid.return_value = blocked_grid
+        nav._fresh_obstacle_grid = MagicMock(return_value=blocked_grid)
+        nav._global_planner = MagicMock()
+        nav._global_planner.get_current_waypoint.return_value = MapNode(
+            name="goal", x=3.0, y=2.0
+        )
+        nav._go2 = MagicMock(available=True)
+        nav._ensure_go2 = MagicMock()
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        nav._notify_status_change = MagicMock()
+        goal = NavGoal(goal_type="relative", x=3.0, y=2.0, label="Kitchen")
+
+        recovered = nav._recover_from_stall(goal, RobotPose(), blocked_grid)
+
+        self.assertTrue(recovered)
+        self.assertEqual(nav._stuck_recovery_attempts, 1)
+        nav._execute_stall_turn_scan.assert_called_once_with(goal, blocked_grid)
+        self.assertIn(
+            "turned right, rerouted",
             nav._notify_status_change.call_args.args[0],
         )
 
