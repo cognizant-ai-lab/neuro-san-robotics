@@ -140,7 +140,21 @@ class NavPlannerTool(CodedTool):
             return "Navigation stopped."
 
         elif command == "status":
-            return nav.get_status_summary()
+            status = nav.get_status_summary()
+            if bool(args.get("announce", True)):
+                from coded_tools.unigo2.agent_events import publish_ui_output
+
+                delivered = await asyncio.to_thread(
+                    publish_ui_output,
+                    thought=status,
+                    say=status,
+                )
+                if delivered:
+                    return (
+                        f"Navigation status delivered directly to the user: {status} "
+                        "End this event turn now without calling ui_output."
+                    )
+            return status
 
         elif command == "destinations":
             return nav.list_destinations()

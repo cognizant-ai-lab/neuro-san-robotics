@@ -728,6 +728,56 @@ class TestSafetyMonitor(unittest.TestCase):
 
 class TestGlobalPlanner(unittest.TestCase):
 
+    def test_rejects_detour_that_is_both_a_u_turn_and_much_longer(self):
+        pose = RobotPose(0.0, 0.0, 0.0)
+        points = [(0.0, 0.0), (-1.0, 0.0), (-12.0, 0.0)]
+
+        self.assertFalse(
+            GlobalPlanner.metric_detour_is_reasonable(
+                pose,
+                points,
+                reference_length=6.0,
+                reference_bearing=0.0,
+            )
+        )
+
+    def test_allows_short_local_detour_even_when_it_starts_behind(self):
+        pose = RobotPose(0.0, 0.0, 0.0)
+        points = [(0.0, 0.0), (-0.3, 0.0), (5.5, 0.0)]
+
+        self.assertTrue(
+            GlobalPlanner.metric_detour_is_reasonable(
+                pose,
+                points,
+                reference_length=6.0,
+                reference_bearing=0.0,
+            )
+        )
+
+    def test_rejected_detour_does_not_replace_active_route(self):
+        topo = _create_test_map()
+        topo.metric_map = MagicMock()
+        topo.metric_map.plan_path.return_value = [
+            (0.0, 0.0),
+            (-1.0, 0.0),
+            (-12.0, 0.0),
+        ]
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (1.0, 0.0), (6.0, 0.0)],
+        )
+
+        path = planner.replan_path_around_obstacles(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            np.asarray([[0.5, 0.0]]),
+        )
+
+        self.assertIsNone(path)
+        self.assertAlmostEqual(planner.get_current_waypoint().x, 1.0)
+
     def test_metric_transit_point_advances_within_route_following_tolerance(self):
         topo = _create_test_map()
         planner = GlobalPlanner(topo)
@@ -1355,7 +1405,7 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertFalse(scheduled)
         metric_map.robot_points_to_world.assert_not_called()
 
-    def test_remote_control_release_accepts_current_route_segment(self):
+    def test_remote_control_release_preserves_pose_and_plans_fresh_route(self):
         core = NavCore.__new__(NavCore)
         core._manual_override_active = False
         core._state_lock = threading.Lock()
@@ -1368,17 +1418,19 @@ class TestNavCoreStatus(unittest.TestCase):
         core._odometry.get_pose.return_value = measured_pose
         core._notify_status_change = MagicMock()
         core._reset_progress_tracker = MagicMock()
+        core._local_planner = MagicMock()
         goal = NavGoal(x=3.0, y=4.0, goal_type="semantic", label="C")
 
         self.assertTrue(core._handle_manual_override(goal))
         self.assertFalse(core._handle_manual_override(goal))
 
-        core._odometry.set_pose.assert_called_once_with(1.5, 0.0, 0.0)
+        core._odometry.set_pose.assert_not_called()
         core._reset_progress_tracker.assert_called_once_with()
         self.assertIn(
-            "route from A to B",
+            "preserved the corrected position and heading",
             core._notify_status_change.call_args.args[0],
         )
+        self.assertEqual(core._global_planner._current_path[-1].name, "C")
 
     def test_remote_control_release_does_not_abort_without_route_edge(self):
         core = NavCore.__new__(NavCore)
@@ -1391,11 +1443,12 @@ class TestNavCoreStatus(unittest.TestCase):
         core._odometry.get_pose.return_value = RobotPose(1.0, 1.0, 0.4)
         core._notify_status_change = MagicMock()
         core._reset_progress_tracker = MagicMock()
+        core._local_planner = MagicMock()
         goal = NavGoal(x=3.0, y=1.0, goal_type="semantic", label="B")
 
         self.assertFalse(core._handle_manual_override(goal))
 
-        core._odometry.set_pose.assert_called_once_with(1.0, 1.0, 0.0)
+        core._odometry.set_pose.assert_not_called()
         self.assertIn(
             "continuing toward B",
             core._notify_status_change.call_args.args[0],
@@ -1686,6 +1739,59 @@ class TestNavCoreStatus(unittest.TestCase):
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
+            NavCore.CLOSE_OBSTACLE_CONFIRM_S = original_confirm_s
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_semantic_close_obstacle_attempts_recovery_before_estop(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        original_confirm_s = NavCore.CLOSE_OBSTACLE_CONFIRM_S
+        NavCore.CLOSE_OBSTACLE_CONFIRM_S = 0.0
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            blocked = _grid_with_wall_ahead(distance_m=0.08)
+            nav._depth_processor = MagicMock()
+            nav._depth_processor.get_obstacle_grid.return_value = blocked
+            nav._filter_transient_path_obstacle = lambda grid: grid
+            nav._global_planner = MagicMock()
+            nav._global_planner.get_next_waypoint.return_value = MapNode(
+                name="__metric_001__",
+                x=2.0,
+                y=0.0,
+                tags=["metric_transit"],
+            )
+            nav._global_planner.current_segment.return_value = None
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
+            nav._local_planner.apply_corridor_course_correction.side_effect = (
+                lambda cmd, _grid: cmd
+            )
+            nav._recover_from_stall = MagicMock(return_value=True)
+            goal = NavGoal(
+                goal_type="semantic",
+                x=2.0,
+                y=0.0,
+                label="Immersive Room",
+            )
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            for _ in range(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS):
+                nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            self.assertIs(nav._goal, goal)
+            nav._recover_from_stall.assert_called_once()
+            fake_go2.stop_move.assert_called()
+            nav.shutdown()
+        finally:
             NavCore.CLOSE_OBSTACLE_CONFIRM_S = original_confirm_s
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)

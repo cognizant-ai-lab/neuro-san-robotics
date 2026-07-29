@@ -542,6 +542,10 @@ class TopologicalMap:
 class GlobalPlanner:
     """Metric occupancy planning with topological fallback for simple maps."""
 
+    MAX_DETOUR_LENGTH_RATIO = 1.35
+    MAX_DETOUR_EXTRA_M = 5.0
+    MAX_DETOUR_BEARING_CHANGE_RAD = math.radians(100.0)
+
     def __init__(self, topo_map: TopologicalMap):
         """Initialize the global planner with a topological map reference."""
         self._map = topo_map
@@ -687,16 +691,73 @@ class GlobalPlanner:
         goal_node = self._map.get_node(goal_label)
         if goal_node is None:
             return None
-        path = self._plan_metric_path(
-            current_pose,
-            goal_node,
+        reference_length, reference_bearing = self.remaining_metric_route(current_pose)
+        points = self._map.metric_map.plan_path(
+            (current_pose.x, current_pose.y),
+            (goal_node.x, goal_node.y),
             dynamic_obstacles_xy=dynamic_obstacles_xy,
         )
-        if path is not None:
-            logger.info(
-                "GlobalPlanner: replaced stalled route with a fresh metric route"
+        if not points:
+            return None
+        if not self.metric_detour_is_reasonable(
+            current_pose,
+            points,
+            reference_length,
+            reference_bearing,
+        ):
+            logger.warning(
+                "GlobalPlanner: rejected stalled-route detour that reversed and "
+                "greatly lengthened the remaining route"
             )
+            return None
+        path = self.install_metric_path_points(current_pose, goal_label, points)
+        if path is not None:
+            logger.info("GlobalPlanner: replaced stalled route with a fresh metric route")
         return path
+
+    @classmethod
+    def metric_detour_is_reasonable(
+        cls,
+        current_pose: RobotPose,
+        points: List[Tuple[float, float]],
+        reference_length: float,
+        reference_bearing: Optional[float],
+    ) -> bool:
+        """Reject only detours that are both a major reversal and much longer."""
+        if len(points) < 2 or reference_bearing is None or reference_length <= 0.0:
+            return True
+        first_target = next(
+            (
+                point
+                for point in points[1:]
+                if math.hypot(point[0] - current_pose.x, point[1] - current_pose.y) > 0.05
+            ),
+            None,
+        )
+        if first_target is None:
+            return True
+        candidate_bearing = math.atan2(
+            first_target[1] - current_pose.y,
+            first_target[0] - current_pose.x,
+        )
+        bearing_change = abs(
+            math.atan2(
+                math.sin(candidate_bearing - reference_bearing),
+                math.cos(candidate_bearing - reference_bearing),
+            )
+        )
+        candidate_length = sum(
+            math.hypot(second[0] - first[0], second[1] - first[1])
+            for first, second in zip(points, points[1:])
+        )
+        excessive_length = candidate_length > max(
+            reference_length * cls.MAX_DETOUR_LENGTH_RATIO,
+            reference_length + cls.MAX_DETOUR_EXTRA_M,
+        )
+        return not (
+            excessive_length
+            and bearing_change > cls.MAX_DETOUR_BEARING_CHANGE_RAD
+        )
 
     def replan_path_preserving_progress(
         self,
@@ -1629,7 +1690,7 @@ class SdkSportModeOdometryProvider(OdometryProvider):
     MIN_MOTION_DELTA_M = _env_float("NAV_SDK_ODOMETRY_MIN_DELTA_M", 0.02)
     MIN_MOTION_DELTA_YAW_RAD = _env_float("NAV_SDK_ODOMETRY_MIN_DELTA_YAW_RAD", 0.03)
     REMOTE_STICK_DEADZONE = 0.08
-    REMOTE_RELEASE_GRACE_S = 0.35
+    REMOTE_RELEASE_GRACE_S = _env_float("NAV_REMOTE_RELEASE_GRACE", 1.5)
 
     def __init__(
         self,
@@ -2633,6 +2694,17 @@ class NavCore:
             points[1][0] - pose.x,
         )
         old_bearing = context["old_bearing"]
+        if not self._global_planner.metric_detour_is_reasonable(
+            pose,
+            points,
+            context["old_length"],
+            old_bearing,
+        ):
+            logger.warning(
+                "NavCore: rejected background metric route that reversed and "
+                "greatly lengthened the remaining route"
+            )
+            return False
         if (
             old_bearing is not None
             and self._angular_delta(candidate_bearing, old_bearing)
@@ -3183,7 +3255,23 @@ class NavCore:
                     dynamic_obstacles,
                 )
             if path is None:
-                return False
+                with self._state_lock:
+                    self._stuck_recovery_attempts += 1
+                    attempt = self._stuck_recovery_attempts
+                    self._state = NavState.NAVIGATING
+                    self._last_stop_reason = None
+                    self._reset_progress_tracker(reset_recovery_attempts=False)
+                logger.warning(
+                    "NavCore: recovery %d/%d rejected an unsafe detour; retaining "
+                    "the route and trying the other opening next",
+                    attempt,
+                    self.MAX_STUCK_RECOVERY_ATTEMPTS,
+                )
+                self._notify_status_change(
+                    f"I avoided an unsafe turn away from {self._goal_display_name(goal)}. "
+                    "I will try the other opening and reroute again."
+                )
+                return True
             goal.x = path[-1].x
             goal.y = path[-1].y
             self._local_planner.reset_navigation_state()
@@ -3836,43 +3924,28 @@ class NavCore:
             return True
 
         measured_pose = self._odometry.get_pose()
-        correction = self._global_planner.project_onto_current_segment(measured_pose)
-        if correction is None:
-            corrected_pose = RobotPose(
-                x=measured_pose.x,
-                y=measured_pose.y,
-                yaw=math.atan2(
-                    goal.y - measured_pose.y,
-                    goal.x - measured_pose.x,
-                ),
-            )
-            status_message = (
-                f"Manual control ended. I accepted the corrected position and am "
-                f"continuing toward {self._goal_display_name(goal)}."
-            )
-            log_args = (self._goal_display_name(goal),)
-            log_message = "NavCore: accepted remote correction toward '%s'"
-        else:
-            corrected_pose, segment_start, segment_target = correction
-            status_message = (
-                f"Manual control ended. I accepted the correction on the route from "
-                f"{self._topo_map.get_node_label(segment_start)} to "
-                f"{self._topo_map.get_node_label(segment_target)} and am "
-                f"continuing toward {self._goal_display_name(goal)}."
-            )
-            log_args = (segment_start.name, segment_target.name)
-            log_message = (
-                "NavCore: accepted remote correction on route segment '%s' -> '%s'"
-            )
-
-        self._odometry.set_pose(
-            corrected_pose.x,
-            corrected_pose.y,
-            corrected_pose.yaw,
+        path = self._global_planner.plan_path(
+            measured_pose,
+            goal.label or "",
+            dynamic_obstacles_xy=None,
         )
+        if path is not None:
+            goal.x, goal.y = path[-1].x, path[-1].y
+            self._local_planner.reset_navigation_state()
         self._reset_progress_tracker()
-        logger.info(log_message, *log_args)
-        self._notify_status_change(status_message)
+        logger.info(
+            "NavCore: preserved remote correction pose=(%.2f, %.2f, %.0fdeg) and %s "
+            "a fresh route toward '%s'",
+            measured_pose.x,
+            measured_pose.y,
+            math.degrees(measured_pose.yaw),
+            "planned" if path is not None else "could not plan",
+            self._goal_display_name(goal),
+        )
+        self._notify_status_change(
+            f"Manual control ended. I preserved the corrected position and heading and "
+            f"am continuing toward {self._goal_display_name(goal)}."
+        )
         return False
 
     def _maybe_correct_metric_pose(
@@ -4131,6 +4204,20 @@ class NavCore:
                 else:
                     reason = f"E-STOP: {event.split(':', 1)[-1].replace('_', ' ')}"
                 logger.warning("NavCore: safety event: %s (%s)", event, reason)
+                if (
+                    event == "e_stop:obstacle_too_close"
+                    and goal.goal_type == "semantic"
+                ):
+                    self._ensure_go2()
+                    if self._go2 and getattr(self._go2, "available", False):
+                        self._go2.stop_move()
+                    self._reset_close_obstacle_confirmation()
+                    logger.warning(
+                        "NavCore: confirmed close obstacle; attempting autonomous "
+                        "semantic-route recovery before giving up"
+                    )
+                    if self._recover_from_stall(goal, pose, grid):
+                        return
                 if event == "e_stop:obstacle_too_close":
                     message = (
                         f"I stopped before reaching {self._goal_display_name(goal)} "
