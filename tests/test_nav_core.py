@@ -348,6 +348,17 @@ class TestLocalPlanner(unittest.TestCase):
             0.08,
         )
 
+    def test_pivot_direction_does_not_reverse_before_alignment(self):
+        planner = LocalPlanner(pivot_yaw_rate=0.5)
+
+        self.assertTrue(planner._should_pivot(math.radians(80.0), 2.0))
+        self.assertGreater(planner._pivot_yaw_rate(math.radians(80.0)), 0.0)
+        self.assertTrue(planner._should_pivot(math.radians(-40.0), 2.0))
+        self.assertGreater(planner._pivot_yaw_rate(math.radians(-40.0)), 0.0)
+
+        self.assertFalse(planner._should_pivot(math.radians(5.0), 2.0))
+        self.assertLess(planner._pivot_yaw_rate(math.radians(-40.0)), 0.0)
+
     def test_route_heading_centers_before_reaching_close_right_wall(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
         grid = self._corridor_grid(slope=0.0, center_offset=0.18)
@@ -1582,7 +1593,7 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.PIVOT_YAW_RATE, 0.50)
         self.assertAlmostEqual(NavCore.SAFETY_DISTANCE_M, 0.20)
         self.assertAlmostEqual(NavCore.AVOIDANCE_DISTANCE_M, 0.75)
-        self.assertAlmostEqual(NavCore.PIVOT_HARD_STOP_DISTANCE_M, 0.00)
+        self.assertAlmostEqual(NavCore.PIVOT_HARD_STOP_DISTANCE_M, 0.40)
         self.assertAlmostEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_S, 0.7)
         self.assertEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS, 6)
         self.assertAlmostEqual(NavCore.PATH_OBSTACLE_CONFIRM_S, 0.3)
@@ -2328,7 +2339,7 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
-    def test_nav_cycle_allows_pivot_before_translation_near_obstacle(self, mock_go2):
+    def test_nav_cycle_holds_pivot_when_leg_sweep_is_near_obstacle(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
         mock_go2.return_value = fake_go2
@@ -2354,10 +2365,8 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.NAVIGATING)
-            fake_go2.move.assert_called()
-            self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
-            self.assertGreater(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
-            fake_go2.stop_move.assert_not_called()
+            fake_go2.move.assert_not_called()
+            fake_go2.stop_move.assert_called_once()
             self.assertEqual(events, [])
             nav.shutdown()
         finally:
@@ -2433,8 +2442,8 @@ class TestNavCoreStatus(unittest.TestCase):
             pose = nav._odometry.get_pose()
             self.assertAlmostEqual(pose.x, 3.0, places=2)
             self.assertAlmostEqual(pose.y, 0.2, places=2)
-            self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
-            self.assertGreater(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
+            fake_go2.move.assert_not_called()
+            fake_go2.stop_move.assert_called_once()
             self.assertTrue(any("reached turn" in event for event in events))
             self.assertEqual(nav._global_planner.current_segment()[1].name, "goal")
             nav.shutdown()

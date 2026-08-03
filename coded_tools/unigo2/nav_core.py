@@ -1025,11 +1025,11 @@ class LocalPlanner:
     )
     PARALLEL_WALL_MIN_CLEARANCE_M = _env_float(
         "NAV_PARALLEL_WALL_MIN_CLEARANCE",
-        0.28,
+        0.45,
     )
     STEERING_REVERSAL_CONFIRM_CYCLES = _env_int(
         "NAV_STEERING_REVERSAL_CONFIRM_CYCLES",
-        8,
+        12,
     )
     STEERING_DEADBAND_RPS = _env_float("NAV_STEERING_DEADBAND_RPS", 0.015)
 
@@ -1060,6 +1060,7 @@ class LocalPlanner:
         self._prev_heading = 0.0
         self._route_center_heading: Optional[float] = None
         self._pivoting = False
+        self._pivot_direction = 0
         self._steering_sign = 0
         self._pending_steering_sign = 0
         self._pending_steering_cycles = 0
@@ -1069,6 +1070,7 @@ class LocalPlanner:
         self._prev_heading = 0.0
         self._route_center_heading = None
         self._pivoting = False
+        self._pivot_direction = 0
         self._steering_sign = 0
         self._pending_steering_sign = 0
         self._pending_steering_cycles = 0
@@ -1130,13 +1132,16 @@ class LocalPlanner:
         """Use hysteresis so ordinary route corrections cannot oscillate in place."""
         if goal_distance <= 0.5:
             self._pivoting = False
+            self._pivot_direction = 0
             return False
         error = abs(heading_error)
         if self._pivoting:
             if error <= self.PIVOT_EXIT_HEADING_ERROR_RAD:
                 self._pivoting = False
+                self._pivot_direction = 0
         elif error >= self.PIVOT_ENTER_HEADING_ERROR_RAD:
             self._pivoting = True
+            self._pivot_direction = 1 if heading_error > 0.0 else -1
         return self._pivoting
 
     def compute_velocity(
@@ -1216,8 +1221,8 @@ class LocalPlanner:
         base_speed = self._modulate_speed(self.max_linear_speed, nearest)
 
         # Slow down when close to goal
-        if slow_for_arrival and goal_distance < 0.5:
-            base_speed = min(base_speed, 0.1)
+        if slow_for_arrival and goal_distance < 1.0:
+            base_speed = min(base_speed, max(0.10, 0.20 * goal_distance))
 
         # Compute velocity command
         vyaw = np.clip(target_heading, -self.max_yaw_rate, self.max_yaw_rate)
@@ -1336,8 +1341,8 @@ class LocalPlanner:
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
 
         base_speed = self._modulate_speed(self.max_linear_speed, path_nearest)
-        if slow_for_arrival and goal_distance < 0.5:
-            base_speed = min(base_speed, 0.1)
+        if slow_for_arrival and goal_distance < 1.0:
+            base_speed = min(base_speed, max(0.10, 0.20 * goal_distance))
 
         vyaw = float(np.clip(goal_direction, -self.max_yaw_rate, self.max_yaw_rate))
         turn_factor = 1.0 - min(abs(vyaw) / max(self.max_yaw_rate, 1e-6), 1.0) * 0.5
@@ -1535,6 +1540,9 @@ class LocalPlanner:
         if yaw_limit <= 1e-6:
             return 0.0
         magnitude = min(abs(heading_error), yaw_limit)
+        direction = self._pivot_direction if self._pivoting else 0
+        if direction:
+            return direction * magnitude
         return math.copysign(magnitude, heading_error)
 
     def _build_histogram(self, grid: ObstacleGrid) -> np.ndarray:
@@ -1649,11 +1657,13 @@ class SafetyMonitor:
 
         # Priority 1: E-STOP. Close objects outside the forward cone are handled
         # by VFH steering unless they are inside the hard-stop distance.
-        if (
+        pivot_sweep_blocked = pivot_only and hard_stop
+        forward_motion_blocked = (
             nearest_obstacle_m <= self.safety_distance
             and (hard_stop or forward_hazard)
-            and not (pivot_only and nearest_obstacle_m > self.pivot_hard_stop_distance)
-        ):
+            and not pivot_only
+        )
+        if pivot_sweep_blocked or forward_motion_blocked:
             return VelocityCommand(0.0, 0.0, 0.0), "e_stop:obstacle_too_close"
 
         # Priority 2: Cliff detection
@@ -2205,7 +2215,9 @@ class NavCore:
         "NAV_CLEAR_STALL_TRANSIT_SKIP",
         0.65,
     )
-    PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.0)
+    # In-place turns sweep the Go2's body and legs through a much wider area
+    # than straight motion.  Reserve enough visible clearance before pivoting.
+    PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.40)
     FORWARD_HAZARD_CONE_RAD: float = _env_float(
         "NAV_FORWARD_HAZARD_CONE_RAD",
         math.radians(20.0),
@@ -4327,11 +4339,15 @@ class NavCore:
                 goal_dist,
                 slow_for_arrival=slow_for_arrival,
             )
-            if goal.goal_type == "semantic":
-                cmd = self._local_planner.apply_corridor_course_correction(cmd, grid)
             stabilized = self._local_planner.stabilize_translating_steering(cmd)
             if isinstance(stabilized, VelocityCommand):
                 cmd = stabilized
+            if goal.goal_type == "semantic":
+                # Stabilize route steering first.  Wall/corner clearance is a
+                # safety correction and must be able to take effect immediately.
+                corrected = self._local_planner.apply_corridor_course_correction(cmd, grid)
+                if isinstance(corrected, VelocityCommand):
+                    cmd = corrected
 
         elif state == NavState.AVOIDING:
             if grid:
@@ -4364,6 +4380,14 @@ class NavCore:
             and abs(cmd.vy) < 1e-3
             and abs(cmd.vyaw) > 1e-3
         )
+        if pivot_only and raw_grid is not None:
+            # A forward-path projection is insufficient for turns in place:
+            # the rear legs sweep sideways around the robot.  Include every
+            # visible nearby obstacle in the pivot-clearance gate.
+            nearest = raw_grid.nearest_obstacle_m
+            if math.isfinite(nearest) and nearest < safety_dist:
+                safety_dist = nearest
+                safety_bearing = raw_grid.nearest_obstacle_bearing
         seconds_since_progress = (
             now - self._last_progress_time
             if pivot_only
@@ -4399,6 +4423,7 @@ class NavCore:
                     and self._should_defer_close_obstacle_stop(
                         safety_dist,
                         safety_bearing,
+                        pivot_only=pivot_only,
                     )
                 ):
                     return
@@ -4701,12 +4726,11 @@ class NavCore:
         self,
         nearest_dist: float,
         nearest_bearing: float,
+        *,
+        pivot_only: bool = False,
     ) -> bool:
         """Hold briefly on borderline close obstacles to reject transient frames."""
-        if (
-            nearest_dist <= self.PIVOT_HARD_STOP_DISTANCE_M
-            or abs(nearest_bearing) > self.FORWARD_HAZARD_CONE_RAD
-        ):
+        if not pivot_only and abs(nearest_bearing) > self.FORWARD_HAZARD_CONE_RAD:
             self._reset_close_obstacle_confirmation()
             return False
 
