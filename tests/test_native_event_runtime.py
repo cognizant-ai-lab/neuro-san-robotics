@@ -14,6 +14,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class NativeEventRuntimeTests(unittest.TestCase):
+
+    def test_navigation_updates_are_retained_silently(self):
+        source = (ROOT / "coded_tools/unigo2/nav_planner.py").read_text()
+        self.assertIn("remember_navigation_awareness", source)
+        self.assertNotIn(
+            'queue_agent_event(message, source="navigation")',
+            source,
+        )
+
     def test_flask_is_not_an_agent_scheduler(self):
         source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()
 

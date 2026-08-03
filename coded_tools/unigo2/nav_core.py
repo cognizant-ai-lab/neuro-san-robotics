@@ -1019,6 +1019,19 @@ class LocalPlanner:
     ROUTE_CENTER_CLEARANCE_MARGIN_M = 0.12
     ROUTE_CENTER_MIN_BLOCKING_POINTS = 3
     MIN_TRANSIT_SPEED_MPS = _env_float("NAV_MIN_TRANSIT_SPEED", 0.28)
+    PARALLEL_WALL_MAX_HEADING_ERROR_RAD = _env_float(
+        "NAV_PARALLEL_WALL_MAX_HEADING_ERROR_RAD",
+        math.radians(15.0),
+    )
+    PARALLEL_WALL_MIN_CLEARANCE_M = _env_float(
+        "NAV_PARALLEL_WALL_MIN_CLEARANCE",
+        0.28,
+    )
+    STEERING_REVERSAL_CONFIRM_CYCLES = _env_int(
+        "NAV_STEERING_REVERSAL_CONFIRM_CYCLES",
+        8,
+    )
+    STEERING_DEADBAND_RPS = _env_float("NAV_STEERING_DEADBAND_RPS", 0.015)
 
     def __init__(
         self,
@@ -1047,12 +1060,71 @@ class LocalPlanner:
         self._prev_heading = 0.0
         self._route_center_heading: Optional[float] = None
         self._pivoting = False
+        self._steering_sign = 0
+        self._pending_steering_sign = 0
+        self._pending_steering_cycles = 0
 
     def reset_navigation_state(self) -> None:
         """Forget steering history after a new route or waypoint transition."""
         self._prev_heading = 0.0
         self._route_center_heading = None
         self._pivoting = False
+        self._steering_sign = 0
+        self._pending_steering_sign = 0
+        self._pending_steering_cycles = 0
+
+    def stabilize_translating_steering(self, cmd: VelocityCommand) -> VelocityCommand:
+        """Require a persistent request before reversing translating steering."""
+        if cmd.vx <= 0.05 or abs(cmd.vyaw) < self.STEERING_DEADBAND_RPS:
+            if abs(cmd.vyaw) < self.STEERING_DEADBAND_RPS:
+                self._pending_steering_sign = 0
+                self._pending_steering_cycles = 0
+            return cmd
+
+        requested_sign = 1 if cmd.vyaw > 0.0 else -1
+        if self._steering_sign == 0 or requested_sign == self._steering_sign:
+            self._steering_sign = requested_sign
+            self._pending_steering_sign = 0
+            self._pending_steering_cycles = 0
+            return cmd
+
+        if requested_sign != self._pending_steering_sign:
+            self._pending_steering_sign = requested_sign
+            self._pending_steering_cycles = 1
+        else:
+            self._pending_steering_cycles += 1
+
+        if self._pending_steering_cycles < self.STEERING_REVERSAL_CONFIRM_CYCLES:
+            return VelocityCommand(vx=cmd.vx, vy=cmd.vy, vyaw=0.0)
+
+        self._steering_sign = requested_sign
+        self._pending_steering_sign = 0
+        self._pending_steering_cycles = 0
+        return cmd
+
+    def parallel_wall_supports_route(
+        self,
+        obstacle_grid: Optional[ObstacleGrid],
+        route_heading: float,
+    ) -> bool:
+        """Return true when a long side wall is safely parallel to the route."""
+        if obstacle_grid is None or abs(route_heading) > math.radians(30.0):
+            return False
+        for wall_heading, lateral_at_reference in self._visible_wall_fits(
+            obstacle_grid
+        ).values():
+            heading_error = abs(
+                math.atan2(
+                    math.sin(wall_heading - route_heading),
+                    math.cos(wall_heading - route_heading),
+                )
+            )
+            if (
+                heading_error <= self.PARALLEL_WALL_MAX_HEADING_ERROR_RAD
+                and abs(lateral_at_reference) >= self.PARALLEL_WALL_MIN_CLEARANCE_M
+            ):
+                return True
+        return False
 
     def _should_pivot(self, heading_error: float, goal_distance: float) -> bool:
         """Use hysteresis so ordinary route corrections cannot oscillate in place."""
@@ -1292,7 +1364,7 @@ class LocalPlanner:
         obstacle_grid: ObstacleGrid,
     ) -> VelocityCommand:
         """Add bounded steering from visible corridor or one-sided wall geometry."""
-        if cmd.vx <= 0.05 or obstacle_grid.path_obstacle_m < self.avoidance_distance:
+        if cmd.vx <= 0.05:
             return cmd
 
         wall_geometry = self._estimate_wall_geometry(obstacle_grid)
@@ -2252,6 +2324,14 @@ class NavCore:
         "NAV_METRIC_REPLAN_MIN_ROUTE_CHANGE_RAD",
         math.radians(15.0),
     )
+    REMOTE_HEADING_REALIGN_MIN_TURN_RAD: float = _env_float(
+        "NAV_REMOTE_HEADING_REALIGN_MIN_TURN_RAD",
+        math.radians(20.0),
+    )
+    REMOTE_HEADING_REALIGN_MIN_ERROR_RAD: float = _env_float(
+        "NAV_REMOTE_HEADING_REALIGN_MIN_ERROR_RAD",
+        math.radians(45.0),
+    )
 
     @classmethod
     def get_instance(cls) -> "NavCore":
@@ -2332,6 +2412,7 @@ class NavCore:
         self._obstacle_grid_unavailable_since: Optional[float] = None
         self._obstacle_grid_unavailable_notified = False
         self._manual_override_active = False
+        self._manual_override_start_pose: Optional[RobotPose] = None
         self._obstacle_memory = LocalObstacleMemory(self.OBSTACLE_MEMORY_SECONDS)
         self._last_obstacle_telemetry_time = 0.0
         self._last_metric_localization_time = time.monotonic()
@@ -3928,6 +4009,7 @@ class NavCore:
         if manual_active:
             if not self._manual_override_active:
                 self._manual_override_active = True
+                self._manual_override_start_pose = self._odometry.get_pose()
                 logger.info("NavCore: autonomous navigation paused for remote control")
                 self._notify_status_change(
                     f"Manual control is active. I paused autonomous navigation to "
@@ -3945,6 +4027,7 @@ class NavCore:
                 self._goal = None
                 self._last_stop_reason = "Relative movement canceled after manual control"
                 self._clear_planner_and_obstacle_state()
+            self._manual_override_start_pose = None
             self._notify_status_change(
                 "Manual control ended, so I canceled the previous relative movement command."
             )
@@ -3957,16 +4040,63 @@ class NavCore:
             goal.label or "",
             dynamic_obstacles_xy=None,
         )
+        heading_realigned = False
+        if path is not None and len(path) > 1:
+            first_target = path[1]
+            route_bearing = math.atan2(
+                first_target.y - measured_pose.y,
+                first_target.x - measured_pose.x,
+            )
+            route_heading_error = abs(
+                math.atan2(
+                    math.sin(route_bearing - measured_pose.yaw),
+                    math.cos(route_bearing - measured_pose.yaw),
+                )
+            )
+            start_pose = getattr(self, "_manual_override_start_pose", None)
+            manual_turn = (
+                abs(
+                    math.atan2(
+                        math.sin(measured_pose.yaw - start_pose.yaw),
+                        math.cos(measured_pose.yaw - start_pose.yaw),
+                    )
+                )
+                if isinstance(start_pose, RobotPose)
+                else 0.0
+            )
+            if (
+                manual_turn >= self.REMOTE_HEADING_REALIGN_MIN_TURN_RAD
+                and route_heading_error >= self.REMOTE_HEADING_REALIGN_MIN_ERROR_RAD
+            ):
+                # A substantial human course correction is authoritative.  If
+                # SDK yaw still disagrees sharply with the newly planned route,
+                # re-anchor the map yaw so autonomous control continues in the
+                # physical direction selected with the remote instead of
+                # immediately undoing the correction.
+                measured_pose = RobotPose(
+                    x=measured_pose.x,
+                    y=measured_pose.y,
+                    yaw=route_bearing,
+                    timestamp=time.time(),
+                )
+                self._odometry.apply_pose_correction(
+                    measured_pose.x,
+                    measured_pose.y,
+                    measured_pose.yaw,
+                )
+                heading_realigned = True
         if path is not None:
             goal.x, goal.y = path[-1].x, path[-1].y
             self._local_planner.reset_navigation_state()
         self._reset_progress_tracker()
+        self._manual_override_start_pose = None
         logger.info(
-            "NavCore: preserved remote correction pose=(%.2f, %.2f, %.0fdeg) and %s "
+            "NavCore: preserved remote correction pose=(%.2f, %.2f, %.0fdeg)%s and %s "
             "a fresh route toward '%s'",
             measured_pose.x,
             measured_pose.y,
             math.degrees(measured_pose.yaw),
+            " with route-aligned heading" if heading_realigned else "",
             "planned" if path is not None else "could not plan",
             self._goal_display_name(goal),
         )
@@ -4067,6 +4197,41 @@ class NavCore:
         )
         return corrected
 
+    def _parallel_wall_projection_is_clear(
+        self,
+        grid: Optional[ObstacleGrid],
+        pose: RobotPose,
+    ) -> bool:
+        """Ignore a side-wall edge when the mapped route runs parallel to it."""
+        if (
+            grid is None
+            or grid.path_obstacle_m > self.AVOIDANCE_DISTANCE_M
+            or abs(grid.path_obstacle_bearing) < math.radians(10.0)
+        ):
+            return False
+        waypoint = self._global_planner.get_current_waypoint()
+        if not isinstance(waypoint, MapNode):
+            return False
+        route_heading = math.atan2(
+            waypoint.y - pose.y,
+            waypoint.x - pose.x,
+        ) - pose.yaw
+        route_heading = math.atan2(
+            math.sin(route_heading),
+            math.cos(route_heading),
+        )
+        supported = self._local_planner.parallel_wall_supports_route(
+            grid,
+            route_heading,
+        )
+        if supported:
+            logger.debug(
+                "NavCore: treating parallel mapped wall at %+.0fdeg as side "
+                "geometry, not a blocked route",
+                math.degrees(grid.path_obstacle_bearing),
+            )
+        return supported
+
     def _nav_cycle(self, state: NavState, goal: NavGoal):
         """Execute one navigation cycle: sense -> plan -> safety filter -> actuate."""
         if state in {NavState.IDLE, NavState.STUCK, NavState.E_STOP}:
@@ -4082,6 +4247,13 @@ class NavCore:
         grid = self._filter_transient_path_obstacle(geometry_grid)
         self._log_obstacle_telemetry(raw_grid, geometry_grid, pose)
         self._update_progress(pose)
+
+        parallel_wall_clear = self._parallel_wall_projection_is_clear(
+            grid,
+            pose,
+        )
+        if parallel_wall_clear:
+            grid = self._without_path_obstacle(grid)
 
         path_dist = grid.path_obstacle_m if grid else float("inf")
         path_bearing = grid.path_obstacle_bearing if grid else 0.0
@@ -4157,6 +4329,9 @@ class NavCore:
             )
             if goal.goal_type == "semantic":
                 cmd = self._local_planner.apply_corridor_course_correction(cmd, grid)
+            stabilized = self._local_planner.stabilize_translating_steering(cmd)
+            if isinstance(stabilized, VelocityCommand):
+                cmd = stabilized
 
         elif state == NavState.AVOIDING:
             if grid:
@@ -4178,6 +4353,7 @@ class NavCore:
             cmd,
             safety_dist,
             safety_bearing,
+            parallel_wall_clear=parallel_wall_clear,
         )
         now = time.monotonic()
         # A commanded pivot is making useful progress when measured yaw changes;
@@ -4325,11 +4501,19 @@ class NavCore:
         cmd: VelocityCommand,
         path_dist: float,
         path_bearing: float,
+        *,
+        parallel_wall_clear: bool = False,
     ) -> Tuple[float, float]:
         """Merge projected path clearance with raw center depth for one safety gate."""
         if cmd.vx <= 1e-3:
             self._reset_center_only_close_confirmation()
             return path_dist, path_bearing
+
+        if parallel_wall_clear and abs(path_bearing) > math.radians(10.0):
+            # A mapped route parallel to a fitted side wall is not blocked by
+            # that wall merely because the swept corridor includes its edge.
+            # Raw center depth remains authoritative for anything truly ahead.
+            path_dist = max(path_dist, self.AVOIDANCE_DISTANCE_M)
 
         reading, supported = self._read_center_depth(
             max_depth_m=self.AVOIDANCE_DISTANCE_M,

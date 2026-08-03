@@ -316,6 +316,38 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertLess(corrected.vyaw, 0.0)
 
+    def test_parallel_side_wall_supports_straight_mapped_route(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = self._corridor_grid(
+            slope=0.02,
+            center_offset=0.0,
+            include_right_wall=False,
+        )
+
+        self.assertTrue(
+            planner.parallel_wall_supports_route(
+                grid,
+                route_heading=math.radians(2.0),
+            )
+        )
+
+    def test_steering_reversal_requires_persistent_request(self):
+        planner = LocalPlanner(max_yaw_rate=0.08)
+        planner.STEERING_REVERSAL_CONFIRM_CYCLES = 3
+        right = VelocityCommand(vx=0.2, vyaw=-0.08)
+        left = VelocityCommand(vx=0.2, vyaw=0.08)
+
+        self.assertEqual(
+            planner.stabilize_translating_steering(right).vyaw,
+            -0.08,
+        )
+        self.assertEqual(planner.stabilize_translating_steering(left).vyaw, 0.0)
+        self.assertEqual(planner.stabilize_translating_steering(left).vyaw, 0.0)
+        self.assertEqual(
+            planner.stabilize_translating_steering(left).vyaw,
+            0.08,
+        )
+
     def test_route_heading_centers_before_reaching_close_right_wall(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
         grid = self._corridor_grid(slope=0.0, center_offset=0.18)
@@ -1513,6 +1545,36 @@ class TestNavCoreStatus(unittest.TestCase):
             "continuing toward B",
             core._notify_status_change.call_args.args[0],
         )
+
+    def test_remote_course_correction_realigns_badly_drifted_map_heading(self):
+        core = NavCore.__new__(NavCore)
+        core._manual_override_active = False
+        core._manual_override_start_pose = None
+        core._state_lock = threading.Lock()
+        core._global_planner = MagicMock()
+        first_target = MapNode(name="__metric_001__", x=1.0, y=-4.0)
+        core._global_planner.plan_path.return_value = [
+            MapNode(name="start", x=0.0, y=0.0),
+            first_target,
+            MapNode(name="kitchen", x=2.0, y=-5.0),
+        ]
+        start_pose = RobotPose(0.0, 0.0, math.radians(-95.0))
+        released_pose = RobotPose(0.0, 0.0, math.radians(-6.0))
+        core._odometry = MagicMock()
+        core._odometry.is_manual_control_active.side_effect = [True, False]
+        core._odometry.get_pose.side_effect = [start_pose, released_pose]
+        core._notify_status_change = MagicMock()
+        core._reset_progress_tracker = MagicMock()
+        core._local_planner = MagicMock()
+        goal = NavGoal(goal_type="semantic", label="kitchen")
+
+        self.assertTrue(core._handle_manual_override(goal))
+        self.assertFalse(core._handle_manual_override(goal))
+
+        expected_yaw = math.atan2(-4.0, 1.0)
+        corrected = core._odometry.apply_pose_correction.call_args.args
+        self.assertAlmostEqual(corrected[2], expected_yaw)
+        self.assertIsNone(core._manual_override_start_pose)
 
     def test_robot_navigation_defaults_are_in_code(self):
         self.assertAlmostEqual(NavCore.MAX_LINEAR_SPEED, 0.40)
@@ -3284,6 +3346,24 @@ class TestNavCoreStatus(unittest.TestCase):
         finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    def test_parallel_side_wall_uses_center_depth_for_forward_safety(self):
+        nav = NavCore.__new__(NavCore)
+        nav.AVOIDANCE_DISTANCE_M = 0.75
+        nav._read_center_depth = MagicMock(
+            return_value=(CenterDepthReading(distance_m=0.60, coverage=0.5), True)
+        )
+        nav._reset_center_only_close_confirmation = MagicMock()
+
+        distance, bearing = nav._forward_clearance_for_safety(
+            VelocityCommand(vx=0.20),
+            path_dist=0.27,
+            path_bearing=math.radians(18.0),
+            parallel_wall_clear=True,
+        )
+
+        self.assertAlmostEqual(distance, 0.60)
+        self.assertAlmostEqual(bearing, 0.0)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_nav_cycle_center_depth_estops_forward_command_when_grid_misses_close_wall(self, mock_go2):
