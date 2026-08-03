@@ -3161,6 +3161,7 @@ class TestNavCoreStatus(unittest.TestCase):
         nav._ensure_go2 = MagicMock()
         nav._local_planner = MagicMock()
         nav._reset_progress_tracker = MagicMock()
+        nav._notify_status_change = MagicMock()
         nav._notify_waypoint_advance = MagicMock()
         nav._execute_stall_escape = MagicMock()
         transit = MapNode(
@@ -3379,9 +3380,10 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertEqual(
                 events,
                 [
-                    "I stopped before reaching Kitchen because the path was clear "
-                    "but my motion commands did not move the robot after retrying "
-                    "locomotion."
+                    "I stopped before reaching Kitchen because the path was clear, "
+                    "but locomotion recovery could not be verified. locomotion "
+                    "recovery completed, but subsequent commands still produced no "
+                    "measured translation"
                 ],
             )
             nav.shutdown()
@@ -3425,10 +3427,85 @@ class TestNavCoreStatus(unittest.TestCase):
             fake_go2.recover_locomotion.assert_called_once()
             nav._execute_stall_escape.assert_not_called()
             self.assertEqual(nav._clear_motion_recovery_attempts, 1)
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertGreaterEqual(
+                fake_go2.move.call_args.kwargs["vx"],
+                nav.LOCOMOTION_VERIFICATION_SPEED_MPS,
+            )
             nav.shutdown()
         finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    def test_second_clear_motion_recovery_reinitializes_client_and_preserves_route(self):
+        nav = NavCore.__new__(NavCore)
+        nav.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS = 2
+        nav.AVOIDANCE_DISTANCE_M = 0.75
+        nav.CLEAR_STALL_TRANSIT_SKIP_M = 0.65
+        nav._clear_motion_recovery_attempts = 1
+        nav._stuck_recovery_attempts = 0
+        nav._locomotion_recovery_verification_pending = (
+            "soft locomotion-mode reset"
+        )
+        nav._locomotion_recovery_error = None
+        nav._state = NavState.NAVIGATING
+        nav._state_lock = threading.Lock()
+        nav._last_stop_reason = None
+        nav._last_motion_command = VelocityCommand(vx=0.2)
+        nav._go2 = MagicMock(available=True)
+        nav._go2.reinitialize_locomotion.return_value = True
+        nav._ensure_go2 = MagicMock()
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        nav._notify_status_change = MagicMock()
+        destination = MapNode(name="kitchen", x=2.0, y=0.0)
+        nav._global_planner = MagicMock()
+        nav._global_planner.get_current_waypoint.return_value = destination
+        pose = RobotPose(1.0, 0.2, 0.3)
+
+        recovered = nav._recover_from_stall(
+            NavGoal(goal_type="semantic", x=2.0, y=0.0, label="Kitchen"),
+            pose,
+            _empty_grid(),
+        )
+
+        self.assertTrue(recovered)
+        nav._go2.reinitialize_locomotion.assert_called_once()
+        nav._go2.recover_locomotion.assert_not_called()
+        nav._global_planner.clear.assert_not_called()
+        nav._global_planner.advance_current_waypoint.assert_not_called()
+        self.assertIs(nav._global_planner.get_current_waypoint(), destination)
+        self.assertEqual(nav._clear_motion_recovery_attempts, 2)
+        self.assertEqual(
+            nav._locomotion_recovery_verification_pending,
+            "SportClient reinitialization",
+        )
+
+    def test_measured_translation_verifies_recovery_and_resets_watchdog(self):
+        nav = NavCore.__new__(NavCore)
+        nav._last_progress_pose = RobotPose()
+        nav._last_translation_progress_pose = RobotPose()
+        nav._last_progress_time = 0.0
+        nav._last_translation_progress_time = 0.0
+        nav._stuck_recovery_attempts = 1
+        nav._clear_motion_recovery_attempts = 2
+        nav._locomotion_recovery_verification_pending = (
+            "SportClient reinitialization"
+        )
+        nav._locomotion_recovery_error = None
+        nav._last_stall_scan_direction = None
+        nav._notify_status_change = MagicMock()
+
+        nav._update_progress(RobotPose(0.12, 0.0, 0.0))
+
+        self.assertEqual(nav._clear_motion_recovery_attempts, 0)
+        self.assertIsNone(nav._locomotion_recovery_verification_pending)
+        nav._notify_status_change.assert_called_once_with(
+            "Locomotion recovery was verified by measured movement, and I am "
+            "continuing the existing route."
+        )
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_stuck_abort_keeps_current_pose(self, mock_go2):

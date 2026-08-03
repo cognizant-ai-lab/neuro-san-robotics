@@ -2333,6 +2333,10 @@ class NavCore:
         "NAV_MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS",
         2,
     )
+    LOCOMOTION_VERIFICATION_SPEED_MPS: float = _env_float(
+        "NAV_LOCOMOTION_VERIFICATION_SPEED",
+        0.28,
+    )
     CLEAR_STALL_TRANSIT_SKIP_M: float = _env_float(
         "NAV_CLEAR_STALL_TRANSIT_SKIP",
         0.65,
@@ -2559,6 +2563,8 @@ class NavCore:
         self._last_translation_progress_time = time.monotonic()
         self._stuck_recovery_attempts = 0
         self._clear_motion_recovery_attempts = 0
+        self._locomotion_recovery_verification_pending: Optional[str] = None
+        self._locomotion_recovery_error: Optional[str] = None
         self._last_stall_scan_direction: Optional[float] = None
         self._close_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
@@ -2717,6 +2723,8 @@ class NavCore:
         self._obstacle_grid_unavailable_since = None
         self._obstacle_grid_unavailable_notified = False
         self._last_stall_scan_direction = None
+        self._locomotion_recovery_verification_pending = None
+        self._locomotion_recovery_error = None
         self._obstacle_memory.clear()
         self._local_planner.reset_navigation_state()
         self._reset_route_wall_heading_confirmation()
@@ -3413,6 +3421,16 @@ class NavCore:
                 clear_attempts
                 >= self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS
             ):
+                if not getattr(self, "_locomotion_recovery_error", None):
+                    stage = getattr(
+                        self,
+                        "_locomotion_recovery_verification_pending",
+                        None,
+                    )
+                    self._locomotion_recovery_error = (
+                        f"{stage or 'locomotion'} recovery completed, but subsequent "
+                        "commands still produced no measured translation"
+                    )
                 return False
 
             advanced_name = None
@@ -3429,19 +3447,65 @@ class NavCore:
 
             self._ensure_go2()
             recovered = False
-            if self._go2 and getattr(self._go2, "available", False):
-                recover = getattr(self._go2, "recover_locomotion", None)
+            recovery_stage = "soft locomotion-mode reset"
+            if self._go2:
                 try:
-                    if callable(recover):
-                        recovered = bool(recover())
+                    if clear_attempts == 0 and getattr(
+                        self._go2,
+                        "available",
+                        False,
+                    ):
+                        recover = getattr(self._go2, "recover_locomotion", None)
+                        if callable(recover):
+                            recovered = bool(recover())
+                        else:
+                            self._go2.stop_move()
+                        # A rejected mode reset falls through immediately to a
+                        # fresh client rather than spending a watchdog cycle on
+                        # a recovery operation known to have failed.
+                        if not recovered:
+                            recovery_stage = "SportClient reinitialization"
+                            reinitialize = getattr(
+                                self._go2,
+                                "reinitialize_locomotion",
+                                None,
+                            )
+                            recovered = bool(
+                                reinitialize() if callable(reinitialize) else False
+                            )
                     else:
-                        self._go2.stop_move()
+                        recovery_stage = "SportClient reinitialization"
+                        reinitialize = getattr(
+                            self._go2,
+                            "reinitialize_locomotion",
+                            None,
+                        )
+                        recovered = bool(
+                            reinitialize() if callable(reinitialize) else False
+                        )
                 except Exception:
                     logger.exception("NavCore: locomotion-mode recovery failed")
+
+            if not recovered:
+                detail = getattr(self._go2, "last_recovery_error", None)
+                self._locomotion_recovery_error = (
+                    f"{recovery_stage} failed"
+                    + (f": {detail}" if detail else "")
+                )
+                self._clear_motion_recovery_attempts = (
+                    self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS
+                )
+                logger.error(
+                    "NavCore: locomotion recovery could not continue: %s",
+                    self._locomotion_recovery_error,
+                )
+                return False
 
             with self._state_lock:
                 self._clear_motion_recovery_attempts = clear_attempts + 1
                 attempt = self._clear_motion_recovery_attempts
+                self._locomotion_recovery_verification_pending = recovery_stage
+                self._locomotion_recovery_error = None
                 self._state = NavState.NAVIGATING
                 self._last_stop_reason = None
                 self._last_motion_command = VelocityCommand()
@@ -3449,16 +3513,30 @@ class NavCore:
                 self._reset_progress_tracker(reset_recovery_attempts=False)
             logger.warning(
                 "NavCore: clear path but commanded translation was not measured; "
-                "locomotion recovery %d/%d %s%s",
+                "%s %d/%d completed and is awaiting measured-motion verification%s",
+                recovery_stage,
                 attempt,
                 self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS,
-                "succeeded" if recovered else "was requested",
                 (
                     f"; advanced past nearby transit point '{advanced_name}'"
                     if advanced_name
                     else ""
                 ),
             )
+            if attempt == 1:
+                self._notify_status_change(
+                    "Locomotion stopped responding. I preserved my position and "
+                    "route, reset the locomotion mode, and am using a bounded "
+                    "route-aligned command to verify motion "
+                    f"before continuing toward {self._goal_display_name(goal)}."
+                )
+            else:
+                self._notify_status_change(
+                    "The locomotion-mode reset was not verified, so I replaced the "
+                    "robot motion-service client while preserving my position and "
+                    "route. I am verifying motion again with a bounded route-aligned "
+                    "command."
+                )
             return True
 
         if self._stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
@@ -4736,6 +4814,18 @@ class NavCore:
                         self.SEMANTIC_ARRIVAL_TOLERANCE_M,
                     )
 
+            if (
+                getattr(self, "_locomotion_recovery_verification_pending", None)
+                and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                and cmd.vx >= 0.03
+                and cmd.vx < self.LOCOMOTION_VERIFICATION_SPEED_MPS
+            ):
+                # Verification must use a command known to initiate a Go2 gait;
+                # repeating a marginal low-speed command can falsely make a
+                # healthy, freshly reset service look unresponsive.  Keep the
+                # planner's route-aligned yaw and all ordinary safety filtering.
+                cmd = replace(cmd, vx=self.LOCOMOTION_VERIFICATION_SPEED_MPS)
+
         elif state == NavState.AVOIDING:
             if grid:
                 cmd = self._local_planner.compute_avoidance(grid)
@@ -4857,14 +4947,22 @@ class NavCore:
                     >= self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS
                 )
                 reason = (
-                    "Locomotion failure: accepted commands produced no measured motion"
+                    "Locomotion recovery failed: "
+                    + (
+                        getattr(self, "_locomotion_recovery_error", None)
+                        or "accepted commands produced no measured motion"
+                    )
                     if clear_motion_failure
                     else "Stuck: no progress toward the goal"
                 )
                 message = (
                     f"I stopped before reaching {self._goal_display_name(goal)} "
-                    "because the path was clear but my motion commands did not "
-                    "move the robot after retrying locomotion."
+                    "because the path was clear, but locomotion recovery could not "
+                    "be verified. "
+                    + (
+                        getattr(self, "_locomotion_recovery_error", None)
+                        or "Commands were accepted without measured movement."
+                    )
                     if clear_motion_failure
                     else f"I stopped before reaching {self._goal_display_name(goal)} "
                     "because I was not making progress."
@@ -5266,6 +5364,23 @@ class NavCore:
             self._stuck_recovery_attempts = 0
             self._clear_motion_recovery_attempts = 0
             self._last_stall_scan_direction = None
+            pending_recovery = getattr(
+                self,
+                "_locomotion_recovery_verification_pending",
+                None,
+            )
+            if pending_recovery:
+                self._locomotion_recovery_verification_pending = None
+                self._locomotion_recovery_error = None
+                logger.info(
+                    "NavCore: %s verified by %.2fm measured translation; route resumed",
+                    pending_recovery,
+                    translation_moved,
+                )
+                self._notify_status_change(
+                    "Locomotion recovery was verified by measured movement, and I am "
+                    "continuing the existing route."
+                )
 
     # ------------------------------------------------------------------
     # Lifecycle

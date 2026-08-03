@@ -167,6 +167,26 @@ class Go2MacrosInitializationTests(unittest.TestCase):
         self.assertEqual(client.calls.count(("RecoveryStand",)), 2)
         self.assertEqual(client.calls.count(("BalanceStand",)), 2)
 
+    def test_reinitialize_locomotion_replaces_client_without_reinitializing_dds(self):
+        channel_init = MagicMock()
+        with (
+            patch.object(go2_macros, "ChannelFactoryInitialize", channel_init),
+            patch.object(go2_macros, "sport_client", FakeSportClientModule),
+            patch.object(go2_macros.time, "sleep"),
+        ):
+            bot = go2_macros.Go2Macros()
+            original = bot.cli
+            reinitialized = bot.reinitialize_locomotion()
+
+        self.assertTrue(reinitialized)
+        self.assertIsNot(bot.cli, original)
+        self.assertIs(bot.cli, go2_macros._ROBOT_INIT_STATE["client"])
+        self.assertEqual(channel_init.call_count, 1)
+        self.assertIn(("StopMove",), original.calls)
+        self.assertIn(("RecoveryStand",), bot.cli.calls)
+        self.assertIn(("BalanceStand",), bot.cli.calls)
+        self.assertTrue(go2_macros._ROBOT_INIT_STATE["locomotion_ready"])
+
     def test_continuous_move_raises_when_sdk_rejects_command(self):
         with (
             patch.object(go2_macros, "ChannelFactoryInitialize", MagicMock()),
