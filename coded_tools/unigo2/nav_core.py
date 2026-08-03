@@ -1176,6 +1176,7 @@ class LocalPlanner:
                 goal_distance,
                 path_nearest,
                 slow_for_arrival=slow_for_arrival,
+                pivot_heading=goal_direction,
             )
 
         histogram = self._build_histogram(obstacle_grid)
@@ -1200,8 +1201,11 @@ class LocalPlanner:
                 vyaw=self._pivot_yaw_rate(target_heading),
             )
 
-        if self._should_pivot(route_direction, goal_distance):
-            vyaw = self._pivot_yaw_rate(route_direction)
+        # Open-space centering is a small translating correction, not a reason
+        # to turn away from the mapped route.  Only the actual waypoint bearing
+        # may initiate or drive an in-place route pivot.
+        if self._should_pivot(goal_direction, goal_distance):
+            vyaw = self._pivot_yaw_rate(goal_direction)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
 
@@ -1333,10 +1337,12 @@ class LocalPlanner:
         path_nearest: float,
         *,
         slow_for_arrival: bool = True,
+        pivot_heading: Optional[float] = None,
     ) -> VelocityCommand:
         """Drive the mapped path directly when the path corridor is clear."""
-        if self._should_pivot(goal_direction, goal_distance):
-            vyaw = self._pivot_yaw_rate(goal_direction)
+        mapped_heading = goal_direction if pivot_heading is None else pivot_heading
+        if self._should_pivot(mapped_heading, goal_distance):
+            vyaw = self._pivot_yaw_rate(mapped_heading)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
 
