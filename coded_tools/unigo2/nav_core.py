@@ -877,6 +877,18 @@ class GlobalPlanner:
             self._current_path[self._waypoint_index],
         )
 
+    def current_segment_heading(self) -> Optional[float]:
+        """Return the active mapped segment's world-frame heading."""
+        segment = self.current_segment()
+        if segment is None:
+            return None
+        start, target = segment
+        dx = target.x - start.x
+        dy = target.y - start.y
+        if math.hypot(dx, dy) <= 1e-6:
+            return None
+        return math.atan2(dy, dx)
+
     def advance_current_waypoint(
         self,
         on_advance: Optional[Callable[[MapNode, MapNode], None]] = None,
@@ -986,7 +998,7 @@ class LocalPlanner:
     )
     PIVOT_EXIT_HEADING_ERROR_RAD = _env_float(
         "NAV_PIVOT_EXIT_HEADING_ERROR_RAD",
-        math.radians(12.0),
+        math.radians(6.0),
     )
     FORWARD_HAZARD_CONE_RAD = _env_float("NAV_FORWARD_HAZARD_CONE_RAD", math.radians(20.0))
     DEFAULT_PIVOT_YAW_RATE = _env_float(
@@ -1151,6 +1163,7 @@ class LocalPlanner:
         goal_distance: float,
         *,
         slow_for_arrival: bool = True,
+        pivot_heading: Optional[float] = None,
     ) -> VelocityCommand:
         """Compute velocity toward the goal while avoiding obstacles.
 
@@ -1165,6 +1178,7 @@ class LocalPlanner:
             VelocityCommand with speed modulated by obstacle proximity and goal distance.
         """
         path_nearest = obstacle_grid.path_obstacle_m
+        mapped_heading = goal_direction if pivot_heading is None else pivot_heading
         route_direction = self._centered_route_heading(
             obstacle_grid,
             goal_direction,
@@ -1176,7 +1190,7 @@ class LocalPlanner:
                 goal_distance,
                 path_nearest,
                 slow_for_arrival=slow_for_arrival,
-                pivot_heading=goal_direction,
+                pivot_heading=mapped_heading,
             )
 
         histogram = self._build_histogram(obstacle_grid)
@@ -1204,8 +1218,8 @@ class LocalPlanner:
         # Open-space centering is a small translating correction, not a reason
         # to turn away from the mapped route.  Only the actual waypoint bearing
         # may initiate or drive an in-place route pivot.
-        if self._should_pivot(goal_direction, goal_distance):
-            vyaw = self._pivot_yaw_rate(goal_direction)
+        if self._should_pivot(mapped_heading, goal_distance):
+            vyaw = self._pivot_yaw_rate(mapped_heading)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
 
@@ -4338,12 +4352,23 @@ class NavCore:
             # Normalize to [-pi, pi]
             goal_dir = math.atan2(math.sin(goal_dir), math.cos(goal_dir))
             goal_dist = math.hypot(target_x - pose.x, target_y - pose.y)
+            pivot_heading = goal_dir
+            if metric_route:
+                segment_heading = self._global_planner.current_segment_heading()
+                if isinstance(segment_heading, (int, float)) and math.isfinite(
+                    segment_heading
+                ):
+                    pivot_heading = math.atan2(
+                        math.sin(segment_heading - pose.yaw),
+                        math.cos(segment_heading - pose.yaw),
+                    )
 
             cmd = self._local_planner.compute_velocity(
                 grid,
                 goal_dir,
                 goal_dist,
                 slow_for_arrival=slow_for_arrival,
+                pivot_heading=pivot_heading,
             )
             stabilized = self._local_planner.stabilize_translating_steering(cmd)
             if isinstance(stabilized, VelocityCommand):

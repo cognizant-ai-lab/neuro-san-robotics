@@ -373,6 +373,27 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertAlmostEqual(cmd.vyaw, planner.max_yaw_rate)
         self.assertFalse(planner._pivoting)
 
+    def test_mapped_segment_heading_drives_full_corner_pivot(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, pivot_yaw_rate=0.5)
+        grid = _empty_grid()
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(-42.0),
+            goal_distance=1.0,
+            pivot_heading=math.radians(-65.0),
+        )
+
+        self.assertAlmostEqual(cmd.vx, 0.0)
+        self.assertAlmostEqual(cmd.vyaw, -0.5)
+
+    def test_pivot_remains_active_until_within_six_degrees(self):
+        planner = LocalPlanner(pivot_yaw_rate=0.5)
+
+        self.assertTrue(planner._should_pivot(math.radians(-65.0), 1.0))
+        self.assertTrue(planner._should_pivot(math.radians(-8.0), 1.0))
+        self.assertFalse(planner._should_pivot(math.radians(-5.0), 1.0))
+
     def test_route_heading_centers_before_reaching_close_right_wall(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
         grid = self._corridor_grid(slope=0.0, center_offset=0.18)
@@ -474,7 +495,7 @@ class TestLocalPlanner(unittest.TestCase):
         )
         finished = planner.compute_velocity(
             grid,
-            goal_direction=math.radians(10.0),
+            goal_direction=math.radians(5.0),
             goal_distance=1.0,
         )
 
