@@ -1089,6 +1089,14 @@ class LocalPlanner:
     ROUTE_CENTER_CLEARANCE_MARGIN_M = 0.12
     ROUTE_CENTER_MIN_BLOCKING_POINTS = 3
     MIN_TRANSIT_SPEED_MPS = _env_float("NAV_MIN_TRANSIT_SPEED", 0.28)
+    MIN_EFFECTIVE_APPROACH_SPEED_MPS = _env_float(
+        "NAV_MIN_EFFECTIVE_APPROACH_SPEED",
+        0.18,
+    )
+    MIN_EFFECTIVE_APPROACH_CLEARANCE_M = _env_float(
+        "NAV_MIN_EFFECTIVE_APPROACH_CLEARANCE",
+        0.55,
+    )
     PARALLEL_WALL_MAX_HEADING_ERROR_RAD = _env_float(
         "NAV_PARALLEL_WALL_MAX_HEADING_ERROR_RAD",
         math.radians(15.0),
@@ -1173,6 +1181,32 @@ class LocalPlanner:
         self._pending_steering_sign = 0
         self._pending_steering_cycles = 0
         return cmd
+
+    def maintain_effective_final_approach(
+        self,
+        cmd: VelocityCommand,
+        obstacle_grid: ObstacleGrid,
+        goal_distance: float,
+        arrival_tolerance: float,
+    ) -> VelocityCommand:
+        """Keep a clear, steering final approach above the Go2 walking threshold.
+
+        Arrival braking can otherwise combine with the translating turn factor to
+        produce roughly 0.10 m/s commands.  The Go2 may accept those commands
+        without measurably translating, causing a clear route to be abandoned as
+        a locomotion failure.  Preserve the requested small yaw correction while
+        raising only the forward component, and never do so inside arrival range
+        or when forward clearance is tight.
+        """
+        if (
+            goal_distance <= arrival_tolerance
+            or obstacle_grid.path_obstacle_m
+            < self.MIN_EFFECTIVE_APPROACH_CLEARANCE_M
+            or cmd.vx < 0.03
+            or cmd.vx >= self.MIN_EFFECTIVE_APPROACH_SPEED_MPS
+        ):
+            return cmd
+        return replace(cmd, vx=self.MIN_EFFECTIVE_APPROACH_SPEED_MPS)
 
     def parallel_wall_supports_route(
         self,
@@ -4264,7 +4298,16 @@ class NavCore:
     ) -> RobotPose:
         """Use a repeatedly observed parallel wall to correct map-frame yaw."""
         segment_heading = self._global_planner.current_segment_heading()
-        if grid is None or segment_heading is None:
+        waypoint = self._global_planner.get_current_waypoint()
+        if (
+            grid is None
+            or segment_heading is None
+            or waypoint is None
+            or "metric_transit" not in waypoint.tags
+        ):
+            # A short wall edge beside the final destination is not a reliable
+            # map-heading landmark.  Re-anchoring there can undo the small live
+            # steering correction that is actively clearing that edge.
             self._reset_route_wall_heading_confirmation()
             return pose
         if grid.path_obstacle_m <= self.AVOIDANCE_DISTANCE_M:
@@ -4685,6 +4728,13 @@ class NavCore:
                 )
                 if isinstance(corrected, VelocityCommand):
                     cmd = corrected
+                if metric_route and slow_for_arrival:
+                    cmd = self._local_planner.maintain_effective_final_approach(
+                        cmd,
+                        grid,
+                        goal_dist,
+                        self.SEMANTIC_ARRIVAL_TOLERANCE_M,
+                    )
 
         elif state == NavState.AVOIDING:
             if grid:

@@ -489,6 +489,34 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertGreaterEqual(cmd.vx, planner.MIN_TRANSIT_SPEED_MPS)
         self.assertGreater(cmd.vyaw, 0.0)
 
+    def test_clear_final_approach_keeps_small_correction_and_effective_speed(self):
+        planner = LocalPlanner(max_linear_speed=0.4, max_yaw_rate=0.08)
+        steering = VelocityCommand(vx=0.098, vy=0.0, vyaw=0.08)
+
+        cmd = planner.maintain_effective_final_approach(
+            steering,
+            _empty_grid(),
+            goal_distance=0.98,
+            arrival_tolerance=0.65,
+        )
+
+        self.assertAlmostEqual(cmd.vx, planner.MIN_EFFECTIVE_APPROACH_SPEED_MPS)
+        self.assertAlmostEqual(cmd.vyaw, steering.vyaw)
+
+    def test_final_approach_does_not_override_tight_clearance(self):
+        planner = LocalPlanner(max_linear_speed=0.4, max_yaw_rate=0.08)
+        grid = replace(_empty_grid(), path_obstacle_m=0.50)
+        steering = VelocityCommand(vx=0.098, vy=0.0, vyaw=0.08)
+
+        cmd = planner.maintain_effective_final_approach(
+            steering,
+            grid,
+            goal_distance=0.98,
+            arrival_tolerance=0.65,
+        )
+
+        self.assertEqual(cmd, steering)
+
     def test_pivot_hysteresis_finishes_turn_without_threshold_oscillation(self):
         planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
         grid = _empty_grid()
@@ -1515,6 +1543,32 @@ class TestNavCoreStatus(unittest.TestCase):
 
         self.assertAlmostEqual(pose.yaw, 0.0, places=2)
         core._odometry.apply_pose_correction.assert_called_once()
+
+    def test_parallel_wall_does_not_reanchor_on_final_destination_segment(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, math.radians(14.0)),
+            "C",
+            [(0.0, 0.0), (4.0, 0.0)],
+        )
+        core._local_planner = LocalPlanner()
+        core._odometry = MagicMock()
+        core._route_wall_heading_candidate = None
+        core._route_wall_heading_readings = 0
+        grid = replace(
+            _grid_with_wall_right(0.8),
+            path_obstacle_m=float("inf"),
+            path_obstacle_bearing=0.0,
+        )
+        pose = RobotPose(3.0, 0.0, math.radians(14.0))
+
+        for _ in range(core.ROUTE_WALL_HEADING_CONFIRM_READINGS):
+            pose = core._maybe_align_heading_to_route_wall(grid, pose)
+
+        self.assertAlmostEqual(pose.yaw, math.radians(14.0), places=2)
+        core._odometry.apply_pose_correction.assert_not_called()
 
     def test_expected_transverse_wall_advances_metric_corner_early(self):
         core = NavCore.__new__(NavCore)
