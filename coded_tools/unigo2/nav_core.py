@@ -889,6 +889,60 @@ class GlobalPlanner:
             return None
         return math.atan2(dy, dx)
 
+    def current_segment_guidance(
+        self,
+        pose: RobotPose,
+        *,
+        lookahead_m: float = 1.50,
+        max_correction_rad: float = math.radians(10.0),
+    ) -> Optional[float]:
+        """Follow the active straight segment with bounded cross-track correction."""
+        segment = self.current_segment()
+        if segment is None:
+            return None
+        start, target = segment
+        dx = target.x - start.x
+        dy = target.y - start.y
+        length = math.hypot(dx, dy)
+        if length <= 1e-6:
+            return None
+        unit_x, unit_y = dx / length, dy / length
+        relative_x = pose.x - start.x
+        relative_y = pose.y - start.y
+        cross_track = unit_x * relative_y - unit_y * relative_x
+        correction = float(
+            np.clip(
+                -math.atan2(cross_track, max(lookahead_m, 0.10)),
+                -abs(max_correction_rad),
+                abs(max_correction_rad),
+            )
+        )
+        guided_heading = math.atan2(dy, dx) + correction
+        return math.atan2(math.sin(guided_heading), math.cos(guided_heading))
+
+    def upcoming_turn(self) -> Optional[Tuple[MapNode, MapNode, float]]:
+        """Return the next node and signed heading change after the active segment."""
+        if not self._current_path or not 0 < self._waypoint_index < len(self._current_path) - 1:
+            return None
+        start = self._current_path[self._waypoint_index - 1]
+        corner = self._current_path[self._waypoint_index]
+        following = self._current_path[self._waypoint_index + 1]
+        incoming = math.atan2(corner.y - start.y, corner.x - start.x)
+        outgoing = math.atan2(following.y - corner.y, following.x - corner.x)
+        change = math.atan2(math.sin(outgoing - incoming), math.cos(outgoing - incoming))
+        return corner, following, change
+
+    def current_turn_change(self) -> Optional[float]:
+        """Return the heading change just entered after advancing a waypoint."""
+        if not self._current_path or not 1 < self._waypoint_index < len(self._current_path):
+            return None
+        previous = self._current_path[self._waypoint_index - 2]
+        corner = self._current_path[self._waypoint_index - 1]
+        target = self._current_path[self._waypoint_index]
+        incoming = math.atan2(corner.y - previous.y, corner.x - previous.x)
+        outgoing = math.atan2(target.y - corner.y, target.x - corner.x)
+        return math.atan2(math.sin(outgoing - incoming), math.cos(outgoing - incoming))
+
     def advance_current_waypoint(
         self,
         on_advance: Optional[Callable[[MapNode, MapNode], None]] = None,
@@ -1004,6 +1058,10 @@ class LocalPlanner:
     DEFAULT_PIVOT_YAW_RATE = _env_float(
         "NAV_PIVOT_YAW_RATE",
         _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.50),
+    )
+    MIN_EFFECTIVE_PIVOT_YAW_RATE = _env_float(
+        "NAV_MIN_EFFECTIVE_PIVOT_YAW_RATE",
+        0.35,
     )
     CORRIDOR_MIN_POINTS_PER_SIDE = 8
     CORRIDOR_MIN_LENGTH_M = 0.45
@@ -1387,6 +1445,8 @@ class LocalPlanner:
         self,
         cmd: VelocityCommand,
         obstacle_grid: ObstacleGrid,
+        *,
+        correction_limit: Optional[float] = None,
     ) -> VelocityCommand:
         """Add bounded steering from visible corridor or one-sided wall geometry."""
         if cmd.vx <= 0.05:
@@ -1405,7 +1465,10 @@ class LocalPlanner:
             # close right wall steers left.
             alignment = float(np.clip(0.20 * wall_heading, -0.02, 0.02))
             correction = alignment + 0.25 * lateral_error
-        correction_limit = min(0.06, self.max_yaw_rate * 0.75)
+        if correction_limit is None:
+            correction_limit = min(0.06, self.max_yaw_rate * 0.75)
+        else:
+            correction_limit = min(abs(correction_limit), self.max_yaw_rate)
         corrected_yaw = float(
             np.clip(
                 cmd.vyaw + correction,
@@ -1560,6 +1623,11 @@ class LocalPlanner:
         if yaw_limit <= 1e-6:
             return 0.0
         magnitude = min(abs(heading_error), yaw_limit)
+        if self._pivoting:
+            magnitude = max(
+                magnitude,
+                min(self.MIN_EFFECTIVE_PIVOT_YAW_RATE, yaw_limit),
+            )
         direction = self._pivot_direction if self._pivoting else 0
         if direction:
             return direction * magnitude
@@ -2340,6 +2408,42 @@ class NavCore:
         "NAV_METRIC_LOCALIZATION_MIN_TRAVEL",
         0.50,
     )
+    ROUTE_WALL_HEADING_CONFIRM_READINGS: int = _env_int(
+        "NAV_ROUTE_WALL_HEADING_CONFIRM_READINGS",
+        3,
+    )
+    ROUTE_WALL_MAX_OBSERVED_HEADING_RAD: float = _env_float(
+        "NAV_ROUTE_WALL_MAX_OBSERVED_HEADING_RAD",
+        math.radians(12.0),
+    )
+    ROUTE_WALL_MIN_YAW_CORRECTION_RAD: float = _env_float(
+        "NAV_ROUTE_WALL_MIN_YAW_CORRECTION_RAD",
+        math.radians(10.0),
+    )
+    ROUTE_WALL_MAX_YAW_CORRECTION_RAD: float = _env_float(
+        "NAV_ROUTE_WALL_MAX_YAW_CORRECTION_RAD",
+        math.radians(35.0),
+    )
+    EXPECTED_CORNER_MIN_WALL_DISTANCE_M: float = _env_float(
+        "NAV_EXPECTED_CORNER_MIN_WALL_DISTANCE",
+        0.55,
+    )
+    EXPECTED_CORNER_MAX_WALL_DISTANCE_M: float = _env_float(
+        "NAV_EXPECTED_CORNER_MAX_WALL_DISTANCE",
+        1.50,
+    )
+    EXPECTED_CORNER_MAX_POSE_ERROR_M: float = _env_float(
+        "NAV_EXPECTED_CORNER_MAX_POSE_ERROR",
+        1.25,
+    )
+    EXPECTED_CORNER_MIN_TURN_RAD: float = _env_float(
+        "NAV_EXPECTED_CORNER_MIN_TURN_RAD",
+        math.radians(45.0),
+    )
+    MAPPED_SIDE_ROUTE_MIN_CLEARANCE_M: float = _env_float(
+        "NAV_MAPPED_SIDE_ROUTE_MIN_CLEARANCE",
+        0.34,
+    )
     METRIC_BLOCKED_REPLAN_DELAY_S: float = _env_float(
         "NAV_METRIC_BLOCKED_REPLAN_DELAY",
         2.0,
@@ -2443,6 +2547,8 @@ class NavCore:
         self._path_obstacle_clear_since: Optional[float] = None
         self._obstacle_grid_unavailable_since: Optional[float] = None
         self._obstacle_grid_unavailable_notified = False
+        self._route_wall_heading_candidate: Optional[float] = None
+        self._route_wall_heading_readings = 0
         self._manual_override_active = False
         self._manual_override_start_pose: Optional[RobotPose] = None
         self._obstacle_memory = LocalObstacleMemory(self.OBSTACLE_MEMORY_SECONDS)
@@ -2579,12 +2685,21 @@ class NavCore:
         self._last_stall_scan_direction = None
         self._obstacle_memory.clear()
         self._local_planner.reset_navigation_state()
+        self._reset_route_wall_heading_confirmation()
 
     def _notify_waypoint_advance(self, reached: MapNode, upcoming: MapNode) -> None:
         """Publish topological progress without exposing noisy coordinates."""
-        self._local_planner.reset_navigation_state()
         if "metric_transit" in reached.tags or "metric_transit" in upcoming.tags:
+            planner = getattr(self, "_global_planner", None)
+            turn_change = (
+                planner.current_turn_change()
+                if planner is not None
+                else None
+            )
+            if isinstance(turn_change, (int, float)) and abs(turn_change) >= math.radians(20.0):
+                self._local_planner.reset_navigation_state()
             return
+        self._local_planner.reset_navigation_state()
         reached_label = self._topo_map.get_node_label(reached)
         upcoming_label = self._topo_map.get_node_label(upcoming)
         self._notify_status_change(
@@ -4138,6 +4253,152 @@ class NavCore:
         )
         return False
 
+    def _reset_route_wall_heading_confirmation(self) -> None:
+        self._route_wall_heading_candidate = None
+        self._route_wall_heading_readings = 0
+
+    def _maybe_align_heading_to_route_wall(
+        self,
+        grid: Optional[ObstacleGrid],
+        pose: RobotPose,
+    ) -> RobotPose:
+        """Use a repeatedly observed parallel wall to correct map-frame yaw."""
+        segment_heading = self._global_planner.current_segment_heading()
+        if grid is None or segment_heading is None:
+            self._reset_route_wall_heading_confirmation()
+            return pose
+        if grid.path_obstacle_m <= self.AVOIDANCE_DISTANCE_M:
+            self._reset_route_wall_heading_confirmation()
+            return pose
+        last_cmd = getattr(self, "_last_motion_command", VelocityCommand())
+        if (
+            abs(last_cmd.vx) < 0.03
+            and abs(last_cmd.vy) < 0.03
+            and abs(last_cmd.vyaw) > 0.12
+        ):
+            self._reset_route_wall_heading_confirmation()
+            return pose
+
+        wall_fits = self._local_planner._visible_wall_fits(grid)
+        candidates = [
+            heading
+            for heading, _lateral in wall_fits.values()
+            if abs(heading) <= self.ROUTE_WALL_MAX_OBSERVED_HEADING_RAD
+        ]
+        if not candidates:
+            self._reset_route_wall_heading_confirmation()
+            return pose
+        observed_heading = min(candidates, key=abs)
+        corrected_yaw = math.atan2(
+            math.sin(segment_heading - observed_heading),
+            math.cos(segment_heading - observed_heading),
+        )
+        correction = math.atan2(
+            math.sin(corrected_yaw - pose.yaw),
+            math.cos(corrected_yaw - pose.yaw),
+        )
+        if not (
+            self.ROUTE_WALL_MIN_YAW_CORRECTION_RAD
+            <= abs(correction)
+            <= self.ROUTE_WALL_MAX_YAW_CORRECTION_RAD
+        ):
+            self._reset_route_wall_heading_confirmation()
+            return pose
+
+        previous = self._route_wall_heading_candidate
+        if previous is None or abs(
+            math.atan2(
+                math.sin(corrected_yaw - previous),
+                math.cos(corrected_yaw - previous),
+            )
+        ) > math.radians(5.0):
+            self._route_wall_heading_candidate = corrected_yaw
+            self._route_wall_heading_readings = 1
+            return pose
+
+        self._route_wall_heading_candidate = corrected_yaw
+        self._route_wall_heading_readings += 1
+        if self._route_wall_heading_readings < self.ROUTE_WALL_HEADING_CONFIRM_READINGS:
+            return pose
+
+        corrected = RobotPose(
+            x=pose.x,
+            y=pose.y,
+            yaw=corrected_yaw,
+            timestamp=time.time(),
+        )
+        self._odometry.apply_pose_correction(corrected.x, corrected.y, corrected.yaw)
+        self._local_planner.reset_navigation_state()
+        self._reset_route_wall_heading_confirmation()
+        logger.info(
+            "NavCore: route-parallel wall corrected map heading by %+.0fdeg",
+            math.degrees(correction),
+        )
+        return corrected
+
+    def _accept_expected_metric_corner(
+        self,
+        pose: RobotPose,
+        grid: Optional[ObstacleGrid],
+    ) -> Tuple[RobotPose, bool]:
+        """Advance a mapped sharp corner when its expected transverse wall appears."""
+        upcoming = self._global_planner.upcoming_turn()
+        segment = self._global_planner.current_segment()
+        if grid is None or upcoming is None or segment is None:
+            return pose, False
+        corner, _following, turn = upcoming
+        if (
+            "metric_transit" not in corner.tags
+            or abs(turn) < self.EXPECTED_CORNER_MIN_TURN_RAD
+            or not (
+                self.EXPECTED_CORNER_MIN_WALL_DISTANCE_M
+                <= grid.path_obstacle_m
+                <= self.EXPECTED_CORNER_MAX_WALL_DISTANCE_M
+            )
+            or abs(grid.path_obstacle_bearing) > self.FORWARD_HAZARD_CONE_RAD
+            or not is_transverse_wall(grid, grid.path_obstacle_m, 0.50)
+        ):
+            return pose, False
+
+        start, target = segment
+        edge_x = target.x - start.x
+        edge_y = target.y - start.y
+        edge_length = math.hypot(edge_x, edge_y)
+        if edge_length <= 1e-6:
+            return pose, False
+        unit_x, unit_y = edge_x / edge_length, edge_y / edge_length
+        remaining_x = target.x - pose.x
+        remaining_y = target.y - pose.y
+        longitudinal_error = remaining_x * unit_x + remaining_y * unit_y
+        lateral_error = abs(remaining_x * unit_y - remaining_y * unit_x)
+        if not (
+            0.0 <= longitudinal_error <= self.EXPECTED_CORNER_MAX_POSE_ERROR_M
+            and lateral_error <= 0.55
+        ):
+            return pose, False
+
+        corrected = RobotPose(
+            x=pose.x + longitudinal_error * unit_x,
+            y=pose.y + longitudinal_error * unit_y,
+            yaw=pose.yaw,
+            timestamp=time.time(),
+        )
+        self._odometry.apply_pose_correction(corrected.x, corrected.y, corrected.yaw)
+        advanced = self._global_planner.advance_current_waypoint(
+            on_advance=self._notify_waypoint_advance,
+        )
+        if advanced is None:
+            return pose, False
+        self._local_planner.reset_navigation_state()
+        self._reset_progress_tracker()
+        logger.info(
+            "NavCore: expected transverse wall accepted metric corner %.2fm early; "
+            "starting the %+.0fdeg route turn",
+            longitudinal_error,
+            math.degrees(turn),
+        )
+        return corrected, True
+
     def _maybe_correct_metric_pose(
         self,
         grid: Optional[ObstacleGrid],
@@ -4241,13 +4502,19 @@ class NavCore:
             or abs(grid.path_obstacle_bearing) < math.radians(10.0)
         ):
             return False
-        waypoint = self._global_planner.get_current_waypoint()
-        if not isinstance(waypoint, MapNode):
-            return False
-        route_heading = math.atan2(
-            waypoint.y - pose.y,
-            waypoint.x - pose.x,
-        ) - pose.yaw
+        guidance_heading = self._global_planner.current_segment_guidance(pose)
+        if isinstance(guidance_heading, (int, float)) and math.isfinite(
+            guidance_heading
+        ):
+            route_heading = guidance_heading - pose.yaw
+        else:
+            waypoint = self._global_planner.get_current_waypoint()
+            if not isinstance(waypoint, MapNode):
+                return False
+            route_heading = math.atan2(
+                waypoint.y - pose.y,
+                waypoint.x - pose.x,
+            ) - pose.yaw
         route_heading = math.atan2(
             math.sin(route_heading),
             math.cos(route_heading),
@@ -4256,6 +4523,11 @@ class NavCore:
             grid,
             route_heading,
         )
+        mapped_side_clear = (
+            grid.path_obstacle_m >= self.MAPPED_SIDE_ROUTE_MIN_CLEARANCE_M
+            and abs(grid.path_obstacle_bearing) >= math.radians(30.0)
+        )
+        supported = supported or mapped_side_clear
         if supported:
             logger.debug(
                 "NavCore: treating parallel mapped wall at %+.0fdeg as side "
@@ -4276,6 +4548,7 @@ class NavCore:
         pose = self._odometry.get_pose()
         pose = self._maybe_correct_metric_pose(raw_grid, pose)
         geometry_grid = self._obstacle_memory.update(raw_grid, pose)
+        pose = self._maybe_align_heading_to_route_wall(raw_grid, pose)
         grid = self._filter_transient_path_obstacle(geometry_grid)
         self._log_obstacle_telemetry(raw_grid, geometry_grid, pose)
         self._update_progress(pose)
@@ -4324,6 +4597,11 @@ class NavCore:
                 self._poll_metric_replan(goal, pose)
                 self._maybe_replan_blocked_metric_route(goal, pose, grid)
             if goal.goal_type == "semantic":
+                if metric_route:
+                    pose, _ = self._accept_expected_metric_corner(
+                        pose,
+                        geometry_grid,
+                    )
                 waypoint = self._global_planner.get_next_waypoint(
                     pose,
                     self.SEMANTIC_ARRIVAL_TOLERANCE_M,
@@ -4362,6 +4640,14 @@ class NavCore:
                         math.sin(segment_heading - pose.yaw),
                         math.cos(segment_heading - pose.yaw),
                     )
+                guidance_heading = self._global_planner.current_segment_guidance(pose)
+                if isinstance(guidance_heading, (int, float)) and math.isfinite(
+                    guidance_heading
+                ):
+                    goal_dir = math.atan2(
+                        math.sin(guidance_heading - pose.yaw),
+                        math.cos(guidance_heading - pose.yaw),
+                    )
 
             cmd = self._local_planner.compute_velocity(
                 grid,
@@ -4376,7 +4662,11 @@ class NavCore:
             if goal.goal_type == "semantic":
                 # Stabilize route steering first.  Wall/corner clearance is a
                 # safety correction and must be able to take effect immediately.
-                corrected = self._local_planner.apply_corridor_course_correction(cmd, grid)
+                corrected = self._local_planner.apply_corridor_course_correction(
+                    cmd,
+                    grid,
+                    correction_limit=0.02 if metric_route else None,
+                )
                 if isinstance(corrected, VelocityCommand):
                     cmd = corrected
 

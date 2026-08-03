@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import Future
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -386,6 +387,15 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertAlmostEqual(cmd.vx, 0.0)
         self.assertAlmostEqual(cmd.vyaw, -0.5)
+
+        continuing = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(-8.0),
+            goal_distance=1.0,
+            pivot_heading=math.radians(-8.0),
+        )
+        self.assertAlmostEqual(continuing.vx, 0.0)
+        self.assertAlmostEqual(continuing.vyaw, -0.35)
 
     def test_pivot_remains_active_until_within_six_degrees(self):
         planner = LocalPlanner(pivot_yaw_rate=0.5)
@@ -805,6 +815,26 @@ class TestSafetyMonitor(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestGlobalPlanner(unittest.TestCase):
+
+    def test_metric_guidance_follows_segment_with_small_early_correction(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (2.0, 0.0), (2.0, -2.0), (4.0, 0.0)],
+        )
+
+        heading = planner.current_segment_guidance(RobotPose(0.5, 0.20, 0.0))
+        upcoming = planner.upcoming_turn()
+
+        self.assertAlmostEqual(heading, math.radians(-7.6), places=2)
+        self.assertIsNotNone(upcoming)
+        self.assertAlmostEqual(upcoming[2], math.radians(-90.0))
+        planner.advance_current_waypoint()
+        self.assertAlmostEqual(
+            planner.current_turn_change(),
+            math.radians(-90.0),
+        )
 
     def test_rejects_detour_that_is_both_a_u_turn_and_much_longer(self):
         pose = RobotPose(0.0, 0.0, 0.0)
@@ -1460,6 +1490,83 @@ class TestOdometryProvider(unittest.TestCase):
 
 class TestNavCoreStatus(unittest.TestCase):
 
+    def test_parallel_wall_reanchors_bad_initial_route_heading_after_confirmation(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, math.radians(26.0)),
+            "C",
+            [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)],
+        )
+        core._local_planner = LocalPlanner()
+        core._odometry = MagicMock()
+        core._route_wall_heading_candidate = None
+        core._route_wall_heading_readings = 0
+        grid = replace(
+            _grid_with_wall_right(0.8),
+            path_obstacle_m=float("inf"),
+            path_obstacle_bearing=0.0,
+        )
+        pose = RobotPose(0.0, 0.0, math.radians(26.0))
+
+        for _ in range(core.ROUTE_WALL_HEADING_CONFIRM_READINGS):
+            pose = core._maybe_align_heading_to_route_wall(grid, pose)
+
+        self.assertAlmostEqual(pose.yaw, 0.0, places=2)
+        core._odometry.apply_pose_correction.assert_called_once()
+
+    def test_expected_transverse_wall_advances_metric_corner_early(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (1.0, 0.0), (1.0, -1.0), (1.0, -2.0)],
+        )
+        core._local_planner = LocalPlanner()
+        core._odometry = MagicMock()
+        core._notify_status_change = MagicMock()
+        core._reset_progress_tracker = MagicMock()
+
+        corrected, accepted = core._accept_expected_metric_corner(
+            RobotPose(0.4, 0.0, 0.0),
+            _grid_with_wall_ahead(1.0),
+        )
+
+        self.assertTrue(accepted)
+        self.assertAlmostEqual(corrected.x, 1.0)
+        self.assertEqual(
+            core._global_planner.get_current_waypoint().name,
+            "__metric_002__",
+        )
+        core._odometry.apply_pose_correction.assert_called_once()
+
+    def test_mapped_clear_segment_keeps_moving_past_safe_side_reading(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)],
+        )
+        core._local_planner = LocalPlanner()
+        grid = replace(
+            _empty_grid(),
+            path_obstacle_m=0.35,
+            path_obstacle_bearing=math.radians(-45.0),
+            path_obstacle_points=20,
+        )
+
+        self.assertTrue(
+            core._parallel_wall_projection_is_clear(
+                grid,
+                RobotPose(0.5, 0.0, 0.0),
+            )
+        )
+
     def test_metric_transit_does_not_emit_agent_status_events(self):
         core = NavCore.__new__(NavCore)
         core._topo_map = _create_test_map()
@@ -1472,9 +1579,11 @@ class TestNavCoreStatus(unittest.TestCase):
             tags=["metric_transit"],
         )
 
+        core._global_planner = MagicMock()
+        core._global_planner.current_turn_change.return_value = 0.0
         core._notify_waypoint_advance(transit, core._topo_map.nodes["B"])
 
-        core._local_planner.reset_navigation_state.assert_called_once_with()
+        core._local_planner.reset_navigation_state.assert_not_called()
         core._notify_status_change.assert_not_called()
 
     def test_persistent_obstacle_schedules_background_metric_route(self):
@@ -1937,7 +2046,7 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._local_planner = MagicMock()
             nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
             nav._local_planner.apply_corridor_course_correction.side_effect = (
-                lambda cmd, _grid: cmd
+                lambda cmd, _grid, **_kwargs: cmd
             )
             nav._recover_from_stall = MagicMock(return_value=True)
             goal = NavGoal(
@@ -3026,7 +3135,7 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._local_planner = MagicMock()
             nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
             nav._local_planner.apply_corridor_course_correction.side_effect = (
-                lambda cmd, _grid: cmd
+                lambda cmd, _grid, **_kwargs: cmd
             )
             waypoint = MapNode(name="kitchen", x=2.0, y=0.0)
             nav._global_planner = MagicMock()
