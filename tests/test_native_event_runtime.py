@@ -20,6 +20,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn("route_navigation_status", source)
         event_source = (ROOT / "coded_tools/unigo2/agent_events.py").read_text()
         self.assertIn('"I arrived at "', event_source)
+        self.assertIn("publish_ui_output(thought=text, say=text)", event_source)
         self.assertIn('queue_agent_event(text, source="navigation")', event_source)
 
     def test_flask_is_not_an_agent_scheduler(self):

@@ -2280,6 +2280,50 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_ignores_repeated_false_17cm_path_metadata(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            false_close = replace(
+                _empty_grid(),
+                nearest_obstacle_m=0.70,
+                nearest_obstacle_bearing=math.radians(-45.0),
+                path_obstacle_m=0.17,
+                path_obstacle_bearing=math.radians(-15.0),
+                path_obstacle_points=6,
+            )
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = false_close
+            fake_depth.get_center_depth_reading.return_value = CenterDepthReading(
+                distance_m=1.50,
+                coverage=0.5,
+            )
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            for _ in range(10):
+                nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            self.assertIs(nav._goal, goal)
+            self.assertGreaterEqual(fake_go2.move.call_count, 1)
+            fake_go2.stop_move.assert_not_called()
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_nav_cycle_moves_past_close_side_obstacle(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True

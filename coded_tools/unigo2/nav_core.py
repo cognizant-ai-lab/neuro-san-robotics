@@ -4562,8 +4562,24 @@ class NavCore:
 
         path_dist = grid.path_obstacle_m if grid else float("inf")
         path_bearing = grid.path_obstacle_bearing if grid else 0.0
-        safety_dist = raw_grid.path_obstacle_m if raw_grid else float("inf")
-        safety_bearing = raw_grid.path_obstacle_bearing if raw_grid else 0.0
+        # Forward safety uses the temporally confirmed, center-corroborated
+        # path projection. Raw center depth is merged below as an independent
+        # safety channel. Feeding raw path metadata here let a single stray
+        # off-axis depth cluster bypass both filters and abort a clear route.
+        safety_dist = grid.path_obstacle_m if grid else float("inf")
+        safety_bearing = grid.path_obstacle_bearing if grid else 0.0
+        if (
+            raw_grid is not None
+            and raw_grid.path_obstacle_m <= self.SAFETY_DISTANCE_M
+            and abs(raw_grid.path_obstacle_bearing) <= self.FORWARD_HAZARD_CONE_RAD
+            and self._path_obstacle_matches_center_depth(
+                raw_grid.path_obstacle_m
+            )
+        ):
+            # A center-corroborated imminent obstacle holds motion immediately
+            # while the temporal tracker decides whether it is persistent.
+            safety_dist = raw_grid.path_obstacle_m
+            safety_bearing = raw_grid.path_obstacle_bearing
 
         # 2. Check if goal reached
         dist_to_goal = math.hypot(goal.x - pose.x, goal.y - pose.y)
@@ -5051,10 +5067,6 @@ class NavCore:
         pivot_only: bool = False,
     ) -> bool:
         """Hold briefly on borderline close obstacles to reject transient frames."""
-        if not pivot_only and abs(nearest_bearing) > self.FORWARD_HAZARD_CONE_RAD:
-            self._reset_close_obstacle_confirmation()
-            return False
-
         if self._center_only_close_pending:
             self._last_progress_time = time.monotonic()
             self._ensure_go2()
@@ -5143,7 +5155,10 @@ class NavCore:
         if not isinstance(center_dist, (int, float)) or not math.isfinite(center_dist):
             return True
 
-        return float(center_dist) <= max(max_depth, distance_m)
+        return float(center_dist) <= min(
+            max_depth,
+            distance_m + self.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M,
+        )
 
     @staticmethod
     def _without_path_obstacle(grid: ObstacleGrid) -> ObstacleGrid:

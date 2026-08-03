@@ -65,7 +65,11 @@ def route_navigation_status(text: str) -> None:
         "I could not ",
     )
     if text.startswith(terminal_prefixes):
-        queue_agent_event(text, source="navigation")
+        # Terminal motion outcomes must never disappear into an internal-only
+        # thought. Deliver the authoritative sentence to both UI and speech;
+        # retain the agent event only as a fallback if the UI bridge is down.
+        if not publish_ui_output(thought=text, say=text):
+            queue_agent_event(text, source="navigation")
 
 
 def latest_navigation_awareness() -> str:
