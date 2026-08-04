@@ -14,6 +14,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class NativeEventRuntimeTests(unittest.TestCase):
+
+    def test_only_terminal_navigation_updates_wake_agent(self):
+        source = (ROOT / "coded_tools/unigo2/nav_planner.py").read_text()
+        self.assertIn("route_navigation_status", source)
+        event_source = (ROOT / "coded_tools/unigo2/agent_events.py").read_text()
+        self.assertIn('"I arrived at "', event_source)
+        self.assertIn("publish_ui_output(thought=text, say=text)", event_source)
+        self.assertIn('queue_agent_event(text, source="navigation")', event_source)
+
     def test_flask_is_not_an_agent_scheduler(self):
         source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()
 

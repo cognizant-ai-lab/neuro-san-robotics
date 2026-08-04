@@ -3,6 +3,8 @@ import os
 import threading
 import time
 import unittest
+from concurrent.futures import Future
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -299,6 +301,25 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertGreater(corrected.vyaw, cmd.vyaw)
         self.assertLessEqual(corrected.vyaw - cmd.vyaw, 0.06)
 
+    def test_final_route_uses_single_wall_for_alignment_not_clearance_drift(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.30)
+        cmd = VelocityCommand(vx=0.30, vy=0.0, vyaw=0.0)
+        grid = self._corridor_grid(
+            slope=0.0,
+            center_offset=0.30,
+            include_right_wall=False,
+        )
+
+        ordinary = planner.apply_corridor_course_correction(cmd, grid)
+        final_route = planner.apply_corridor_course_correction(
+            cmd,
+            grid,
+            align_only=True,
+        )
+
+        self.assertNotAlmostEqual(ordinary.vyaw, 0.0)
+        self.assertAlmostEqual(final_route.vyaw, 0.0, places=3)
+
     def test_close_slanted_left_wall_steers_robot_right(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
         grid = _empty_grid()
@@ -314,6 +335,153 @@ class TestLocalPlanner(unittest.TestCase):
         )
 
         self.assertLess(corrected.vyaw, 0.0)
+
+    def test_converging_left_wall_overrides_route_command_toward_wall_early(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            # A left wall that draws inward with distance means the robot is
+            # angled toward it.  Its current clearance is still recoverable.
+            lateral = 0.65 - 0.12 * forward
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        route_toward_wall = VelocityCommand(vx=0.28, vy=0.0, vyaw=0.08)
+        corrected = planner.apply_corridor_course_correction(
+            route_toward_wall,
+            grid,
+            correction_limit=0.02,
+        )
+
+        self.assertAlmostEqual(corrected.vx, route_toward_wall.vx)
+        self.assertLess(corrected.vyaw, 0.0)
+        self.assertGreaterEqual(
+            corrected.vyaw,
+            -planner.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
+        )
+
+    def test_comfortably_distant_wall_does_not_reverse_mapped_route_steering(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            lateral = 0.95 - 0.05 * forward
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.28, vy=0.0, vyaw=0.08),
+            grid,
+            correction_limit=0.02,
+        )
+
+        self.assertGreater(corrected.vyaw, 0.0)
+
+    def test_final_route_alignment_does_not_use_side_clearance_override(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            lateral = 0.48 - 0.04 * forward
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.18, vy=0.0, vyaw=0.08),
+            grid,
+            correction_limit=0.02,
+            align_only=True,
+        )
+
+        self.assertGreater(corrected.vyaw, 0.0)
+
+    def test_parallel_side_wall_supports_straight_mapped_route(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = self._corridor_grid(
+            slope=0.02,
+            center_offset=0.0,
+            include_right_wall=False,
+        )
+
+        self.assertTrue(
+            planner.parallel_wall_supports_route(
+                grid,
+                route_heading=math.radians(2.0),
+            )
+        )
+
+    def test_steering_reversal_requires_persistent_request(self):
+        planner = LocalPlanner(max_yaw_rate=0.08)
+        planner.STEERING_REVERSAL_CONFIRM_CYCLES = 3
+        right = VelocityCommand(vx=0.2, vyaw=-0.08)
+        left = VelocityCommand(vx=0.2, vyaw=0.08)
+
+        self.assertEqual(
+            planner.stabilize_translating_steering(right).vyaw,
+            -0.08,
+        )
+        self.assertEqual(planner.stabilize_translating_steering(left).vyaw, 0.0)
+        self.assertEqual(planner.stabilize_translating_steering(left).vyaw, 0.0)
+        self.assertEqual(
+            planner.stabilize_translating_steering(left).vyaw,
+            0.08,
+        )
+
+    def test_pivot_direction_does_not_reverse_before_alignment(self):
+        planner = LocalPlanner(pivot_yaw_rate=0.5)
+
+        self.assertTrue(planner._should_pivot(math.radians(80.0), 2.0))
+        self.assertGreater(planner._pivot_yaw_rate(math.radians(80.0)), 0.0)
+        self.assertTrue(planner._should_pivot(math.radians(-40.0), 2.0))
+        self.assertGreater(planner._pivot_yaw_rate(math.radians(-40.0)), 0.0)
+
+        self.assertFalse(planner._should_pivot(math.radians(5.0), 2.0))
+        self.assertLess(planner._pivot_yaw_rate(math.radians(-40.0)), 0.0)
+
+    def test_open_space_centering_cannot_initiate_pivot_away_from_route(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, pivot_yaw_rate=0.5)
+
+        cmd = planner._compute_direct_velocity(
+            goal_direction=math.radians(45.0),
+            goal_distance=1.0,
+            path_nearest=3.0,
+            pivot_heading=math.radians(-10.0),
+        )
+
+        self.assertGreater(cmd.vx, 0.0)
+        self.assertAlmostEqual(cmd.vyaw, planner.max_yaw_rate)
+        self.assertFalse(planner._pivoting)
+
+    def test_mapped_segment_heading_drives_full_corner_pivot(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, pivot_yaw_rate=0.5)
+        grid = _empty_grid()
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(-42.0),
+            goal_distance=1.0,
+            pivot_heading=math.radians(-65.0),
+        )
+
+        self.assertAlmostEqual(cmd.vx, 0.0)
+        self.assertAlmostEqual(cmd.vyaw, -0.5)
+
+        continuing = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(-8.0),
+            goal_distance=1.0,
+            pivot_heading=math.radians(-8.0),
+        )
+        self.assertAlmostEqual(continuing.vx, 0.0)
+        self.assertAlmostEqual(continuing.vyaw, -0.35)
+
+    def test_pivot_remains_active_until_within_six_degrees(self):
+        planner = LocalPlanner(pivot_yaw_rate=0.5)
+
+        self.assertTrue(planner._should_pivot(math.radians(-65.0), 1.0))
+        self.assertTrue(planner._should_pivot(math.radians(-8.0), 1.0))
+        self.assertFalse(planner._should_pivot(math.radians(-5.0), 1.0))
 
     def test_route_heading_centers_before_reaching_close_right_wall(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
@@ -385,6 +553,86 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertAlmostEqual(cmd.vx, 0.0)
         self.assertGreater(cmd.vyaw, 0.0)
+
+    def test_moderate_transit_correction_keeps_moving(self):
+        planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
+
+        cmd = planner.compute_velocity(
+            _empty_grid(),
+            goal_direction=math.radians(24.0),
+            goal_distance=0.65,
+            slow_for_arrival=False,
+        )
+
+        self.assertGreater(cmd.vx, 0.0)
+        self.assertGreaterEqual(cmd.vx, planner.MIN_TRANSIT_SPEED_MPS)
+        self.assertGreater(cmd.vyaw, 0.0)
+
+    def test_clear_final_approach_keeps_small_correction_and_effective_speed(self):
+        planner = LocalPlanner(max_linear_speed=0.4, max_yaw_rate=0.08)
+        steering = VelocityCommand(vx=0.098, vy=0.0, vyaw=0.08)
+
+        cmd = planner.maintain_effective_final_approach(
+            steering,
+            _empty_grid(),
+            goal_distance=0.98,
+            arrival_tolerance=0.65,
+        )
+
+        self.assertAlmostEqual(cmd.vx, planner.MIN_EFFECTIVE_APPROACH_SPEED_MPS)
+        self.assertAlmostEqual(cmd.vyaw, steering.vyaw)
+
+    def test_pending_metric_arrival_keeps_effective_speed_inside_semantic_radius(self):
+        planner = LocalPlanner(max_linear_speed=0.4, max_yaw_rate=0.08)
+        steering = VelocityCommand(vx=0.063, vy=0.0, vyaw=0.02)
+
+        cmd = planner.maintain_effective_final_approach(
+            steering,
+            _empty_grid(),
+            goal_distance=0.63,
+            arrival_tolerance=GlobalPlanner.FINAL_METRIC_LONGITUDINAL_TOLERANCE_M,
+        )
+
+        self.assertAlmostEqual(cmd.vx, planner.MIN_EFFECTIVE_APPROACH_SPEED_MPS)
+        self.assertAlmostEqual(cmd.vyaw, steering.vyaw)
+
+    def test_final_approach_does_not_override_tight_clearance(self):
+        planner = LocalPlanner(max_linear_speed=0.4, max_yaw_rate=0.08)
+        grid = replace(_empty_grid(), path_obstacle_m=0.50)
+        steering = VelocityCommand(vx=0.098, vy=0.0, vyaw=0.08)
+
+        cmd = planner.maintain_effective_final_approach(
+            steering,
+            grid,
+            goal_distance=0.98,
+            arrival_tolerance=0.65,
+        )
+
+        self.assertEqual(cmd, steering)
+
+    def test_pivot_hysteresis_finishes_turn_without_threshold_oscillation(self):
+        planner = LocalPlanner(max_linear_speed=0.3, max_yaw_rate=0.08)
+        grid = _empty_grid()
+
+        entering = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(40.0),
+            goal_distance=1.0,
+        )
+        continuing = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(18.0),
+            goal_distance=1.0,
+        )
+        finished = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(5.0),
+            goal_distance=1.0,
+        )
+
+        self.assertAlmostEqual(entering.vx, 0.0)
+        self.assertAlmostEqual(continuing.vx, 0.0)
+        self.assertGreater(finished.vx, 0.0)
 
     def test_pivot_uses_configured_pivot_rate_independent_of_steering_limit(self):
         planner = LocalPlanner(
@@ -516,6 +764,37 @@ class TestLocalPlanner(unittest.TestCase):
 
         cmd = planner.compute_velocity(grid, goal_direction=0.0, goal_distance=0.3)
         self.assertLessEqual(cmd.vx, 0.1, "Should slow down near goal")
+
+    def test_does_not_slow_for_close_intermediate_route_point(self):
+        planner = LocalPlanner(max_linear_speed=0.3)
+        grid = _empty_grid()
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=0.0,
+            goal_distance=0.3,
+            slow_for_arrival=False,
+        )
+
+        self.assertAlmostEqual(cmd.vx, 0.3)
+
+    def test_close_intermediate_route_point_steers_through_without_pivoting(self):
+        planner = LocalPlanner(
+            max_linear_speed=0.3,
+            max_yaw_rate=0.08,
+            pivot_yaw_rate=0.5,
+        )
+        grid = _empty_grid()
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(45.0),
+            goal_distance=0.3,
+            slow_for_arrival=False,
+        )
+
+        self.assertGreater(cmd.vx, 0.1)
+        self.assertAlmostEqual(cmd.vyaw, 0.08)
 
     def test_avoidance_turns_away_from_obstacle(self):
         planner = LocalPlanner()
@@ -658,6 +937,90 @@ class TestSafetyMonitor(unittest.TestCase):
 
 class TestGlobalPlanner(unittest.TestCase):
 
+    def test_metric_guidance_follows_segment_with_small_early_correction(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (2.0, 0.0), (2.0, -2.0), (4.0, 0.0)],
+        )
+
+        heading = planner.current_segment_guidance(RobotPose(0.5, 0.20, 0.0))
+        upcoming = planner.upcoming_turn()
+
+        self.assertAlmostEqual(heading, math.radians(-7.6), places=2)
+        self.assertIsNotNone(upcoming)
+        self.assertAlmostEqual(upcoming[2], math.radians(-90.0))
+        planner.advance_current_waypoint()
+        self.assertAlmostEqual(
+            planner.current_turn_change(),
+            math.radians(-90.0),
+        )
+
+    def test_rejects_detour_that_is_both_a_u_turn_and_much_longer(self):
+        pose = RobotPose(0.0, 0.0, 0.0)
+        points = [(0.0, 0.0), (-1.0, 0.0), (-12.0, 0.0)]
+
+        self.assertFalse(
+            GlobalPlanner.metric_detour_is_reasonable(
+                pose,
+                points,
+                reference_length=6.0,
+                reference_bearing=0.0,
+            )
+        )
+
+    def test_allows_short_local_detour_even_when_it_starts_behind(self):
+        pose = RobotPose(0.0, 0.0, 0.0)
+        points = [(0.0, 0.0), (-0.3, 0.0), (5.5, 0.0)]
+
+        self.assertTrue(
+            GlobalPlanner.metric_detour_is_reasonable(
+                pose,
+                points,
+                reference_length=6.0,
+                reference_bearing=0.0,
+            )
+        )
+
+    def test_rejected_detour_does_not_replace_active_route(self):
+        topo = _create_test_map()
+        topo.metric_map = MagicMock()
+        topo.metric_map.plan_path.return_value = [
+            (0.0, 0.0),
+            (-1.0, 0.0),
+            (-12.0, 0.0),
+        ]
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (1.0, 0.0), (6.0, 0.0)],
+        )
+
+        path = planner.replan_path_around_obstacles(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            np.asarray([[0.5, 0.0]]),
+        )
+
+        self.assertIsNone(path)
+        self.assertAlmostEqual(planner.get_current_waypoint().x, 1.0)
+
+    def test_metric_transit_point_advances_within_route_following_tolerance(self):
+        topo = _create_test_map()
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (0.8, 0.0), (3.0, 0.0)],
+        )
+
+        waypoint = planner.get_next_waypoint(RobotPose(0.40, 0.0, 0.0))
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "C")
+
     def test_metric_map_routes_around_static_wall(self):
         topo = _create_test_map()
         occupied = np.zeros((30, 50), dtype=bool)
@@ -787,6 +1150,108 @@ class TestGlobalPlanner(unittest.TestCase):
 
         self.assertIsNone(wp)
 
+    def test_metric_final_does_not_arrive_at_outer_edge_of_radius(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "B",
+            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        )
+        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(2.40, 0.0, 0.0),
+            tolerance_m=0.65,
+        )
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "B")
+
+    def test_metric_final_arrives_after_crossing_aligned_entrance_gate(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "B",
+            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        )
+        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(2.75, 0.10, math.radians(5.0)),
+            tolerance_m=0.65,
+            final_arrival_sensor_confirmed=True,
+        )
+
+        self.assertIsNone(waypoint)
+
+    def test_metric_final_requires_independent_sensor_confirmation(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "B",
+            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        )
+        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
+
+        deferred = planner.get_next_waypoint(
+            RobotPose(2.75, 0.0, 0.0),
+            tolerance_m=0.65,
+            final_arrival_sensor_confirmed=False,
+        )
+
+        self.assertIsNotNone(deferred)
+        self.assertEqual(deferred.name, "B")
+
+    def test_metric_final_accepts_sensor_confirmed_pose_inside_arrival_radius(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "B",
+            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        )
+        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
+
+        arrived = planner.get_next_waypoint(
+            RobotPose(2.40, 0.0, 0.0),
+            tolerance_m=0.65,
+            final_arrival_sensor_confirmed=True,
+        )
+
+        self.assertIsNone(arrived)
+
+    def test_metric_final_rejects_wrong_heading_or_lateral_approach(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "B",
+            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        )
+        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
+
+        wrong_heading = planner.get_next_waypoint(
+            RobotPose(2.80, 0.0, math.radians(90.0)),
+            tolerance_m=0.65,
+        )
+        wide = planner.get_next_waypoint(
+            RobotPose(2.80, 0.50, 0.0),
+            tolerance_m=0.65,
+        )
+
+        self.assertIsNotNone(wrong_heading)
+        self.assertIsNotNone(wide)
+        self.assertEqual(wrong_heading.name, "B")
+        self.assertEqual(wide.name, "B")
+
     def test_get_next_waypoint_accepts_passed_intermediate_waypoint(self):
         topo = _create_test_map()
         topo.nodes["B"].pass_through_tolerance_m = 0.75
@@ -808,6 +1273,38 @@ class TestGlobalPlanner(unittest.TestCase):
 
         self.assertIsNotNone(wp)
         self.assertEqual(wp.name, "B")
+
+    def test_straight_metric_waypoint_accepts_corridor_width_pass(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (4.0, 0.0)],
+        )
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(1.10, 0.62, 0.0),
+            tolerance_m=0.45,
+        )
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "__metric_002__")
+
+    def test_metric_corner_keeps_tight_pass_tolerance(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (1.0, 0.0), (1.0, -1.0), (4.0, 0.0)],
+        )
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(1.10, 0.62, 0.0),
+            tolerance_m=0.45,
+        )
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "__metric_001__")
 
     def test_replan_does_not_reinstate_completed_waypoint(self):
         topo = _create_test_map()
@@ -841,6 +1338,90 @@ class TestTopologicalMap(unittest.TestCase):
         self.assertTrue(loaded)
         self.assertIsNotNone(topo.metric_map)
         self.assertGreater(topo.metric_map.occupied.size, 100_000)
+
+    def test_charging_pose_is_not_enclosed_by_its_map_annotation(self):
+        topo = TopologicalMap()
+        self.assertTrue(topo.load_from_file(str(DEFAULT_MAP_FILE)))
+        charging = topo.get_node("charging_station")
+        immersive = topo.get_node("immersive_room")
+
+        start_cell = topo.metric_map.world_to_cell(charging.x, charging.y)
+        self.assertGreater(float(topo.metric_map.distance_m[start_cell]), 0.75)
+        path = topo.metric_map.plan_path(
+            (charging.x, charging.y),
+            (immersive.x, immersive.y),
+        )
+
+        self.assertIsNotNone(path)
+        first_bearing = math.atan2(
+            path[1][1] - charging.y,
+            path[1][0] - charging.x,
+        )
+        heading = math.radians(charging.heading_degrees)
+        self.assertLess(
+            abs(math.atan2(math.sin(first_bearing - heading), math.cos(first_bearing - heading))),
+            math.radians(45.0),
+        )
+
+    def test_default_map_blocks_false_marker_4_to_f_core_shortcut(self):
+        topo = TopologicalMap()
+        self.assertTrue(topo.load_from_file(str(DEFAULT_MAP_FILE)))
+        marker_4 = topo.get_node("entrance")
+        immersive = topo.get_node("immersive_room")
+
+        path = topo.metric_map.plan_path(
+            (marker_4.x, marker_4.y),
+            (immersive.x, immersive.y),
+        )
+
+        self.assertIsNotNone(path)
+        self.assertFalse(
+            any(
+                9.9 <= x <= 16.9 and 10.0 <= y <= 30.2
+                for x, y in path
+            )
+        )
+
+    def test_default_map_routes_clear_of_fixed_furniture(self):
+        topo = TopologicalMap()
+        self.assertTrue(topo.load_from_file(str(DEFAULT_MAP_FILE)))
+        charging = topo.get_node("charging_station")
+        immersive = topo.get_node("immersive_room")
+        furniture = {
+            "conference table beyond B": (15.5, 17.9, 1.3, 5.5),
+            "kitchen table beside marker 0": (5.20, 8.40, 1.30, 4.70),
+            "south kitchen table": (2.60, 5.60, 0.00, 3.10),
+            "desk cluster near marker 9": (1.30, 5.70, 3.30, 7.35),
+            "desk cluster near marker 7": (1.20, 5.70, 8.30, 12.70),
+            "desk cluster near marker 2": (1.20, 5.70, 14.40, 18.00),
+            "desk cluster near marker 5": (0.60, 5.70, 23.70, 28.30),
+            "desk cluster near marker M": (0.50, 5.70, 28.50, 33.70),
+            "gathering-area tables": (3.00, 6.40, 38.60, 42.50),
+            "immersive flower desk": (21.00, 25.90, 7.60, 11.80),
+            "immersive lounge tables": (19.00, 26.30, 0.80, 6.60),
+            "ping-pong table": (17.7, 20.6, 6.8, 8.7),
+            "immersive-room half-circle desk": (18.8, 25.5, 13.2, 17.5),
+        }
+
+        path = topo.metric_map.plan_path(
+            (charging.x, charging.y),
+            (immersive.x, immersive.y),
+        )
+
+        self.assertIsNotNone(path)
+        for name, (x0, x1, y0, y1) in furniture.items():
+            center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+            row, col = topo.metric_map.world_to_cell(*center)
+            self.assertTrue(topo.metric_map.occupied[row, col], name)
+            margin = 0.25
+            self.assertFalse(
+                any(
+                    x0 - margin <= x <= x1 + margin
+                    and y0 - margin <= y <= y1 + margin
+                    for x, y in path
+                ),
+                name,
+            )
 
     def test_loads_map_declared_arrival_landmark(self):
         topo = TopologicalMap()
@@ -1091,6 +1672,27 @@ class TestOdometryProvider(unittest.TestCase):
         self.assertAlmostEqual(pose.x, 6.0, places=2)
         self.assertAlmostEqual(pose.y, 10.0, places=2)
 
+    def test_metric_correction_preserves_confirmed_sdk_odometry(self):
+        odom = SdkSportModeOdometryProvider(start_subscriber=False)
+        odom.set_pose(5.0, 10.0, 0.0)
+        odom._handle_sample(SimpleNamespace(
+            position=[0.0, 0.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0]),
+        ))
+        odom._handle_sample(SimpleNamespace(
+            position=[1.0, 0.0, 0.0],
+            imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.1]),
+        ))
+
+        odom.apply_pose_correction(6.1, 10.1, 0.08)
+
+        self.assertTrue(odom._sdk_translation_confirmed)
+        self.assertTrue(odom._sdk_yaw_confirmed)
+        self.assertTrue(odom.has_confirmed_translation())
+        pose = odom.get_pose()
+        self.assertAlmostEqual(pose.x, 6.1, places=2)
+        self.assertAlmostEqual(pose.y, 10.1, places=2)
+
     def test_sdk_translation_can_be_disabled_explicitly(self):
         with patch.dict(os.environ, {"NAV_USE_SDK_TRANSLATION_ODOMETRY": "0"}):
             odom = SdkSportModeOdometryProvider(start_subscriber=False)
@@ -1143,6 +1745,172 @@ class TestOdometryProvider(unittest.TestCase):
 
 class TestNavCoreStatus(unittest.TestCase):
 
+    def test_metric_arrival_requires_repeated_scan_to_map_consistency(self):
+        core = NavCore.__new__(NavCore)
+        metric_map = MagicMock()
+        metric_map.pose_consistency.return_value = (0.05, 0.80)
+        core._topo_map = SimpleNamespace(metric_map=metric_map)
+        core._arrival_map_consistency_readings = 0
+        core.ARRIVAL_MAP_MAX_SCORE_M = 0.16
+        core.ARRIVAL_MAP_MIN_MATCHED_FRACTION = 0.35
+        core.ARRIVAL_MAP_CONFIRM_READINGS = 2
+        grid = _grid_with_wall_right(0.8)
+        pose = RobotPose(6.75, 5.75, math.radians(-90.0))
+
+        first = core._metric_arrival_sensor_is_confirmed(grid, pose)
+        second = core._metric_arrival_sensor_is_confirmed(grid, pose)
+
+        self.assertFalse(first)
+        self.assertTrue(second)
+        self.assertEqual(metric_map.pose_consistency.call_count, 2)
+
+        metric_map.pose_consistency.return_value = (0.40, 0.05)
+        self.assertFalse(core._metric_arrival_sensor_is_confirmed(grid, pose))
+        self.assertEqual(core._arrival_map_consistency_readings, 0)
+
+    def test_parallel_wall_reanchors_bad_initial_route_heading_after_confirmation(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, math.radians(26.0)),
+            "C",
+            [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)],
+        )
+        core._local_planner = LocalPlanner()
+        core._odometry = MagicMock()
+        core._route_wall_heading_candidate = None
+        core._route_wall_heading_readings = 0
+        grid = replace(
+            _grid_with_wall_right(0.8),
+            path_obstacle_m=float("inf"),
+            path_obstacle_bearing=0.0,
+        )
+        pose = RobotPose(0.0, 0.0, math.radians(26.0))
+
+        for _ in range(core.ROUTE_WALL_HEADING_CONFIRM_READINGS):
+            pose = core._maybe_align_heading_to_route_wall(grid, pose)
+
+        self.assertAlmostEqual(pose.yaw, 0.0, places=2)
+        core._odometry.apply_pose_correction.assert_called_once()
+
+    def test_parallel_wall_does_not_reanchor_on_final_destination_segment(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, math.radians(14.0)),
+            "C",
+            [(0.0, 0.0), (4.0, 0.0)],
+        )
+        core._local_planner = LocalPlanner()
+        core._odometry = MagicMock()
+        core._route_wall_heading_candidate = None
+        core._route_wall_heading_readings = 0
+        grid = replace(
+            _grid_with_wall_right(0.8),
+            path_obstacle_m=float("inf"),
+            path_obstacle_bearing=0.0,
+        )
+        pose = RobotPose(3.0, 0.0, math.radians(14.0))
+
+        for _ in range(core.ROUTE_WALL_HEADING_CONFIRM_READINGS):
+            pose = core._maybe_align_heading_to_route_wall(grid, pose)
+
+        self.assertAlmostEqual(pose.yaw, math.radians(14.0), places=2)
+        core._odometry.apply_pose_correction.assert_not_called()
+
+    def test_parallel_wall_does_not_reanchor_late_metric_transit_segment(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, math.radians(20.0)),
+            "C",
+            [(float(index), 0.0) for index in range(7)],
+        )
+        for _ in range(3):
+            core._global_planner.advance_current_waypoint()
+        self.assertEqual(
+            core._global_planner.get_current_waypoint().name,
+            "__metric_004__",
+        )
+        core._local_planner = LocalPlanner()
+        core._odometry = MagicMock()
+        core._route_wall_heading_candidate = None
+        core._route_wall_heading_readings = 0
+        grid = replace(
+            _grid_with_wall_right(0.8),
+            path_obstacle_m=float("inf"),
+            path_obstacle_bearing=0.0,
+        )
+        pose = RobotPose(4.0, 0.0, math.radians(20.0))
+
+        for _ in range(core.ROUTE_WALL_HEADING_CONFIRM_READINGS):
+            pose = core._maybe_align_heading_to_route_wall(grid, pose)
+
+        self.assertAlmostEqual(pose.yaw, math.radians(20.0), places=2)
+        core._odometry.apply_pose_correction.assert_not_called()
+
+    def test_expected_transverse_wall_advances_metric_corner_early(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (1.0, 0.0), (1.0, -1.0), (1.0, -2.0)],
+        )
+        core._local_planner = LocalPlanner()
+        core._odometry = MagicMock()
+        core._notify_status_change = MagicMock()
+        core._reset_progress_tracker = MagicMock()
+
+        corrected, accepted = core._accept_expected_metric_corner(
+            RobotPose(0.4, 0.0, 0.0),
+            _grid_with_wall_ahead(1.0),
+        )
+
+        self.assertTrue(accepted)
+        self.assertAlmostEqual(corrected.x, 1.0)
+        self.assertEqual(
+            core._global_planner.get_current_waypoint().name,
+            "__metric_002__",
+        )
+        core._odometry.apply_pose_correction.assert_called_once()
+
+    def test_mapped_clear_segment_keeps_moving_past_safe_side_reading(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)],
+        )
+        core._local_planner = LocalPlanner()
+        grid = replace(
+            _empty_grid(),
+            path_obstacle_m=0.55,
+            path_obstacle_bearing=math.radians(-45.0),
+            path_obstacle_points=20,
+        )
+
+        self.assertTrue(
+            core._parallel_wall_projection_is_clear(
+                grid,
+                RobotPose(0.5, 0.0, 0.0),
+            )
+        )
+
+        close_grid = replace(grid, path_obstacle_m=0.35)
+        self.assertFalse(
+            core._parallel_wall_projection_is_clear(
+                close_grid,
+                RobotPose(0.5, 0.0, 0.0),
+            )
+        )
+
     def test_metric_transit_does_not_emit_agent_status_events(self):
         core = NavCore.__new__(NavCore)
         core._topo_map = _create_test_map()
@@ -1155,25 +1923,40 @@ class TestNavCoreStatus(unittest.TestCase):
             tags=["metric_transit"],
         )
 
+        core._global_planner = MagicMock()
+        core._global_planner.current_turn_change.return_value = 0.0
         core._notify_waypoint_advance(transit, core._topo_map.nodes["B"])
 
-        core._local_planner.reset_navigation_state.assert_called_once_with()
+        core._local_planner.reset_navigation_state.assert_not_called()
         core._notify_status_change.assert_not_called()
 
-    def test_persistent_obstacle_proactively_replaces_metric_route(self):
+    def test_persistent_obstacle_schedules_background_metric_route(self):
         core = NavCore.__new__(NavCore)
         metric_map = MagicMock()
         metric_map.robot_points_to_world.return_value = np.asarray([[1.0, 0.0]])
-        core._topo_map = SimpleNamespace(metric_map=metric_map)
-        core._global_planner = MagicMock()
         safe_goal = MapNode(name="kitchen", x=3.8, y=1.2)
-        core._global_planner.replan_path_around_obstacles.return_value = [safe_goal]
+        core._topo_map = SimpleNamespace(
+            metric_map=metric_map,
+            get_node=MagicMock(return_value=safe_goal),
+        )
+        core._global_planner = MagicMock()
+        core._global_planner.get_current_waypoint.return_value = MapNode(
+            name="__metric_001__", x=2.0, y=0.0
+        )
+        core._global_planner.remaining_metric_route.return_value = (4.0, 0.0)
         core._local_planner = MagicMock()
         core._reset_progress_tracker = MagicMock()
+        core._metric_replan_executor = MagicMock()
+        pending = Future()
+        core._metric_replan_executor.submit.return_value = pending
+        core._metric_replan_future = None
+        core._metric_replan_context = None
         core._path_obstacle_active = True
-        core._path_obstacle_active_since = time.monotonic() - 2.0
+        core._path_obstacle_active_since = time.monotonic() - 3.0
         core._path_obstacle_clear_since = None
         core._last_metric_replan_time = 0.0
+        core._last_translation_progress_time = time.monotonic() - 3.0
+        core._last_motion_command = VelocityCommand(vx=0.2)
         goal = NavGoal(goal_type="semantic", x=4.0, y=1.0, label="Kitchen")
         pose = RobotPose(0.0, 0.0, 0.0)
 
@@ -1184,14 +1967,36 @@ class TestNavCoreStatus(unittest.TestCase):
         )
 
         self.assertTrue(replanned)
-        self.assertEqual((goal.x, goal.y), (3.8, 1.2))
-        core._global_planner.replan_path_around_obstacles.assert_called_once()
-        core._local_planner.reset_navigation_state.assert_called_once_with()
-        core._reset_progress_tracker.assert_called_once_with(
-            reset_recovery_attempts=False
+        self.assertIs(core._metric_replan_future, pending)
+        self.assertEqual((goal.x, goal.y), (4.0, 1.0))
+        core._metric_replan_executor.submit.assert_called_once()
+        core._local_planner.reset_navigation_state.assert_not_called()
+
+    def test_metric_replan_is_not_scheduled_during_route_pivot(self):
+        core = NavCore.__new__(NavCore)
+        metric_map = MagicMock()
+        core._topo_map = SimpleNamespace(metric_map=metric_map)
+        core._global_planner = MagicMock()
+        core._global_planner.get_current_waypoint.return_value = MapNode(
+            name="__metric_001__", x=0.0, y=2.0
+        )
+        core._metric_replan_future = None
+        core._path_obstacle_active = True
+        core._path_obstacle_active_since = time.monotonic() - 3.0
+        core._last_metric_replan_time = 0.0
+        core._last_translation_progress_time = time.monotonic() - 3.0
+        core._last_motion_command = VelocityCommand(vyaw=0.5)
+
+        scheduled = core._maybe_replan_blocked_metric_route(
+            NavGoal(goal_type="semantic", x=4.0, y=1.0, label="Kitchen"),
+            RobotPose(0.0, 0.0, 0.0),
+            _grid_with_wall_ahead(0.6),
         )
 
-    def test_remote_control_release_accepts_current_route_segment(self):
+        self.assertFalse(scheduled)
+        metric_map.robot_points_to_world.assert_not_called()
+
+    def test_remote_control_release_preserves_pose_and_plans_fresh_route(self):
         core = NavCore.__new__(NavCore)
         core._manual_override_active = False
         core._state_lock = threading.Lock()
@@ -1204,17 +2009,19 @@ class TestNavCoreStatus(unittest.TestCase):
         core._odometry.get_pose.return_value = measured_pose
         core._notify_status_change = MagicMock()
         core._reset_progress_tracker = MagicMock()
+        core._local_planner = MagicMock()
         goal = NavGoal(x=3.0, y=4.0, goal_type="semantic", label="C")
 
         self.assertTrue(core._handle_manual_override(goal))
         self.assertFalse(core._handle_manual_override(goal))
 
-        core._odometry.set_pose.assert_called_once_with(1.5, 0.0, 0.0)
+        core._odometry.set_pose.assert_not_called()
         core._reset_progress_tracker.assert_called_once_with()
         self.assertIn(
-            "route from A to B",
+            "preserved the corrected position and heading",
             core._notify_status_change.call_args.args[0],
         )
+        self.assertEqual(core._global_planner._current_path[-1].name, "C")
 
     def test_remote_control_release_does_not_abort_without_route_edge(self):
         core = NavCore.__new__(NavCore)
@@ -1227,15 +2034,46 @@ class TestNavCoreStatus(unittest.TestCase):
         core._odometry.get_pose.return_value = RobotPose(1.0, 1.0, 0.4)
         core._notify_status_change = MagicMock()
         core._reset_progress_tracker = MagicMock()
+        core._local_planner = MagicMock()
         goal = NavGoal(x=3.0, y=1.0, goal_type="semantic", label="B")
 
         self.assertFalse(core._handle_manual_override(goal))
 
-        core._odometry.set_pose.assert_called_once_with(1.0, 1.0, 0.0)
+        core._odometry.set_pose.assert_not_called()
         self.assertIn(
             "continuing toward B",
             core._notify_status_change.call_args.args[0],
         )
+
+    def test_remote_course_correction_realigns_badly_drifted_map_heading(self):
+        core = NavCore.__new__(NavCore)
+        core._manual_override_active = False
+        core._manual_override_start_pose = None
+        core._state_lock = threading.Lock()
+        core._global_planner = MagicMock()
+        first_target = MapNode(name="__metric_001__", x=1.0, y=-4.0)
+        core._global_planner.plan_path.return_value = [
+            MapNode(name="start", x=0.0, y=0.0),
+            first_target,
+            MapNode(name="kitchen", x=2.0, y=-5.0),
+        ]
+        start_pose = RobotPose(0.0, 0.0, math.radians(-95.0))
+        released_pose = RobotPose(0.0, 0.0, math.radians(-6.0))
+        core._odometry = MagicMock()
+        core._odometry.is_manual_control_active.side_effect = [True, False]
+        core._odometry.get_pose.side_effect = [start_pose, released_pose]
+        core._notify_status_change = MagicMock()
+        core._reset_progress_tracker = MagicMock()
+        core._local_planner = MagicMock()
+        goal = NavGoal(goal_type="semantic", label="kitchen")
+
+        self.assertTrue(core._handle_manual_override(goal))
+        self.assertFalse(core._handle_manual_override(goal))
+
+        expected_yaw = math.atan2(-4.0, 1.0)
+        corrected = core._odometry.apply_pose_correction.call_args.args
+        self.assertAlmostEqual(corrected[2], expected_yaw)
+        self.assertIsNone(core._manual_override_start_pose)
 
     def test_robot_navigation_defaults_are_in_code(self):
         self.assertAlmostEqual(NavCore.MAX_LINEAR_SPEED, 0.40)
@@ -1243,7 +2081,7 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.PIVOT_YAW_RATE, 0.50)
         self.assertAlmostEqual(NavCore.SAFETY_DISTANCE_M, 0.20)
         self.assertAlmostEqual(NavCore.AVOIDANCE_DISTANCE_M, 0.75)
-        self.assertAlmostEqual(NavCore.PIVOT_HARD_STOP_DISTANCE_M, 0.00)
+        self.assertAlmostEqual(NavCore.PIVOT_HARD_STOP_DISTANCE_M, 0.40)
         self.assertAlmostEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_S, 0.7)
         self.assertEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS, 6)
         self.assertAlmostEqual(NavCore.PATH_OBSTACLE_CONFIRM_S, 0.3)
@@ -1527,6 +2365,59 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_semantic_close_obstacle_attempts_recovery_before_estop(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        original_confirm_s = NavCore.CLOSE_OBSTACLE_CONFIRM_S
+        NavCore.CLOSE_OBSTACLE_CONFIRM_S = 0.0
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            blocked = _grid_with_wall_ahead(distance_m=0.08)
+            nav._depth_processor = MagicMock()
+            nav._depth_processor.get_obstacle_grid.return_value = blocked
+            nav._filter_transient_path_obstacle = lambda grid: grid
+            nav._global_planner = MagicMock()
+            nav._global_planner.get_next_waypoint.return_value = MapNode(
+                name="__metric_001__",
+                x=2.0,
+                y=0.0,
+                tags=["metric_transit"],
+            )
+            nav._global_planner.current_segment.return_value = None
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
+            nav._local_planner.apply_corridor_course_correction.side_effect = (
+                lambda cmd, _grid, **_kwargs: cmd
+            )
+            nav._recover_from_stall = MagicMock(return_value=True)
+            goal = NavGoal(
+                goal_type="semantic",
+                x=2.0,
+                y=0.0,
+                label="Immersive Room",
+            )
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            for _ in range(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS):
+                nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            self.assertIs(nav._goal, goal)
+            nav._recover_from_stall.assert_called_once()
+            fake_go2.stop_move.assert_called()
+            nav.shutdown()
+        finally:
+            NavCore.CLOSE_OBSTACLE_CONFIRM_S = original_confirm_s
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_nav_cycle_defers_transient_close_obstacle_before_estop(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
@@ -1729,6 +2620,50 @@ class TestNavCoreStatus(unittest.TestCase):
             NavCore.set_status_callback(None)
             NavCore.PATH_OBSTACLE_CONFIRM_S = original_confirm_s
             NavCore.PATH_OBSTACLE_CONFIRM_READINGS = original_confirm_readings
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_ignores_repeated_false_17cm_path_metadata(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            false_close = replace(
+                _empty_grid(),
+                nearest_obstacle_m=0.70,
+                nearest_obstacle_bearing=math.radians(-45.0),
+                path_obstacle_m=0.17,
+                path_obstacle_bearing=math.radians(-15.0),
+                path_obstacle_points=6,
+            )
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = false_close
+            fake_depth.get_center_depth_reading.return_value = CenterDepthReading(
+                distance_m=1.50,
+                coverage=0.5,
+            )
+            nav._depth_processor = fake_depth
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            for _ in range(10):
+                nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            self.assertIs(nav._goal, goal)
+            self.assertGreaterEqual(fake_go2.move.call_count, 1)
+            fake_go2.stop_move.assert_not_called()
+            nav.shutdown()
+        finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
@@ -1936,7 +2871,7 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
-    def test_nav_cycle_allows_pivot_before_translation_near_obstacle(self, mock_go2):
+    def test_nav_cycle_holds_pivot_when_leg_sweep_is_near_obstacle(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
         mock_go2.return_value = fake_go2
@@ -1962,10 +2897,8 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.NAVIGATING)
-            fake_go2.move.assert_called()
-            self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
-            self.assertGreater(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
-            fake_go2.stop_move.assert_not_called()
+            fake_go2.move.assert_not_called()
+            fake_go2.stop_move.assert_called_once()
             self.assertEqual(events, [])
             nav.shutdown()
         finally:
@@ -2041,8 +2974,8 @@ class TestNavCoreStatus(unittest.TestCase):
             pose = nav._odometry.get_pose()
             self.assertAlmostEqual(pose.x, 3.0, places=2)
             self.assertAlmostEqual(pose.y, 0.2, places=2)
-            self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
-            self.assertGreater(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
+            fake_go2.move.assert_not_called()
+            fake_go2.stop_move.assert_called_once()
             self.assertTrue(any("reached turn" in event for event in events))
             self.assertEqual(nav._global_planner.current_segment()[1].name, "goal")
             nav.shutdown()
@@ -2204,7 +3137,7 @@ class TestNavCoreStatus(unittest.TestCase):
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
-    def test_nav_cycle_pivot_only_cannot_mask_translation_stall(self, mock_go2):
+    def test_nav_cycle_measured_pivot_progress_does_not_trigger_translation_stall(self, mock_go2):
         fake_go2 = MagicMock()
         fake_go2.available = True
         mock_go2.return_value = fake_go2
@@ -2242,15 +3175,10 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
             self.assertEqual(nav.state, NavState.NAVIGATING)
-            self.assertEqual(
-                events,
-                [
-                    "I stalled while heading to Kitchen. I stepped left, turned "
-                    "right, rerouted, and am continuing."
-                ],
-            )
-            fake_go2.stop_move.assert_called()
-            fake_go2.move.assert_not_called()
+            self.assertEqual(events, [])
+            fake_go2.move.assert_called()
+            self.assertAlmostEqual(fake_go2.move.call_args.kwargs["vx"], 0.0)
+            self.assertGreater(fake_go2.move.call_args.kwargs["vyaw"], 0.0)
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
@@ -2448,11 +3376,15 @@ class TestNavCoreStatus(unittest.TestCase):
         nav._state = NavState.NAVIGATING
         nav._state_lock = threading.Lock()
         nav._execute_stall_escape = MagicMock(return_value=None)
+        nav._execute_stall_turn_scan = MagicMock(return_value=None)
+        nav._depth_processor = MagicMock()
+        nav._depth_processor.get_obstacle_grid.return_value = blocked_grid = _empty_grid()
         nav._reset_progress_tracker = MagicMock()
         nav._notify_status_change = MagicMock()
         goal = NavGoal(goal_type="semantic", label="Kitchen")
 
-        recovered = nav._recover_from_stall(goal, RobotPose(), _empty_grid())
+        blocked_grid.path_obstacle_m = 0.50
+        recovered = nav._recover_from_stall(goal, RobotPose(), blocked_grid)
 
         self.assertTrue(recovered)
         self.assertEqual(nav._stuck_recovery_attempts, 1)
@@ -2463,6 +3395,97 @@ class TestNavCoreStatus(unittest.TestCase):
             "pause and try again",
             nav._notify_status_change.call_args.args[0],
         )
+
+    def test_failed_translation_escape_turns_and_reroutes(self):
+        nav = NavCore.__new__(NavCore)
+        nav.MAX_STUCK_RECOVERY_ATTEMPTS = 2
+        nav._stuck_recovery_attempts = 0
+        nav._state = NavState.NAVIGATING
+        nav._state_lock = threading.Lock()
+        nav._last_stop_reason = None
+        nav._path_obstacle_active = True
+        nav._path_obstacle_active_since = 1.0
+        nav._path_obstacle_clear_since = None
+        nav._execute_stall_escape = MagicMock(return_value=None)
+        turned_pose = RobotPose(1.0, 2.0, math.radians(-35.0))
+        nav._execute_stall_turn_scan = MagicMock(
+            return_value=(turned_pose, "right")
+        )
+        blocked_grid = _empty_grid()
+        blocked_grid.path_obstacle_m = 0.20
+        nav._depth_processor = MagicMock()
+        nav._depth_processor.get_obstacle_grid.return_value = blocked_grid
+        nav._fresh_obstacle_grid = MagicMock(return_value=blocked_grid)
+        nav._global_planner = MagicMock()
+        nav._global_planner.get_current_waypoint.return_value = MapNode(
+            name="goal", x=3.0, y=2.0
+        )
+        nav._go2 = MagicMock(available=True)
+        nav._ensure_go2 = MagicMock()
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        nav._notify_status_change = MagicMock()
+        goal = NavGoal(goal_type="relative", x=3.0, y=2.0, label="Kitchen")
+
+        recovered = nav._recover_from_stall(goal, RobotPose(), blocked_grid)
+
+        self.assertTrue(recovered)
+        self.assertEqual(nav._stuck_recovery_attempts, 1)
+        nav._execute_stall_turn_scan.assert_called_once_with(goal, blocked_grid)
+        self.assertIn(
+            "turned right, rerouted",
+            nav._notify_status_change.call_args.args[0],
+        )
+
+    def test_clear_stall_near_transit_point_advances_without_escape_or_replan(self):
+        nav = NavCore.__new__(NavCore)
+        nav.MAX_STUCK_RECOVERY_ATTEMPTS = 2
+        nav.CLEAR_STALL_TRANSIT_SKIP_M = 0.65
+        nav.AVOIDANCE_DISTANCE_M = 0.75
+        nav._stuck_recovery_attempts = 0
+        nav._clear_motion_recovery_attempts = 0
+        nav._state = NavState.NAVIGATING
+        nav._state_lock = threading.Lock()
+        nav._go2 = MagicMock(available=True)
+        nav._go2.recover_locomotion.return_value = True
+        nav._ensure_go2 = MagicMock()
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        nav._notify_status_change = MagicMock()
+        nav._notify_waypoint_advance = MagicMock()
+        nav._execute_stall_escape = MagicMock()
+        transit = MapNode(
+            name="__metric_003__",
+            x=0.55,
+            y=0.0,
+            tags=["metric_transit"],
+        )
+        upcoming = MapNode(
+            name="__metric_004__",
+            x=1.35,
+            y=0.0,
+            tags=["metric_transit"],
+        )
+        nav._global_planner = MagicMock()
+        nav._global_planner.get_current_waypoint.return_value = transit
+        nav._global_planner.advance_current_waypoint.return_value = (
+            transit,
+            upcoming,
+        )
+
+        recovered = nav._recover_from_stall(
+            NavGoal(goal_type="semantic", label="immersive_room"),
+            RobotPose(),
+            _empty_grid(),
+        )
+
+        self.assertTrue(recovered)
+        nav._execute_stall_escape.assert_not_called()
+        nav._global_planner.advance_current_waypoint.assert_called_once()
+        nav._local_planner.reset_navigation_state.assert_called_once()
+        self.assertEqual(nav._stuck_recovery_attempts, 0)
+        self.assertEqual(nav._clear_motion_recovery_attempts, 1)
+        nav._go2.recover_locomotion.assert_called_once()
 
     def test_rotation_does_not_reset_stall_recovery_attempts(self):
         nav = NavCore.__new__(NavCore)
@@ -2493,12 +3516,15 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._go2 = fake_go2
 
             fake_depth = MagicMock()
-            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            blocked_grid = _empty_grid()
+            blocked_grid.path_obstacle_m = 0.50
+            fake_depth.get_obstacle_grid.return_value = blocked_grid
             nav._depth_processor = fake_depth
+            nav._filter_transient_path_obstacle = lambda grid: grid
             nav._local_planner = MagicMock()
             nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
             nav._local_planner.apply_corridor_course_correction.side_effect = (
-                lambda cmd, _grid: cmd
+                lambda cmd, _grid, **_kwargs: cmd
             )
             waypoint = MapNode(name="kitchen", x=2.0, y=0.0)
             nav._global_planner = MagicMock()
@@ -2522,6 +3548,10 @@ class TestNavCoreStatus(unittest.TestCase):
                 nav._goal = goal
                 nav._last_progress_pose = nav._odometry.get_pose()
                 nav._last_progress_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+                nav._last_translation_progress_pose = nav._odometry.get_pose()
+                nav._last_translation_progress_time = (
+                    time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+                )
 
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
@@ -2530,6 +3560,8 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertEqual(
                 events,
                 [
+                    "I encountered an obstacle in my path at 0.50 meters while "
+                    "heading to Kitchen. My local planner is navigating around it.",
                     "I stalled while heading to Kitchen. I stepped left, turned "
                     "right, rerouted, and am continuing."
                 ],
@@ -2562,8 +3594,11 @@ class TestNavCoreStatus(unittest.TestCase):
             nav._go2 = fake_go2
 
             fake_depth = MagicMock()
-            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            blocked_grid = _empty_grid()
+            blocked_grid.path_obstacle_m = 0.50
+            fake_depth.get_obstacle_grid.return_value = blocked_grid
             nav._depth_processor = fake_depth
+            nav._filter_transient_path_obstacle = lambda grid: grid
             nav._local_planner = MagicMock()
             nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
 
@@ -2574,6 +3609,10 @@ class TestNavCoreStatus(unittest.TestCase):
                 nav._stuck_recovery_attempts = nav.MAX_STUCK_RECOVERY_ATTEMPTS
                 nav._last_progress_pose = nav._odometry.get_pose()
                 nav._last_progress_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+                nav._last_translation_progress_pose = nav._odometry.get_pose()
+                nav._last_translation_progress_time = (
+                    time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+                )
 
             nav._nav_cycle(NavState.NAVIGATING, goal)
 
@@ -2581,7 +3620,11 @@ class TestNavCoreStatus(unittest.TestCase):
             self.assertIsNone(nav._goal)
             self.assertEqual(
                 events,
-                ["I stopped before reaching Kitchen because I was not making progress."],
+                [
+                    "I encountered an obstacle in my path at 0.50 meters while "
+                    "heading to Kitchen. My local planner is navigating around it.",
+                    "I stopped before reaching Kitchen because I was not making progress.",
+                ],
             )
             fake_depth.stop.assert_called()
             nav.shutdown()
@@ -2589,6 +3632,330 @@ class TestNavCoreStatus(unittest.TestCase):
             NavCore.set_status_callback(None)
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_clear_path_motion_failure_never_uses_obstacle_recovery(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        events = []
+        NavCore.set_status_callback(events.append)
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
+            nav._execute_stall_escape = MagicMock()
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            stale_time = time.monotonic() - nav.STUCK_TIMEOUT_S - 1.0
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._clear_motion_recovery_attempts = (
+                    nav.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS
+                )
+                nav._last_progress_time = stale_time
+                nav._last_translation_progress_time = stale_time
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.STUCK)
+            nav._execute_stall_escape.assert_not_called()
+            self.assertEqual(
+                events,
+                [
+                    "I stopped before reaching Kitchen because the path was clear, "
+                    "but locomotion recovery could not be verified. locomotion "
+                    "recovery completed, but subsequent commands still produced no "
+                    "measured translation"
+                ],
+            )
+            nav.shutdown()
+        finally:
+            NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_clear_path_motion_watchdog_recovers_before_general_stall_timeout(
+        self,
+        mock_go2,
+    ):
+        fake_go2 = MagicMock(available=True)
+        fake_go2.recover_locomotion.return_value = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = _empty_grid()
+            nav._depth_processor = fake_depth
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
+            nav._execute_stall_escape = MagicMock()
+
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._last_translation_progress_time = (
+                    time.monotonic() - nav.CLEAR_MOTION_ACK_TIMEOUT_S - 0.1
+                )
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            fake_go2.recover_locomotion.assert_called_once()
+            nav._execute_stall_escape.assert_not_called()
+            self.assertEqual(nav._clear_motion_recovery_attempts, 1)
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertGreaterEqual(
+                fake_go2.move.call_args.kwargs["vx"],
+                nav.LOCOMOTION_VERIFICATION_SPEED_MPS,
+            )
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    def test_second_clear_motion_recovery_reinitializes_client_and_preserves_route(self):
+        nav = NavCore.__new__(NavCore)
+        nav.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS = 2
+        nav.AVOIDANCE_DISTANCE_M = 0.75
+        nav.CLEAR_STALL_TRANSIT_SKIP_M = 0.65
+        nav._clear_motion_recovery_attempts = 1
+        nav._stuck_recovery_attempts = 0
+        nav._locomotion_recovery_verification_pending = (
+            "soft locomotion-mode reset"
+        )
+        nav._locomotion_recovery_error = None
+        nav._state = NavState.NAVIGATING
+        nav._state_lock = threading.Lock()
+        nav._last_stop_reason = None
+        nav._last_motion_command = VelocityCommand(vx=0.2)
+        nav._go2 = MagicMock(available=True)
+        nav._go2.reinitialize_locomotion.return_value = True
+        nav._ensure_go2 = MagicMock()
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        nav._notify_status_change = MagicMock()
+        destination = MapNode(name="kitchen", x=2.0, y=0.0)
+        nav._global_planner = MagicMock()
+        nav._global_planner.get_current_waypoint.return_value = destination
+        pose = RobotPose(1.0, 0.2, 0.3)
+
+        recovered = nav._recover_from_stall(
+            NavGoal(goal_type="semantic", x=2.0, y=0.0, label="Kitchen"),
+            pose,
+            _empty_grid(),
+        )
+
+        self.assertTrue(recovered)
+        nav._go2.reinitialize_locomotion.assert_called_once()
+        nav._go2.recover_locomotion.assert_not_called()
+        nav._global_planner.clear.assert_not_called()
+        nav._global_planner.advance_current_waypoint.assert_not_called()
+        self.assertIs(nav._global_planner.get_current_waypoint(), destination)
+        self.assertEqual(nav._clear_motion_recovery_attempts, 2)
+        self.assertEqual(
+            nav._locomotion_recovery_verification_pending,
+            "SportClient reinitialization",
+        )
+
+    def test_obstacle_recovery_never_reinitializes_locomotion_on_filtered_clear_grid(self):
+        nav = NavCore.__new__(NavCore)
+        nav.AVOIDANCE_DISTANCE_M = 0.75
+        nav.MAX_STUCK_RECOVERY_ATTEMPTS = 2
+        nav._stuck_recovery_attempts = 0
+        nav._clear_motion_recovery_attempts = 0
+        nav._state = NavState.NAVIGATING
+        nav._state_lock = threading.Lock()
+        nav._go2 = MagicMock(available=True)
+        nav._ensure_go2 = MagicMock()
+        nav._execute_stall_escape = MagicMock(return_value=None)
+        nav._execute_stall_turn_scan = MagicMock(
+            return_value=(RobotPose(0.0, 0.0, 0.2), "left")
+        )
+        nav._global_planner = MagicMock()
+        nav._global_planner.get_current_waypoint.return_value = MapNode(
+            name="__metric_001__", x=1.0, y=0.0, tags=["metric_transit"]
+        )
+        nav._global_planner.replan_path_preserving_progress.return_value = [
+            MapNode(name="Kitchen", x=2.0, y=0.0)
+        ]
+        nav._topo_map = MagicMock(metric_map=None)
+        nav._depth_processor = MagicMock()
+        nav._fresh_obstacle_grid = MagicMock(return_value=_empty_grid())
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        nav._notify_status_change = MagicMock()
+
+        recovered = nav._recover_from_stall(
+            NavGoal(goal_type="semantic", label="Kitchen"),
+            RobotPose(),
+            _empty_grid(),
+            allow_locomotion_recovery=False,
+        )
+
+        self.assertTrue(recovered)
+        nav._go2.recover_locomotion.assert_not_called()
+        nav._go2.reinitialize_locomotion.assert_not_called()
+        nav._execute_stall_escape.assert_called_once()
+        nav._execute_stall_turn_scan.assert_called_once()
+
+    def test_sparse_center_depth_does_not_corroborate_close_grid_artifact(self):
+        nav = NavCore.__new__(NavCore)
+        nav.AVOIDANCE_DISTANCE_M = 0.75
+        nav.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M = 0.15
+        nav.PATH_OBSTACLE_MIN_CENTER_COVERAGE = 0.06
+        nav._read_center_depth = MagicMock(
+            return_value=(
+                CenterDepthReading(distance_m=0.19, coverage=0.025),
+                True,
+            )
+        )
+
+        self.assertFalse(nav._path_obstacle_matches_center_depth(0.19))
+
+        nav._read_center_depth.return_value = (
+            CenterDepthReading(distance_m=0.19, coverage=0.20),
+            True,
+        )
+        self.assertTrue(nav._path_obstacle_matches_center_depth(0.19))
+
+    def test_metric_route_regression_replans_before_running_farther_away(self):
+        nav = NavCore.__new__(NavCore)
+        nav.METRIC_ROUTE_REGRESSION_DISTANCE_M = 0.65
+        nav.METRIC_ROUTE_REGRESSION_CONFIRM_S = 0.0
+        nav._route_progress_waypoint_name = None
+        nav._route_progress_best_distance = float("inf")
+        nav._route_regression_since = None
+        nav._go2 = MagicMock(available=True)
+        nav._ensure_go2 = MagicMock()
+        nav._global_planner = MagicMock()
+        nav._global_planner.plan_path.return_value = [
+            MapNode(name="start", x=0.0, y=0.0, tags=["metric_transit"]),
+            MapNode(name="Kitchen", x=2.0, y=0.0),
+        ]
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        waypoint = MapNode(
+            name="__metric_008__",
+            x=1.0,
+            y=0.0,
+            tags=["metric_transit"],
+        )
+        goal = NavGoal(goal_type="semantic", x=2.0, y=0.0, label="Kitchen")
+
+        self.assertFalse(
+            nav._recover_regressing_metric_route(
+                goal, RobotPose(), waypoint, 0.50
+            )
+        )
+        self.assertFalse(
+            nav._recover_regressing_metric_route(
+                goal, RobotPose(), waypoint, 1.20
+            )
+        )
+        self.assertTrue(
+            nav._recover_regressing_metric_route(
+                goal, RobotPose(), waypoint, 1.20
+            )
+        )
+
+        nav._go2.stop_move.assert_called_once()
+        nav._global_planner.plan_path.assert_called_once()
+        nav._local_planner.reset_navigation_state.assert_called_once()
+        nav._reset_progress_tracker.assert_called_once()
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_raw_obstacle_cannot_trigger_clear_path_locomotion_reinit(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            raw_blocked = _grid_with_wall_ahead(distance_m=0.50)
+            nav._depth_processor = MagicMock()
+            nav._depth_processor.get_obstacle_grid.return_value = raw_blocked
+            nav._filter_transient_path_obstacle = MagicMock(
+                return_value=_empty_grid()
+            )
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.20)
+            nav._recover_from_stall = MagicMock(return_value=True)
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            stale = time.monotonic() - nav.STUCK_TIMEOUT_S - 0.1
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._last_progress_time = stale
+                nav._last_translation_progress_time = stale
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertFalse(
+                nav._recover_from_stall.call_args.kwargs[
+                    "allow_locomotion_recovery"
+                ]
+            )
+            fake_go2.recover_locomotion.assert_not_called()
+            fake_go2.reinitialize_locomotion.assert_not_called()
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    def test_pivot_clearance_ignores_single_raw_minimum_and_uses_supported_grid(self):
+        nav = NavCore.__new__(NavCore)
+        nav.PIVOT_CLEARANCE_PERCENTILE = 10.0
+        nav.PIVOT_GRID_INFLATION_M = 0.15
+        grid = _grid_with_wall_ahead(distance_m=0.50)
+        grid.nearest_obstacle_m = 0.19
+        grid.nearest_obstacle_bearing = math.radians(55.0)
+
+        clearance, bearing = nav._robust_pivot_clearance(grid)
+
+        self.assertGreater(clearance, 0.40)
+        self.assertLess(abs(bearing), math.radians(20.0))
+
+    def test_measured_translation_verifies_recovery_and_resets_watchdog(self):
+        nav = NavCore.__new__(NavCore)
+        nav._last_progress_pose = RobotPose()
+        nav._last_translation_progress_pose = RobotPose()
+        nav._last_progress_time = 0.0
+        nav._last_translation_progress_time = 0.0
+        nav._stuck_recovery_attempts = 1
+        nav._clear_motion_recovery_attempts = 2
+        nav._locomotion_recovery_verification_pending = (
+            "SportClient reinitialization"
+        )
+        nav._locomotion_recovery_error = None
+        nav._last_stall_scan_direction = None
+        nav._notify_status_change = MagicMock()
+
+        nav._update_progress(RobotPose(0.12, 0.0, 0.0))
+
+        self.assertEqual(nav._clear_motion_recovery_attempts, 0)
+        self.assertIsNone(nav._locomotion_recovery_verification_pending)
+        nav._notify_status_change.assert_called_once_with(
+            "Locomotion recovery was verified by measured movement, and I am "
+            "continuing the existing route."
+        )
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_stuck_abort_keeps_current_pose(self, mock_go2):
@@ -2757,6 +4124,24 @@ class TestNavCoreStatus(unittest.TestCase):
         finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    def test_parallel_side_wall_uses_center_depth_for_forward_safety(self):
+        nav = NavCore.__new__(NavCore)
+        nav.AVOIDANCE_DISTANCE_M = 0.75
+        nav._read_center_depth = MagicMock(
+            return_value=(CenterDepthReading(distance_m=0.60, coverage=0.5), True)
+        )
+        nav._reset_center_only_close_confirmation = MagicMock()
+
+        distance, bearing = nav._forward_clearance_for_safety(
+            VelocityCommand(vx=0.20),
+            path_dist=0.27,
+            path_bearing=math.radians(18.0),
+            parallel_wall_clear=True,
+        )
+
+        self.assertAlmostEqual(distance, 0.60)
+        self.assertAlmostEqual(bearing, 0.0)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_nav_cycle_center_depth_estops_forward_command_when_grid_misses_close_wall(self, mock_go2):
@@ -2957,6 +4342,55 @@ class TestNavCoreStatus(unittest.TestCase):
             nav.shutdown()
         finally:
             NavCore.DEPTH_READY_TIMEOUT_S = original_timeout
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_navigate_to_keeps_initial_global_route_independent_of_live_scan(self, mock_go2):
+        fake_go2 = MagicMock()
+        fake_go2.available = True
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            nav._topo_map.load_from_dict({
+                "name": "suite21",
+                "nodes": [
+                    {"name": "charging_station", "x": 0.0, "y": 0.0},
+                    {"name": "immersive_room", "x": 4.0, "y": 0.0},
+                ],
+                "edges": [
+                    {"from": "charging_station", "to": "immersive_room", "distance": 4.0},
+                ],
+            })
+            metric_map = MagicMock()
+            nav._topo_map.metric_map = metric_map
+            nav._odometry.set_pose(0.0, 0.0, 0.0)
+
+            fake_depth = MagicMock()
+            fake_depth.is_available = True
+            fake_depth.get_obstacle_grid.return_value = _grid_with_wall_ahead(0.6)
+            nav._depth_processor = fake_depth
+            planned_path = [
+                MapNode(name="__metric_start__", x=0.0, y=0.0, tags=["metric_transit"]),
+                MapNode(name="immersive_room", x=4.0, y=0.0),
+            ]
+            nav._global_planner = MagicMock()
+            nav._global_planner.plan_path.return_value = planned_path
+            nav._ensure_running = MagicMock()
+
+            self.assertTrue(nav.navigate_to("immersive room"))
+
+            nav._global_planner.plan_path.assert_called_once()
+            plan_call = nav._global_planner.plan_path.call_args
+            self.assertEqual(plan_call.args[1], "immersive room")
+            self.assertIsNone(plan_call.kwargs["dynamic_obstacles_xy"])
+            metric_map.robot_points_to_world.assert_not_called()
+            nav.shutdown()
+        finally:
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 

@@ -29,6 +29,7 @@ See docs/nav_core_design.md for full architecture documentation.
 """
 
 import difflib
+from concurrent.futures import Future, ThreadPoolExecutor
 import heapq
 import importlib
 import json
@@ -541,6 +542,15 @@ class TopologicalMap:
 class GlobalPlanner:
     """Metric occupancy planning with topological fallback for simple maps."""
 
+    MAX_DETOUR_LENGTH_RATIO = 1.35
+    MAX_DETOUR_EXTRA_M = 5.0
+    MAX_DETOUR_BEARING_CHANGE_RAD = math.radians(100.0)
+    FINAL_METRIC_LONGITUDINAL_TOLERANCE_M = 0.30
+    FINAL_METRIC_CROSS_TRACK_TOLERANCE_M = 0.40
+    FINAL_METRIC_HEADING_TOLERANCE_RAD = math.radians(25.0)
+    STRAIGHT_METRIC_PASS_TOLERANCE_M = 0.75
+    STRAIGHT_METRIC_PASS_MAX_TURN_RAD = math.radians(20.0)
+
     def __init__(self, topo_map: TopologicalMap):
         """Initialize the global planner with a topological map reference."""
         self._map = topo_map
@@ -610,6 +620,18 @@ class GlobalPlanner:
         if not points:
             return None
 
+        return self.install_metric_path_points(current_pose, goal_node.name, points)
+
+    def install_metric_path_points(
+        self,
+        current_pose: RobotPose,
+        goal_label: str,
+        points: List[Tuple[float, float]],
+    ) -> Optional[List[MapNode]]:
+        """Install metric points produced without mutating the active route."""
+        goal_node = self._map.get_node(goal_label)
+        if goal_node is None or not points:
+            return None
         path = [
             MapNode(
                 name="__metric_start__",
@@ -617,7 +639,7 @@ class GlobalPlanner:
                 y=points[0][1],
                 description="Current position",
                 tags=["metric_transit"],
-                arrival_tolerance_m=0.30,
+                arrival_tolerance_m=0.45,
                 pass_through_tolerance_m=0.45,
             )
         ]
@@ -629,7 +651,7 @@ class GlobalPlanner:
                     y=y_m,
                     description="Collision-free route point",
                     tags=["metric_transit"],
-                    arrival_tolerance_m=0.30,
+                    arrival_tolerance_m=0.45,
                     pass_through_tolerance_m=0.45,
                 )
             )
@@ -649,6 +671,19 @@ class GlobalPlanner:
         )
         return path
 
+    def remaining_metric_route(self, pose: RobotPose) -> Tuple[float, Optional[float]]:
+        """Return remaining route length and bearing of its active segment."""
+        if not self._current_path or self._waypoint_index >= len(self._current_path):
+            return 0.0, None
+        remaining = self._current_path[self._waypoint_index:]
+        first = remaining[0]
+        length = math.hypot(first.x - pose.x, first.y - pose.y)
+        length += sum(
+            math.hypot(second.x - first_node.x, second.y - first_node.y)
+            for first_node, second in zip(remaining, remaining[1:])
+        )
+        return length, math.atan2(first.y - pose.y, first.x - pose.x)
+
     def replan_path_around_obstacles(
         self,
         current_pose: RobotPose,
@@ -661,16 +696,73 @@ class GlobalPlanner:
         goal_node = self._map.get_node(goal_label)
         if goal_node is None:
             return None
-        path = self._plan_metric_path(
-            current_pose,
-            goal_node,
+        reference_length, reference_bearing = self.remaining_metric_route(current_pose)
+        points = self._map.metric_map.plan_path(
+            (current_pose.x, current_pose.y),
+            (goal_node.x, goal_node.y),
             dynamic_obstacles_xy=dynamic_obstacles_xy,
         )
-        if path is not None:
-            logger.info(
-                "GlobalPlanner: replaced stalled route with a fresh metric route"
+        if not points:
+            return None
+        if not self.metric_detour_is_reasonable(
+            current_pose,
+            points,
+            reference_length,
+            reference_bearing,
+        ):
+            logger.warning(
+                "GlobalPlanner: rejected stalled-route detour that reversed and "
+                "greatly lengthened the remaining route"
             )
+            return None
+        path = self.install_metric_path_points(current_pose, goal_label, points)
+        if path is not None:
+            logger.info("GlobalPlanner: replaced stalled route with a fresh metric route")
         return path
+
+    @classmethod
+    def metric_detour_is_reasonable(
+        cls,
+        current_pose: RobotPose,
+        points: List[Tuple[float, float]],
+        reference_length: float,
+        reference_bearing: Optional[float],
+    ) -> bool:
+        """Reject only detours that are both a major reversal and much longer."""
+        if len(points) < 2 or reference_bearing is None or reference_length <= 0.0:
+            return True
+        first_target = next(
+            (
+                point
+                for point in points[1:]
+                if math.hypot(point[0] - current_pose.x, point[1] - current_pose.y) > 0.05
+            ),
+            None,
+        )
+        if first_target is None:
+            return True
+        candidate_bearing = math.atan2(
+            first_target[1] - current_pose.y,
+            first_target[0] - current_pose.x,
+        )
+        bearing_change = abs(
+            math.atan2(
+                math.sin(candidate_bearing - reference_bearing),
+                math.cos(candidate_bearing - reference_bearing),
+            )
+        )
+        candidate_length = sum(
+            math.hypot(second[0] - first[0], second[1] - first[1])
+            for first, second in zip(points, points[1:])
+        )
+        excessive_length = candidate_length > max(
+            reference_length * cls.MAX_DETOUR_LENGTH_RATIO,
+            reference_length + cls.MAX_DETOUR_EXTRA_M,
+        )
+        return not (
+            excessive_length
+            and bearing_change > cls.MAX_DETOUR_BEARING_CHANGE_RAD
+        )
 
     def replan_path_preserving_progress(
         self,
@@ -712,6 +804,8 @@ class GlobalPlanner:
         current_pose: RobotPose,
         tolerance_m: float = 0.3,
         on_advance: Optional[Callable[[MapNode, MapNode], None]] = None,
+        *,
+        final_arrival_sensor_confirmed: bool = False,
     ) -> Optional[MapNode]:
         """Return the next waypoint to steer toward, advancing when within tolerance.
 
@@ -728,7 +822,35 @@ class GlobalPlanner:
             else wp.arrival_tolerance_m
         )
 
-        if dist < arrival_tolerance:
+        metric_final = (
+            self._waypoint_index == len(self._current_path) - 1
+            and self._waypoint_index > 0
+            and "metric_transit"
+            in self._current_path[self._waypoint_index - 1].tags
+        )
+        route_arrival_consistent = (
+            self._metric_final_arrival_is_consistent(current_pose)
+            if metric_final
+            else True
+        )
+        # Inside the destination's configured radius, repeated depth-to-map
+        # agreement is stronger evidence than dead-reckoned progress along the
+        # last short segment.  The latter can disagree after a safe detour or a
+        # recovery replan.  Requiring both creates a deadlock: the robot is close
+        # enough to slow down, but can never satisfy the stricter route gate.
+        arrival_consistent = (
+            not metric_final or final_arrival_sensor_confirmed
+        )
+
+        if dist < arrival_tolerance and arrival_consistent:
+            if metric_final and not route_arrival_consistent:
+                logger.info(
+                    "GlobalPlanner: accepting sensor-confirmed final waypoint "
+                    "'%s' inside %.2fm arrival region despite stale final-segment "
+                    "progress",
+                    wp.name,
+                    arrival_tolerance,
+                )
             logger.info(
                 "GlobalPlanner: accepted waypoint '%s' within %.2fm arrival region",
                 wp.name,
@@ -736,8 +858,15 @@ class GlobalPlanner:
             )
             advanced = self.advance_current_waypoint(on_advance=on_advance)
             return advanced[1] if advanced is not None else None
+        if dist < arrival_tolerance and metric_final:
+            logger.info(
+                "GlobalPlanner: deferred final waypoint '%s' despite %.2fm proximity; "
+                "final route gate or sensor-to-map validation is incomplete",
+                wp.name,
+                dist,
+            )
 
-        pass_tolerance = wp.pass_through_tolerance_m
+        pass_tolerance = self._effective_pass_through_tolerance(wp)
         if pass_tolerance is not None and self._passed_waypoint_plane(
             current_pose,
             lateral_tolerance_m=pass_tolerance,
@@ -750,6 +879,78 @@ class GlobalPlanner:
             return advanced[1] if advanced is not None else None
 
         return wp
+
+    def _effective_pass_through_tolerance(
+        self,
+        waypoint: MapNode,
+    ) -> Optional[float]:
+        """Allow a wider pass gate only for straight metric transit points.
+
+        Dense metric waypoints are guidance samples, not destinations.  A robot
+        that crosses a sample just outside its ordinary arrival radius while
+        continuing along the same corridor must advance to the next sample;
+        otherwise the missed point moves behind it and provokes a reverse
+        replan.  Corners retain their configured, tighter pass tolerance.
+        """
+        tolerance = waypoint.pass_through_tolerance_m
+        if (
+            tolerance is None
+            or "metric_transit" not in waypoint.tags
+            or not 0 < self._waypoint_index < len(self._current_path) - 1
+        ):
+            return tolerance
+
+        previous = self._current_path[self._waypoint_index - 1]
+        upcoming = self._current_path[self._waypoint_index + 1]
+        incoming_heading = math.atan2(
+            waypoint.y - previous.y,
+            waypoint.x - previous.x,
+        )
+        outgoing_heading = math.atan2(
+            upcoming.y - waypoint.y,
+            upcoming.x - waypoint.x,
+        )
+        turn = abs(
+            math.atan2(
+                math.sin(outgoing_heading - incoming_heading),
+                math.cos(outgoing_heading - incoming_heading),
+            )
+        )
+        if turn <= self.STRAIGHT_METRIC_PASS_MAX_TURN_RAD:
+            return max(tolerance, self.STRAIGHT_METRIC_PASS_TOLERANCE_M)
+        return tolerance
+
+    def _metric_final_arrival_is_consistent(self, pose: RobotPose) -> bool:
+        """Require the final route corridor and entrance gate, not radius alone."""
+        segment = self.current_segment()
+        if segment is None:
+            return False
+        start, target = segment
+        edge_x = target.x - start.x
+        edge_y = target.y - start.y
+        edge_length = math.hypot(edge_x, edge_y)
+        if edge_length <= 1e-6:
+            return False
+
+        unit_x, unit_y = edge_x / edge_length, edge_y / edge_length
+        relative_x = pose.x - start.x
+        relative_y = pose.y - start.y
+        along = relative_x * unit_x + relative_y * unit_y
+        cross_track = abs(relative_x * unit_y - relative_y * unit_x)
+        longitudinal_remaining = edge_length - along
+        route_heading = math.atan2(edge_y, edge_x)
+        heading_error = abs(
+            math.atan2(
+                math.sin(pose.yaw - route_heading),
+                math.cos(pose.yaw - route_heading),
+            )
+        )
+        return (
+            longitudinal_remaining
+            <= self.FINAL_METRIC_LONGITUDINAL_TOLERANCE_M
+            and cross_track <= self.FINAL_METRIC_CROSS_TRACK_TOLERANCE_M
+            and heading_error <= self.FINAL_METRIC_HEADING_TOLERANCE_RAD
+        )
 
     def get_current_waypoint(self) -> Optional[MapNode]:
         """Return the active waypoint without changing route progress."""
@@ -789,6 +990,72 @@ class GlobalPlanner:
             self._current_path[self._waypoint_index - 1],
             self._current_path[self._waypoint_index],
         )
+
+    def current_segment_heading(self) -> Optional[float]:
+        """Return the active mapped segment's world-frame heading."""
+        segment = self.current_segment()
+        if segment is None:
+            return None
+        start, target = segment
+        dx = target.x - start.x
+        dy = target.y - start.y
+        if math.hypot(dx, dy) <= 1e-6:
+            return None
+        return math.atan2(dy, dx)
+
+    def current_segment_guidance(
+        self,
+        pose: RobotPose,
+        *,
+        lookahead_m: float = 1.50,
+        max_correction_rad: float = math.radians(10.0),
+    ) -> Optional[float]:
+        """Follow the active straight segment with bounded cross-track correction."""
+        segment = self.current_segment()
+        if segment is None:
+            return None
+        start, target = segment
+        dx = target.x - start.x
+        dy = target.y - start.y
+        length = math.hypot(dx, dy)
+        if length <= 1e-6:
+            return None
+        unit_x, unit_y = dx / length, dy / length
+        relative_x = pose.x - start.x
+        relative_y = pose.y - start.y
+        cross_track = unit_x * relative_y - unit_y * relative_x
+        correction = float(
+            np.clip(
+                -math.atan2(cross_track, max(lookahead_m, 0.10)),
+                -abs(max_correction_rad),
+                abs(max_correction_rad),
+            )
+        )
+        guided_heading = math.atan2(dy, dx) + correction
+        return math.atan2(math.sin(guided_heading), math.cos(guided_heading))
+
+    def upcoming_turn(self) -> Optional[Tuple[MapNode, MapNode, float]]:
+        """Return the next node and signed heading change after the active segment."""
+        if not self._current_path or not 0 < self._waypoint_index < len(self._current_path) - 1:
+            return None
+        start = self._current_path[self._waypoint_index - 1]
+        corner = self._current_path[self._waypoint_index]
+        following = self._current_path[self._waypoint_index + 1]
+        incoming = math.atan2(corner.y - start.y, corner.x - start.x)
+        outgoing = math.atan2(following.y - corner.y, following.x - corner.x)
+        change = math.atan2(math.sin(outgoing - incoming), math.cos(outgoing - incoming))
+        return corner, following, change
+
+    def current_turn_change(self) -> Optional[float]:
+        """Return the heading change just entered after advancing a waypoint."""
+        if not self._current_path or not 1 < self._waypoint_index < len(self._current_path):
+            return None
+        previous = self._current_path[self._waypoint_index - 2]
+        corner = self._current_path[self._waypoint_index - 1]
+        target = self._current_path[self._waypoint_index]
+        incoming = math.atan2(corner.y - previous.y, corner.x - previous.x)
+        outgoing = math.atan2(target.y - corner.y, target.x - corner.x)
+        return math.atan2(math.sin(outgoing - incoming), math.cos(outgoing - incoming))
 
     def advance_current_waypoint(
         self,
@@ -893,10 +1160,22 @@ class LocalPlanner:
     WIDE_VALLEY_MIN_SECTORS = 6    # minimum sectors for a "wide" valley
     SMOOTHING_WEIGHT = 0.3         # heading change smoothing
     PIVOT_HEADING_ERROR_RAD = _env_float("NAV_PIVOT_HEADING_ERROR_RAD", math.radians(20.0))
+    PIVOT_ENTER_HEADING_ERROR_RAD = _env_float(
+        "NAV_PIVOT_ENTER_HEADING_ERROR_RAD",
+        math.radians(35.0),
+    )
+    PIVOT_EXIT_HEADING_ERROR_RAD = _env_float(
+        "NAV_PIVOT_EXIT_HEADING_ERROR_RAD",
+        math.radians(6.0),
+    )
     FORWARD_HAZARD_CONE_RAD = _env_float("NAV_FORWARD_HAZARD_CONE_RAD", math.radians(20.0))
     DEFAULT_PIVOT_YAW_RATE = _env_float(
         "NAV_PIVOT_YAW_RATE",
         _env_float("NAV_MIN_PIVOT_YAW_RATE", 0.50),
+    )
+    MIN_EFFECTIVE_PIVOT_YAW_RATE = _env_float(
+        "NAV_MIN_EFFECTIVE_PIVOT_YAW_RATE",
+        0.35,
     )
     CORRIDOR_MIN_POINTS_PER_SIDE = 8
     CORRIDOR_MIN_LENGTH_M = 0.45
@@ -906,6 +1185,22 @@ class LocalPlanner:
     CORRIDOR_MIN_WIDTH_M = 0.55
     CORRIDOR_MAX_WIDTH_M = 2.50
     SINGLE_WALL_TARGET_CLEARANCE_M = _env_float("NAV_WALL_CLEARANCE", 0.55)
+    EARLY_WALL_ALIGNMENT_CLEARANCE_M = _env_float(
+        "NAV_EARLY_WALL_ALIGNMENT_CLEARANCE",
+        0.70,
+    )
+    EARLY_WALL_CONVERGENCE_RAD = _env_float(
+        "NAV_EARLY_WALL_CONVERGENCE_RAD",
+        math.radians(3.0),
+    )
+    EARLY_WALL_MAX_ALIGNMENT_YAW_RPS = _env_float(
+        "NAV_EARLY_WALL_MAX_ALIGNMENT_YAW",
+        0.06,
+    )
+    EARLY_WALL_MIN_AWAY_YAW_RPS = _env_float(
+        "NAV_EARLY_WALL_MIN_AWAY_YAW",
+        0.02,
+    )
     ROUTE_CENTER_LOOKAHEAD_M = _env_float("NAV_ROUTE_CENTER_LOOKAHEAD", 1.50)
     ROUTE_CENTER_HALF_WIDTH_M = _env_float("NAV_ROUTE_CENTER_HALF_WIDTH", 0.42)
     ROUTE_CENTER_MAX_HEADING_RAD = _env_float(
@@ -923,6 +1218,28 @@ class LocalPlanner:
     ROUTE_CENTER_STEP_RAD = math.radians(5.0)
     ROUTE_CENTER_CLEARANCE_MARGIN_M = 0.12
     ROUTE_CENTER_MIN_BLOCKING_POINTS = 3
+    MIN_TRANSIT_SPEED_MPS = _env_float("NAV_MIN_TRANSIT_SPEED", 0.28)
+    MIN_EFFECTIVE_APPROACH_SPEED_MPS = _env_float(
+        "NAV_MIN_EFFECTIVE_APPROACH_SPEED",
+        0.18,
+    )
+    MIN_EFFECTIVE_APPROACH_CLEARANCE_M = _env_float(
+        "NAV_MIN_EFFECTIVE_APPROACH_CLEARANCE",
+        0.55,
+    )
+    PARALLEL_WALL_MAX_HEADING_ERROR_RAD = _env_float(
+        "NAV_PARALLEL_WALL_MAX_HEADING_ERROR_RAD",
+        math.radians(15.0),
+    )
+    PARALLEL_WALL_MIN_CLEARANCE_M = _env_float(
+        "NAV_PARALLEL_WALL_MIN_CLEARANCE",
+        0.45,
+    )
+    STEERING_REVERSAL_CONFIRM_CYCLES = _env_int(
+        "NAV_STEERING_REVERSAL_CONFIRM_CYCLES",
+        12,
+    )
+    STEERING_DEADBAND_RPS = _env_float("NAV_STEERING_DEADBAND_RPS", 0.015)
 
     def __init__(
         self,
@@ -950,17 +1267,127 @@ class LocalPlanner:
         self.avoidance_distance = avoidance_distance
         self._prev_heading = 0.0
         self._route_center_heading: Optional[float] = None
+        self._pivoting = False
+        self._pivot_direction = 0
+        self._steering_sign = 0
+        self._pending_steering_sign = 0
+        self._pending_steering_cycles = 0
+        self._wall_alignment_override_active = False
 
     def reset_navigation_state(self) -> None:
         """Forget steering history after a new route or waypoint transition."""
         self._prev_heading = 0.0
         self._route_center_heading = None
+        self._pivoting = False
+        self._pivot_direction = 0
+        self._steering_sign = 0
+        self._pending_steering_sign = 0
+        self._pending_steering_cycles = 0
+        self._wall_alignment_override_active = False
+
+    def stabilize_translating_steering(self, cmd: VelocityCommand) -> VelocityCommand:
+        """Require a persistent request before reversing translating steering."""
+        if cmd.vx <= 0.05 or abs(cmd.vyaw) < self.STEERING_DEADBAND_RPS:
+            if abs(cmd.vyaw) < self.STEERING_DEADBAND_RPS:
+                self._pending_steering_sign = 0
+                self._pending_steering_cycles = 0
+            return cmd
+
+        requested_sign = 1 if cmd.vyaw > 0.0 else -1
+        if self._steering_sign == 0 or requested_sign == self._steering_sign:
+            self._steering_sign = requested_sign
+            self._pending_steering_sign = 0
+            self._pending_steering_cycles = 0
+            return cmd
+
+        if requested_sign != self._pending_steering_sign:
+            self._pending_steering_sign = requested_sign
+            self._pending_steering_cycles = 1
+        else:
+            self._pending_steering_cycles += 1
+
+        if self._pending_steering_cycles < self.STEERING_REVERSAL_CONFIRM_CYCLES:
+            return VelocityCommand(vx=cmd.vx, vy=cmd.vy, vyaw=0.0)
+
+        self._steering_sign = requested_sign
+        self._pending_steering_sign = 0
+        self._pending_steering_cycles = 0
+        return cmd
+
+    def maintain_effective_final_approach(
+        self,
+        cmd: VelocityCommand,
+        obstacle_grid: ObstacleGrid,
+        goal_distance: float,
+        arrival_tolerance: float,
+    ) -> VelocityCommand:
+        """Keep a clear, steering final approach above the Go2 walking threshold.
+
+        Arrival braking can otherwise combine with the translating turn factor to
+        produce roughly 0.10 m/s commands.  The Go2 may accept those commands
+        without measurably translating, causing a clear route to be abandoned as
+        a locomotion failure.  Preserve the requested small yaw correction while
+        raising only the forward component, and never do so inside arrival range
+        or when forward clearance is tight.
+        """
+        if (
+            goal_distance <= arrival_tolerance
+            or obstacle_grid.path_obstacle_m
+            < self.MIN_EFFECTIVE_APPROACH_CLEARANCE_M
+            or cmd.vx < 0.03
+            or cmd.vx >= self.MIN_EFFECTIVE_APPROACH_SPEED_MPS
+        ):
+            return cmd
+        return replace(cmd, vx=self.MIN_EFFECTIVE_APPROACH_SPEED_MPS)
+
+    def parallel_wall_supports_route(
+        self,
+        obstacle_grid: Optional[ObstacleGrid],
+        route_heading: float,
+    ) -> bool:
+        """Return true when a long side wall is safely parallel to the route."""
+        if obstacle_grid is None or abs(route_heading) > math.radians(30.0):
+            return False
+        for wall_heading, lateral_at_reference in self._visible_wall_fits(
+            obstacle_grid
+        ).values():
+            heading_error = abs(
+                math.atan2(
+                    math.sin(wall_heading - route_heading),
+                    math.cos(wall_heading - route_heading),
+                )
+            )
+            if (
+                heading_error <= self.PARALLEL_WALL_MAX_HEADING_ERROR_RAD
+                and abs(lateral_at_reference) >= self.PARALLEL_WALL_MIN_CLEARANCE_M
+            ):
+                return True
+        return False
+
+    def _should_pivot(self, heading_error: float, goal_distance: float) -> bool:
+        """Use hysteresis so ordinary route corrections cannot oscillate in place."""
+        if goal_distance <= 0.5:
+            self._pivoting = False
+            self._pivot_direction = 0
+            return False
+        error = abs(heading_error)
+        if self._pivoting:
+            if error <= self.PIVOT_EXIT_HEADING_ERROR_RAD:
+                self._pivoting = False
+                self._pivot_direction = 0
+        elif error >= self.PIVOT_ENTER_HEADING_ERROR_RAD:
+            self._pivoting = True
+            self._pivot_direction = 1 if heading_error > 0.0 else -1
+        return self._pivoting
 
     def compute_velocity(
         self,
         obstacle_grid: ObstacleGrid,
         goal_direction: float,
         goal_distance: float,
+        *,
+        slow_for_arrival: bool = True,
+        pivot_heading: Optional[float] = None,
     ) -> VelocityCommand:
         """Compute velocity toward the goal while avoiding obstacles.
 
@@ -968,11 +1395,14 @@ class LocalPlanner:
             obstacle_grid: Current obstacle map from depth processor.
             goal_direction: Bearing to goal in radians (0=ahead, positive=left).
             goal_distance: Distance to goal in meters.
+            slow_for_arrival: Brake inside 0.5m for a stopping destination. False
+                for intermediate route points that should be passed through.
 
         Returns:
             VelocityCommand with speed modulated by obstacle proximity and goal distance.
         """
         path_nearest = obstacle_grid.path_obstacle_m
+        mapped_heading = goal_direction if pivot_heading is None else pivot_heading
         route_direction = self._centered_route_heading(
             obstacle_grid,
             goal_direction,
@@ -983,6 +1413,8 @@ class LocalPlanner:
                 route_direction,
                 goal_distance,
                 path_nearest,
+                slow_for_arrival=slow_for_arrival,
+                pivot_heading=mapped_heading,
             )
 
         histogram = self._build_histogram(obstacle_grid)
@@ -1007,11 +1439,11 @@ class LocalPlanner:
                 vyaw=self._pivot_yaw_rate(target_heading),
             )
 
-        if (
-            goal_distance > 0.5
-            and abs(route_direction) >= self.PIVOT_HEADING_ERROR_RAD
-        ):
-            vyaw = self._pivot_yaw_rate(route_direction)
+        # Open-space centering is a small translating correction, not a reason
+        # to turn away from the mapped route.  Only the actual waypoint bearing
+        # may initiate or drive an in-place route pivot.
+        if self._should_pivot(mapped_heading, goal_distance):
+            vyaw = self._pivot_yaw_rate(mapped_heading)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
 
@@ -1031,8 +1463,8 @@ class LocalPlanner:
         base_speed = self._modulate_speed(self.max_linear_speed, nearest)
 
         # Slow down when close to goal
-        if goal_distance < 0.5:
-            base_speed = min(base_speed, 0.1)
+        if slow_for_arrival and goal_distance < 1.0:
+            base_speed = min(base_speed, max(0.10, 0.20 * goal_distance))
 
         # Compute velocity command
         vyaw = np.clip(target_heading, -self.max_yaw_rate, self.max_yaw_rate)
@@ -1141,23 +1573,26 @@ class LocalPlanner:
         goal_direction: float,
         goal_distance: float,
         path_nearest: float,
+        *,
+        slow_for_arrival: bool = True,
+        pivot_heading: Optional[float] = None,
     ) -> VelocityCommand:
         """Drive the mapped path directly when the path corridor is clear."""
-        if (
-            goal_distance > 0.5
-            and abs(goal_direction) >= self.PIVOT_HEADING_ERROR_RAD
-        ):
-            vyaw = self._pivot_yaw_rate(goal_direction)
+        mapped_heading = goal_direction if pivot_heading is None else pivot_heading
+        if self._should_pivot(mapped_heading, goal_distance):
+            vyaw = self._pivot_yaw_rate(mapped_heading)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
 
         base_speed = self._modulate_speed(self.max_linear_speed, path_nearest)
-        if goal_distance < 0.5:
-            base_speed = min(base_speed, 0.1)
+        if slow_for_arrival and goal_distance < 1.0:
+            base_speed = min(base_speed, max(0.10, 0.20 * goal_distance))
 
         vyaw = float(np.clip(goal_direction, -self.max_yaw_rate, self.max_yaw_rate))
         turn_factor = 1.0 - min(abs(vyaw) / max(self.max_yaw_rate, 1e-6), 1.0) * 0.5
         vx = base_speed * turn_factor
+        if not slow_for_arrival and goal_distance > 0.5:
+            vx = max(vx, min(self.max_linear_speed, self.MIN_TRANSIT_SPEED_MPS))
         self._prev_heading = vyaw
         return VelocityCommand(vx=vx, vy=0.0, vyaw=vyaw)
 
@@ -1176,17 +1611,91 @@ class LocalPlanner:
         self,
         cmd: VelocityCommand,
         obstacle_grid: ObstacleGrid,
+        *,
+        correction_limit: Optional[float] = None,
+        align_only: bool = False,
     ) -> VelocityCommand:
         """Add bounded steering from visible corridor or one-sided wall geometry."""
-        if cmd.vx <= 0.05 or obstacle_grid.path_obstacle_m < self.avoidance_distance:
+        if cmd.vx <= 0.05:
+            self._wall_alignment_override_active = False
             return cmd
 
         wall_geometry = self._estimate_wall_geometry(obstacle_grid)
         if wall_geometry is None:
+            self._wall_alignment_override_active = False
             return cmd
 
         wall_heading, lateral_error, geometry_type = wall_geometry
-        if geometry_type == "corridor":
+        if geometry_type == "single_wall":
+            walls = self._visible_wall_fits(obstacle_grid)
+            candidates = []
+            if "left" in walls:
+                candidates.append((abs(walls["left"][1]), 1.0, walls["left"]))
+            if "right" in walls:
+                candidates.append((abs(walls["right"][1]), -1.0, walls["right"]))
+            if candidates:
+                clearance, side, (heading, _lateral) = min(candidates)
+                converging = (
+                    side * heading <= -self.EARLY_WALL_CONVERGENCE_RAD
+                )
+                too_close = clearance < self.SINGLE_WALL_TARGET_CLEARANCE_M
+                if (
+                    not align_only
+                    and clearance <= self.EARLY_WALL_ALIGNMENT_CLEARANCE_M
+                    and (converging or too_close)
+                ):
+                    # Route cross-track error can be wrong when localization has
+                    # drifted. A repeatedly fitted wall that is visibly converging
+                    # is direct physical evidence: align with it now rather than
+                    # allowing a stronger route command to keep aiming into it.
+                    desired_yaw = float(
+                        np.clip(
+                            0.45 * heading,
+                            -self.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
+                            self.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
+                        )
+                    )
+                    if too_close:
+                        desired_yaw += float(
+                            np.clip(0.50 * lateral_error, -0.04, 0.04)
+                        )
+                        away_sign = -side
+                        if desired_yaw * away_sign < self.EARLY_WALL_MIN_AWAY_YAW_RPS:
+                            desired_yaw = (
+                                away_sign * self.EARLY_WALL_MIN_AWAY_YAW_RPS
+                            )
+                    desired_yaw = float(
+                        np.clip(
+                            desired_yaw,
+                            -self.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
+                            self.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
+                        )
+                    )
+                    if not self._wall_alignment_override_active:
+                        logger.info(
+                            "LocalPlanner: early wall alignment override side=%s "
+                            "clearance=%.2fm heading=%+.0fdeg route_yaw=%+.3f "
+                            "corrected_yaw=%+.3f",
+                            "left" if side > 0.0 else "right",
+                            clearance,
+                            math.degrees(heading),
+                            cmd.vyaw,
+                            desired_yaw,
+                        )
+                    self._wall_alignment_override_active = True
+                    return VelocityCommand(
+                        vx=cmd.vx,
+                        vy=cmd.vy,
+                        vyaw=desired_yaw,
+                    )
+        self._wall_alignment_override_active = False
+        if align_only:
+            # On the mapped final approach, lateral odometry is less reliable
+            # than the known route.  Use the wall only as a heading reference;
+            # chasing a nominal wall clearance can gradually steer out of the
+            # mapped entrance corridor even while the forward path is clear.
+            correction = 0.25 * wall_heading
+        elif geometry_type == "corridor":
             correction = 0.30 * wall_heading + 0.20 * lateral_error
         else:
             # For a single wall, first align with it, then maintain clearance.
@@ -1194,7 +1703,10 @@ class LocalPlanner:
             # close right wall steers left.
             alignment = float(np.clip(0.20 * wall_heading, -0.02, 0.02))
             correction = alignment + 0.25 * lateral_error
-        correction_limit = min(0.06, self.max_yaw_rate * 0.75)
+        if correction_limit is None:
+            correction_limit = min(0.06, self.max_yaw_rate * 0.75)
+        else:
+            correction_limit = min(abs(correction_limit), self.max_yaw_rate)
         corrected_yaw = float(
             np.clip(
                 cmd.vyaw + correction,
@@ -1349,6 +1861,14 @@ class LocalPlanner:
         if yaw_limit <= 1e-6:
             return 0.0
         magnitude = min(abs(heading_error), yaw_limit)
+        if self._pivoting:
+            magnitude = max(
+                magnitude,
+                min(self.MIN_EFFECTIVE_PIVOT_YAW_RATE, yaw_limit),
+            )
+        direction = self._pivot_direction if self._pivoting else 0
+        if direction:
+            return direction * magnitude
         return math.copysign(magnitude, heading_error)
 
     def _build_histogram(self, grid: ObstacleGrid) -> np.ndarray:
@@ -1463,11 +1983,13 @@ class SafetyMonitor:
 
         # Priority 1: E-STOP. Close objects outside the forward cone are handled
         # by VFH steering unless they are inside the hard-stop distance.
-        if (
+        pivot_sweep_blocked = pivot_only and hard_stop
+        forward_motion_blocked = (
             nearest_obstacle_m <= self.safety_distance
             and (hard_stop or forward_hazard)
-            and not (pivot_only and nearest_obstacle_m > self.pivot_hard_stop_distance)
-        ):
+            and not pivot_only
+        )
+        if pivot_sweep_blocked or forward_motion_blocked:
             return VelocityCommand(0.0, 0.0, 0.0), "e_stop:obstacle_too_close"
 
         # Priority 2: Cliff detection
@@ -1529,6 +2051,14 @@ class OdometryProvider:
             self._pose = RobotPose(x=x, y=y, yaw=yaw, timestamp=time.time())
             self._last_update = time.monotonic()
 
+    def apply_pose_correction(self, x: float, y: float, yaw: float) -> None:
+        """Apply a localization correction without changing pose-source trust."""
+        self.set_pose(x, y, yaw)
+
+    def has_confirmed_translation(self) -> bool:
+        """Whether translation is measured rather than command-integrated."""
+        return True
+
     def get_pose(self) -> RobotPose:
         """Return a copy of the current pose (thread-safe)."""
         with self._lock:
@@ -1568,7 +2098,7 @@ class SdkSportModeOdometryProvider(OdometryProvider):
     MIN_MOTION_DELTA_M = _env_float("NAV_SDK_ODOMETRY_MIN_DELTA_M", 0.02)
     MIN_MOTION_DELTA_YAW_RAD = _env_float("NAV_SDK_ODOMETRY_MIN_DELTA_YAW_RAD", 0.03)
     REMOTE_STICK_DEADZONE = 0.08
-    REMOTE_RELEASE_GRACE_S = 0.35
+    REMOTE_RELEASE_GRACE_S = _env_float("NAV_REMOTE_RELEASE_GRACE", 1.5)
 
     def __init__(
         self,
@@ -1875,6 +2405,23 @@ class SdkSportModeOdometryProvider(OdometryProvider):
             self._manual_control_until = 0.0
             self._last_update = time.monotonic()
 
+    def apply_pose_correction(self, x: float, y: float, yaw: float) -> None:
+        """Re-anchor a corrected map pose while preserving confirmed SDK trust."""
+        with self._lock:
+            now = time.time()
+            normalized_yaw = self._normalize_angle(yaw)
+            self._pose = RobotPose(x=x, y=y, yaw=normalized_yaw, timestamp=now)
+            self._map_anchor = RobotPose(x=x, y=y, yaw=normalized_yaw, timestamp=now)
+            if self._latest_sdk_pose is not None:
+                sdk_pose = self._latest_sdk_pose
+                self._sdk_anchor = (sdk_pose[0], sdk_pose[1], sdk_pose[2])
+            self._last_update = time.monotonic()
+
+    def has_confirmed_translation(self) -> bool:
+        """Return true only while fresh SDK translation is established."""
+        with self._lock:
+            return self._sdk_translation_confirmed and self._has_fresh_sdk_pose_locked()
+
     def get_pose(self) -> RobotPose:
         """Return measured pose when fresh, otherwise the fallback pose."""
         with self._lock:
@@ -1981,8 +2528,54 @@ class NavCore:
         0.65,
     )
     STUCK_TIMEOUT_S: float = _env_float("NAV_STUCK_TIMEOUT", 6.0)
+    CLEAR_MOTION_ACK_TIMEOUT_S: float = _env_float(
+        "NAV_CLEAR_MOTION_ACK_TIMEOUT",
+        3.0,
+    )
     MAX_STUCK_RECOVERY_ATTEMPTS: int = 2
-    PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.0)
+    MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS: int = _env_int(
+        "NAV_MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS",
+        2,
+    )
+    LOCOMOTION_VERIFICATION_SPEED_MPS: float = _env_float(
+        "NAV_LOCOMOTION_VERIFICATION_SPEED",
+        0.28,
+    )
+    LOCOMOTION_MIN_VERIFICATION_COMMAND_MPS: float = _env_float(
+        "NAV_LOCOMOTION_MIN_VERIFICATION_COMMAND",
+        0.20,
+    )
+    FINAL_ROUTE_MAX_CROSS_TRACK_CORRECTION_RAD: float = _env_float(
+        "NAV_FINAL_ROUTE_MAX_CROSS_TRACK_CORRECTION_RAD",
+        math.radians(3.0),
+    )
+    ARRIVAL_MAP_MAX_SCORE_M: float = _env_float(
+        "NAV_ARRIVAL_MAP_MAX_SCORE",
+        0.16,
+    )
+    ARRIVAL_MAP_MIN_MATCHED_FRACTION: float = _env_float(
+        "NAV_ARRIVAL_MAP_MIN_MATCHED_FRACTION",
+        0.35,
+    )
+    ARRIVAL_MAP_CONFIRM_READINGS: int = _env_int(
+        "NAV_ARRIVAL_MAP_CONFIRM_READINGS",
+        2,
+    )
+    CLEAR_STALL_TRANSIT_SKIP_M: float = _env_float(
+        "NAV_CLEAR_STALL_TRANSIT_SKIP",
+        0.65,
+    )
+    # In-place turns sweep the Go2's body and legs through a much wider area
+    # than straight motion.  Reserve enough visible clearance before pivoting.
+    PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.40)
+    PIVOT_CLEARANCE_PERCENTILE: float = _env_float(
+        "NAV_PIVOT_CLEARANCE_PERCENTILE",
+        10.0,
+    )
+    PIVOT_GRID_INFLATION_M: float = _env_float(
+        "NAV_PIVOT_GRID_INFLATION_M",
+        0.15,
+    )
     FORWARD_HAZARD_CONE_RAD: float = _env_float(
         "NAV_FORWARD_HAZARD_CONE_RAD",
         math.radians(20.0),
@@ -2014,6 +2607,10 @@ class NavCore:
     PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M: float = _env_float(
         "NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN",
         0.15,
+    )
+    PATH_OBSTACLE_MIN_CENTER_COVERAGE: float = _env_float(
+        "NAV_PATH_OBSTACLE_MIN_CENTER_COVERAGE",
+        0.06,
     )
     PATH_OBSTACLE_CLEAR_CONFIRM_S: float = _env_float(
         "NAV_PATH_OBSTACLE_CLEAR_CONFIRM_S",
@@ -2071,23 +2668,87 @@ class NavCore:
     )
     METRIC_LOCALIZATION_INTERVAL_S: float = _env_float(
         "NAV_METRIC_LOCALIZATION_INTERVAL",
-        2.0,
+        5.0,
     )
     METRIC_LOCALIZATION_MAX_TRANSLATION_M: float = _env_float(
         "NAV_METRIC_LOCALIZATION_MAX_TRANSLATION",
-        0.12,
+        0.08,
     )
     METRIC_LOCALIZATION_MAX_YAW_RAD: float = _env_float(
         "NAV_METRIC_LOCALIZATION_MAX_YAW_RAD",
-        math.radians(2.5),
+        math.radians(1.0),
+    )
+    METRIC_LOCALIZATION_MIN_TRAVEL_M: float = _env_float(
+        "NAV_METRIC_LOCALIZATION_MIN_TRAVEL",
+        0.50,
+    )
+    ROUTE_WALL_HEADING_CONFIRM_READINGS: int = _env_int(
+        "NAV_ROUTE_WALL_HEADING_CONFIRM_READINGS",
+        3,
+    )
+    ROUTE_WALL_MAX_OBSERVED_HEADING_RAD: float = _env_float(
+        "NAV_ROUTE_WALL_MAX_OBSERVED_HEADING_RAD",
+        math.radians(12.0),
+    )
+    ROUTE_WALL_MIN_YAW_CORRECTION_RAD: float = _env_float(
+        "NAV_ROUTE_WALL_MIN_YAW_CORRECTION_RAD",
+        math.radians(10.0),
+    )
+    ROUTE_WALL_MAX_YAW_CORRECTION_RAD: float = _env_float(
+        "NAV_ROUTE_WALL_MAX_YAW_CORRECTION_RAD",
+        math.radians(35.0),
+    )
+    EXPECTED_CORNER_MIN_WALL_DISTANCE_M: float = _env_float(
+        "NAV_EXPECTED_CORNER_MIN_WALL_DISTANCE",
+        0.55,
+    )
+    EXPECTED_CORNER_MAX_WALL_DISTANCE_M: float = _env_float(
+        "NAV_EXPECTED_CORNER_MAX_WALL_DISTANCE",
+        1.50,
+    )
+    EXPECTED_CORNER_MAX_POSE_ERROR_M: float = _env_float(
+        "NAV_EXPECTED_CORNER_MAX_POSE_ERROR",
+        1.25,
+    )
+    EXPECTED_CORNER_MIN_TURN_RAD: float = _env_float(
+        "NAV_EXPECTED_CORNER_MIN_TURN_RAD",
+        math.radians(45.0),
+    )
+    MAPPED_SIDE_ROUTE_MIN_CLEARANCE_M: float = _env_float(
+        "NAV_MAPPED_SIDE_ROUTE_MIN_CLEARANCE",
+        0.50,
     )
     METRIC_BLOCKED_REPLAN_DELAY_S: float = _env_float(
         "NAV_METRIC_BLOCKED_REPLAN_DELAY",
-        1.0,
+        2.0,
     )
     METRIC_REPLAN_COOLDOWN_S: float = _env_float(
         "NAV_METRIC_REPLAN_COOLDOWN",
-        3.0,
+        8.0,
+    )
+    METRIC_REPLAN_MAX_HEADING_ERROR_RAD: float = _env_float(
+        "NAV_METRIC_REPLAN_MAX_HEADING_ERROR_RAD",
+        math.radians(18.0),
+    )
+    METRIC_REPLAN_MIN_ROUTE_CHANGE_RAD: float = _env_float(
+        "NAV_METRIC_REPLAN_MIN_ROUTE_CHANGE_RAD",
+        math.radians(15.0),
+    )
+    METRIC_ROUTE_REGRESSION_DISTANCE_M: float = _env_float(
+        "NAV_METRIC_ROUTE_REGRESSION_DISTANCE",
+        0.65,
+    )
+    METRIC_ROUTE_REGRESSION_CONFIRM_S: float = _env_float(
+        "NAV_METRIC_ROUTE_REGRESSION_CONFIRM_S",
+        1.0,
+    )
+    REMOTE_HEADING_REALIGN_MIN_TURN_RAD: float = _env_float(
+        "NAV_REMOTE_HEADING_REALIGN_MIN_TURN_RAD",
+        math.radians(20.0),
+    )
+    REMOTE_HEADING_REALIGN_MIN_ERROR_RAD: float = _env_float(
+        "NAV_REMOTE_HEADING_REALIGN_MIN_ERROR_RAD",
+        math.radians(45.0),
     )
 
     @classmethod
@@ -2145,6 +2806,10 @@ class NavCore:
         self._last_translation_progress_pose = RobotPose()
         self._last_translation_progress_time = time.monotonic()
         self._stuck_recovery_attempts = 0
+        self._clear_motion_recovery_attempts = 0
+        self._locomotion_recovery_verification_pending: Optional[str] = None
+        self._locomotion_recovery_error: Optional[str] = None
+        self._arrival_map_consistency_readings = 0
         self._last_stall_scan_direction: Optional[float] = None
         self._close_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
@@ -2167,11 +2832,25 @@ class NavCore:
         self._path_obstacle_clear_since: Optional[float] = None
         self._obstacle_grid_unavailable_since: Optional[float] = None
         self._obstacle_grid_unavailable_notified = False
+        self._route_wall_heading_candidate: Optional[float] = None
+        self._route_wall_heading_readings = 0
         self._manual_override_active = False
+        self._manual_override_start_pose: Optional[RobotPose] = None
         self._obstacle_memory = LocalObstacleMemory(self.OBSTACLE_MEMORY_SECONDS)
         self._last_obstacle_telemetry_time = 0.0
         self._last_metric_localization_time = time.monotonic()
+        self._last_metric_localization_pose = RobotPose()
         self._last_metric_replan_time = 0.0
+        self._metric_replan_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="metric-replan",
+        )
+        self._metric_replan_future: Optional[Future] = None
+        self._metric_replan_context: Optional[Dict[str, Any]] = None
+        self._last_motion_command = VelocityCommand()
+        self._route_progress_waypoint_name: Optional[str] = None
+        self._route_progress_best_distance = float("inf")
+        self._route_regression_since: Optional[float] = None
 
         # Go2 macros (lazy init)
         self._go2 = None
@@ -2181,6 +2860,7 @@ class NavCore:
         if map_file and Path(map_file).exists():
             if self._topo_map.load_from_file(map_file):
                 self._anchor_initial_pose()
+        self._last_metric_localization_pose = self._odometry.get_pose()
 
         logger.info(
             "NavCore: initialized (obstacle_sensors=%s, map=%s, loop=%d Hz)",
@@ -2275,6 +2955,12 @@ class NavCore:
 
     def _clear_planner_and_obstacle_state(self) -> None:
         """Clear the active route plus transient local-navigation state."""
+        pending_replan = getattr(self, "_metric_replan_future", None)
+        if pending_replan is not None:
+            pending_replan.cancel()
+        self._metric_replan_future = None
+        self._metric_replan_context = None
+        self._last_motion_command = VelocityCommand()
         self._global_planner.clear()
         self._reset_close_obstacle_confirmation()
         self._reset_center_only_close_confirmation()
@@ -2285,14 +2971,32 @@ class NavCore:
         self._obstacle_grid_unavailable_since = None
         self._obstacle_grid_unavailable_notified = False
         self._last_stall_scan_direction = None
+        self._route_progress_waypoint_name = None
+        self._route_progress_best_distance = float("inf")
+        self._route_regression_since = None
+        self._locomotion_recovery_verification_pending = None
+        self._locomotion_recovery_error = None
+        self._arrival_map_consistency_readings = 0
         self._obstacle_memory.clear()
         self._local_planner.reset_navigation_state()
+        self._reset_route_wall_heading_confirmation()
 
     def _notify_waypoint_advance(self, reached: MapNode, upcoming: MapNode) -> None:
         """Publish topological progress without exposing noisy coordinates."""
-        self._local_planner.reset_navigation_state()
+        self._route_progress_waypoint_name = None
+        self._route_progress_best_distance = float("inf")
+        self._route_regression_since = None
         if "metric_transit" in reached.tags or "metric_transit" in upcoming.tags:
+            planner = getattr(self, "_global_planner", None)
+            turn_change = (
+                planner.current_turn_change()
+                if planner is not None
+                else None
+            )
+            if isinstance(turn_change, (int, float)) and abs(turn_change) >= math.radians(20.0):
+                self._local_planner.reset_navigation_state()
             return
+        self._local_planner.reset_navigation_state()
         reached_label = self._topo_map.get_node_label(reached)
         upcoming_label = self._topo_map.get_node_label(upcoming)
         self._notify_status_change(
@@ -2424,7 +3128,7 @@ class NavCore:
         pose: RobotPose,
         grid: Optional[ObstacleGrid],
     ) -> bool:
-        """Proactively route around a persistent live obstacle before stalling."""
+        """Schedule a route search only after aligned forward motion stalls."""
         metric_map = self._topo_map.metric_map
         active_since = self._path_obstacle_active_since
         if (
@@ -2433,12 +3137,24 @@ class NavCore:
             or grid is None
             or not self._path_obstacle_active
             or active_since is None
+            or getattr(self, "_metric_replan_future", None) is not None
         ):
             return False
         now = time.monotonic()
         if now - active_since < self.METRIC_BLOCKED_REPLAN_DELAY_S:
             return False
         if now - self._last_metric_replan_time < self.METRIC_REPLAN_COOLDOWN_S:
+            return False
+        waypoint = self._global_planner.get_current_waypoint()
+        if waypoint is None:
+            return False
+        route_bearing = math.atan2(waypoint.y - pose.y, waypoint.x - pose.x)
+        if self._angular_delta(route_bearing, pose.yaw) > self.METRIC_REPLAN_MAX_HEADING_ERROR_RAD:
+            return False
+        last_cmd = self._last_motion_command
+        if last_cmd.vx <= 0.03 or abs(last_cmd.vyaw) > 0.12:
+            return False
+        if now - self._last_translation_progress_time < self.METRIC_BLOCKED_REPLAN_DELAY_S:
             return False
         self._last_metric_replan_time = now
 
@@ -2448,29 +3164,94 @@ class NavCore:
             pose.y,
             pose.yaw,
         )
-        path = self._global_planner.replan_path_around_obstacles(
-            pose,
-            goal.label or "",
-            world_obstacles,
+        goal_node = self._topo_map.get_node(goal.label or "")
+        if goal_node is None:
+            return False
+        old_length, old_bearing = self._global_planner.remaining_metric_route(pose)
+        request_pose = RobotPose(pose.x, pose.y, pose.yaw, pose.timestamp)
+        self._metric_replan_context = {
+            "goal_label": goal.label or "",
+            "pose": request_pose,
+            "old_length": old_length,
+            "old_bearing": old_bearing,
+        }
+        self._metric_replan_future = self._metric_replan_executor.submit(
+            metric_map.plan_path,
+            (pose.x, pose.y),
+            (goal_node.x, goal_node.y),
+            dynamic_obstacles_xy=world_obstacles,
         )
-        if path is None:
+        logger.info(
+            "NavCore: scheduled background metric replan toward '%s'",
+            self._goal_display_name(goal),
+        )
+        return True
+
+    def _poll_metric_replan(self, goal: NavGoal, pose: RobotPose) -> bool:
+        """Install a completed background route only if it is current and different."""
+        future = self._metric_replan_future
+        context = self._metric_replan_context
+        if future is None or context is None or not future.done():
+            return False
+        self._metric_replan_future = None
+        self._metric_replan_context = None
+        try:
+            points = future.result()
+        except Exception:
+            logger.exception("NavCore: background metric replan failed")
+            return False
+        request_pose = context["pose"]
+        if (
+            goal.label != context["goal_label"]
+            or not self._path_obstacle_active
+            or math.hypot(pose.x - request_pose.x, pose.y - request_pose.y) > 0.40
+            or not points
+            or len(points) < 2
+        ):
+            logger.info("NavCore: discarded stale background metric route")
+            return False
+        candidate_length = sum(
+            math.hypot(second[0] - first[0], second[1] - first[1])
+            for first, second in zip(points, points[1:])
+        )
+        candidate_bearing = math.atan2(
+            points[1][1] - pose.y,
+            points[1][0] - pose.x,
+        )
+        old_bearing = context["old_bearing"]
+        if not self._global_planner.metric_detour_is_reasonable(
+            pose,
+            points,
+            context["old_length"],
+            old_bearing,
+        ):
             logger.warning(
-                "NavCore: proactive metric replan could not find another route to '%s'",
-                self._goal_display_name(goal),
+                "NavCore: rejected background metric route that reversed and "
+                "greatly lengthened the remaining route"
             )
             return False
-
-        goal.x = path[-1].x
-        goal.y = path[-1].y
-        # Keep the transition active so the same physical obstacle does not
-        # generate another agent-facing "encountered" event on the next frame.
-        self._path_obstacle_active = True
-        self._path_obstacle_active_since = now
+        if (
+            old_bearing is not None
+            and self._angular_delta(candidate_bearing, old_bearing)
+            < self.METRIC_REPLAN_MIN_ROUTE_CHANGE_RAD
+            and candidate_length >= context["old_length"] * 0.95
+        ):
+            logger.info("NavCore: rejected equivalent background metric route")
+            return False
+        path = self._global_planner.install_metric_path_points(
+            pose,
+            context["goal_label"],
+            points,
+        )
+        if path is None:
+            return False
+        goal.x, goal.y = path[-1].x, path[-1].y
+        self._path_obstacle_active_since = time.monotonic()
         self._path_obstacle_clear_since = None
         self._local_planner.reset_navigation_state()
         self._reset_progress_tracker(reset_recovery_attempts=False)
         logger.info(
-            "NavCore: proactively rerouted around a persistent obstacle toward '%s'",
+            "NavCore: installed distinct background metric route toward '%s'",
             self._goal_display_name(goal),
         )
         return True
@@ -2880,13 +3661,164 @@ class NavCore:
         goal: NavGoal,
         pose: RobotPose,
         grid: Optional[ObstacleGrid],
+        *,
+        allow_locomotion_recovery: bool = True,
     ) -> bool:
         """Change position safely, then replan while preserving the destination."""
+        planner = getattr(self, "_global_planner", None)
+        waypoint = planner.get_current_waypoint() if planner is not None else None
+        waypoint_distance = (
+            math.hypot(waypoint.x - pose.x, waypoint.y - pose.y)
+            if isinstance(waypoint, MapNode)
+            else float("inf")
+        )
+        if (
+            allow_locomotion_recovery
+            and grid is not None
+            and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+        ):
+            clear_attempts = getattr(self, "_clear_motion_recovery_attempts", 0)
+            if (
+                clear_attempts
+                >= self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS
+            ):
+                if not getattr(self, "_locomotion_recovery_error", None):
+                    stage = getattr(
+                        self,
+                        "_locomotion_recovery_verification_pending",
+                        None,
+                    )
+                    self._locomotion_recovery_error = (
+                        f"{stage or 'locomotion'} recovery completed, but subsequent "
+                        "commands still produced no measured translation"
+                    )
+                return False
+
+            advanced_name = None
+            if (
+                isinstance(waypoint, MapNode)
+                and "metric_transit" in waypoint.tags
+                and waypoint_distance <= self.CLEAR_STALL_TRANSIT_SKIP_M
+            ):
+                advanced = planner.advance_current_waypoint(
+                    on_advance=self._notify_waypoint_advance,
+                )
+                if advanced is not None and advanced[1] is not None:
+                    advanced_name = waypoint.name
+
+            self._ensure_go2()
+            recovered = False
+            recovery_stage = "soft locomotion-mode reset"
+            if self._go2:
+                try:
+                    if clear_attempts == 0 and getattr(
+                        self._go2,
+                        "available",
+                        False,
+                    ):
+                        recover = getattr(self._go2, "recover_locomotion", None)
+                        if callable(recover):
+                            recovered = bool(recover())
+                        else:
+                            self._go2.stop_move()
+                        # A rejected mode reset falls through immediately to a
+                        # fresh client rather than spending a watchdog cycle on
+                        # a recovery operation known to have failed.
+                        if not recovered:
+                            recovery_stage = "SportClient reinitialization"
+                            reinitialize = getattr(
+                                self._go2,
+                                "reinitialize_locomotion",
+                                None,
+                            )
+                            recovered = bool(
+                                reinitialize() if callable(reinitialize) else False
+                            )
+                    else:
+                        recovery_stage = "SportClient reinitialization"
+                        reinitialize = getattr(
+                            self._go2,
+                            "reinitialize_locomotion",
+                            None,
+                        )
+                        recovered = bool(
+                            reinitialize() if callable(reinitialize) else False
+                        )
+                except Exception:
+                    logger.exception("NavCore: locomotion-mode recovery failed")
+
+            if not recovered:
+                detail = getattr(self._go2, "last_recovery_error", None)
+                self._locomotion_recovery_error = (
+                    f"{recovery_stage} failed"
+                    + (f": {detail}" if detail else "")
+                )
+                self._clear_motion_recovery_attempts = (
+                    self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS
+                )
+                logger.error(
+                    "NavCore: locomotion recovery could not continue: %s",
+                    self._locomotion_recovery_error,
+                )
+                return False
+
+            with self._state_lock:
+                self._clear_motion_recovery_attempts = clear_attempts + 1
+                attempt = self._clear_motion_recovery_attempts
+                self._locomotion_recovery_verification_pending = recovery_stage
+                self._locomotion_recovery_error = None
+                self._state = NavState.NAVIGATING
+                self._last_stop_reason = None
+                self._last_motion_command = VelocityCommand()
+                self._local_planner.reset_navigation_state()
+                self._reset_progress_tracker(reset_recovery_attempts=False)
+            logger.warning(
+                "NavCore: clear path but commanded translation was not measured; "
+                "%s %d/%d completed and is awaiting measured-motion verification%s",
+                recovery_stage,
+                attempt,
+                self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS,
+                (
+                    f"; advanced past nearby transit point '{advanced_name}'"
+                    if advanced_name
+                    else ""
+                ),
+            )
+            if attempt == 1:
+                self._notify_status_change(
+                    "Locomotion stopped responding. I preserved my position and "
+                    "route, reset the locomotion mode, and am using a bounded "
+                    "route-aligned command to verify motion "
+                    f"before continuing toward {self._goal_display_name(goal)}."
+                )
+            else:
+                self._notify_status_change(
+                    "The locomotion-mode reset was not verified, so I replaced the "
+                    "robot motion-service client while preserving my position and "
+                    "route. I am verifying motion again with a bounded route-aligned "
+                    "command."
+                )
+            return True
+
         if self._stuck_recovery_attempts >= self.MAX_STUCK_RECOVERY_ATTEMPTS:
             return False
 
         escaped = self._execute_stall_escape(goal, grid)
+        escape_direction = None
+        scan_direction = None
         if escaped is None:
+            # A close obstacle can prevent every translational escape even when
+            # one turning sector is open.  Do not spend all recovery attempts
+            # waiting in the same pose: pivot to inspect that sector, then
+            # replan from the new heading.
+            latest_grid = self._fresh_obstacle_grid(
+                self._depth_processor.get_obstacle_grid()
+            )
+            scanned = self._execute_stall_turn_scan(goal, latest_grid)
+            if scanned is not None:
+                pose, scan_direction = scanned
+
+        if escaped is None and scan_direction is None:
             with self._state_lock:
                 self._stuck_recovery_attempts += 1
                 attempt = self._stuck_recovery_attempts
@@ -2905,15 +3837,21 @@ class NavCore:
                 "try again."
             )
             return True
-        pose, escape_direction = escaped
+        if escaped is not None:
+            pose, escape_direction = escaped
+            latest_grid = self._fresh_obstacle_grid(
+                self._depth_processor.get_obstacle_grid()
+            )
+            scanned = self._execute_stall_turn_scan(goal, latest_grid)
+            if scanned is not None:
+                pose, scan_direction = scanned
 
+        # Use a view captured in the recovered orientation when projecting
+        # depth points into the map.  Reusing the pre-turn view rotates dynamic
+        # obstacles into the wrong world locations and can reject a valid path.
         latest_grid = self._fresh_obstacle_grid(
             self._depth_processor.get_obstacle_grid()
         )
-        scanned = self._execute_stall_turn_scan(goal, latest_grid)
-        scan_direction = None
-        if scanned is not None:
-            pose, scan_direction = scanned
 
         if goal.goal_type == "semantic":
             dynamic_obstacles = None
@@ -2938,7 +3876,23 @@ class NavCore:
                     dynamic_obstacles,
                 )
             if path is None:
-                return False
+                with self._state_lock:
+                    self._stuck_recovery_attempts += 1
+                    attempt = self._stuck_recovery_attempts
+                    self._state = NavState.NAVIGATING
+                    self._last_stop_reason = None
+                    self._reset_progress_tracker(reset_recovery_attempts=False)
+                logger.warning(
+                    "NavCore: recovery %d/%d rejected an unsafe detour; retaining "
+                    "the route and trying the other opening next",
+                    attempt,
+                    self.MAX_STUCK_RECOVERY_ATTEMPTS,
+                )
+                self._notify_status_change(
+                    f"I avoided an unsafe turn away from {self._goal_display_name(goal)}. "
+                    "I will try the other opening and reroute again."
+                )
+                return True
             goal.x = path[-1].x
             goal.y = path[-1].y
             self._local_planner.reset_navigation_state()
@@ -2981,8 +3935,16 @@ class NavCore:
         )
         self._notify_status_change(
             f"I stalled while heading to {self._goal_display_name(goal)}. "
-            f"I stepped {escape_direction}"
-            + (f", turned {scan_direction}" if scan_direction else "")
+            + (
+                f"I stepped {escape_direction}"
+                if escape_direction
+                else f"I turned {scan_direction}"
+            )
+            + (
+                f", turned {scan_direction}"
+                if escape_direction and scan_direction
+                else ""
+            )
             + ", rerouted, and am continuing."
         )
         return True
@@ -3027,6 +3989,7 @@ class NavCore:
 
         try:
             self._go2.move(vx=cmd.vx, vy=cmd.vy, vyaw=cmd.vyaw)
+            self._last_motion_command = cmd
             return True
         except Exception:
             logger.exception("NavCore: failed to send Go2 move command")
@@ -3046,8 +4009,8 @@ class NavCore:
     def navigate_to(self, destination: str) -> bool:
         """Navigate to a named location on the topological map.
 
-        Plans over the static occupancy map with current obstacles overlaid, then
-        the nav loop handles local avoidance and proactive replanning.
+        Plans over the static occupancy map, then the nav loop handles live
+        obstacle avoidance and confirmed blocked-route replanning.
         Returns False if no map loaded or destination unreachable.
         """
         if not self._topo_map.is_loaded:
@@ -3086,7 +4049,21 @@ class NavCore:
             if goal_node.arrival_tolerance_m is not None
             else self.SEMANTIC_ARRIVAL_TOLERANCE_M
         )
-        if dist_to_goal <= arrival_tolerance:
+        immediate_tolerance = (
+            min(
+                arrival_tolerance,
+                GlobalPlanner.FINAL_METRIC_LONGITUDINAL_TOLERANCE_M,
+            )
+            if self._topo_map.metric_map is not None
+            else arrival_tolerance
+        )
+        if (
+            dist_to_goal <= immediate_tolerance
+            and (
+                self._topo_map.metric_map is None
+                or self._current_location_name == goal_node.name
+            )
+        ):
             if self._go2 and getattr(self._go2, "available", False):
                 try:
                     self._go2.stop_move()
@@ -3127,21 +4104,15 @@ class NavCore:
             self._stop_depth_when_idle()
             return False
 
-        dynamic_obstacles = None
-        initial_grid = self._fresh_obstacle_grid(
-            self._depth_processor.get_obstacle_grid()
-        )
-        if self._topo_map.metric_map is not None and initial_grid is not None:
-            dynamic_obstacles = self._topo_map.metric_map.robot_points_to_world(
-                occupied_xy_points(initial_grid),
-                pose.x,
-                pose.y,
-                pose.yaw,
-            )
+        # Do not let a single robot-frame scan redefine the global route at
+        # startup. Nearby mapped walls and furniture are already represented in
+        # the occupancy map, while pose/heading error can project them across the
+        # correct exit corridor. Live depth still gates every motion cycle and is
+        # included by the confirmed blocked-route replanner.
         path = self._global_planner.plan_path(
             pose,
             destination,
-            dynamic_obstacles_xy=dynamic_obstacles,
+            dynamic_obstacles_xy=None,
         )
         if path is None:
             with self._state_lock:
@@ -3152,6 +4123,21 @@ class NavCore:
             self._notify_status_change(
                 f"I did not move because I do not have a collision-free route to "
                 f"{goal_label}."
+            )
+            self._stop_depth_when_idle()
+            return False
+
+        # A full-map search can outlive the frame it started from.  Do not begin
+        # moving until the safety loop has a current view again.
+        if not self._wait_for_depth_grid(self.DEPTH_READY_TIMEOUT_S):
+            with self._state_lock:
+                self._state = NavState.E_STOP
+                self._goal = None
+                self._last_stop_reason = "E-STOP: obstacle grid stale after route planning"
+                self._clear_planner_and_obstacle_state()
+            self._notify_status_change(
+                f"I did not move toward {goal_label} because my obstacle view "
+                "did not refresh after route planning."
             )
             self._stop_depth_when_idle()
             return False
@@ -3174,13 +4160,15 @@ class NavCore:
         return True
 
     def _wait_for_depth_grid(self, timeout_s: float) -> bool:
-        """Wait briefly for obstacle sensing to publish its first grid."""
+        """Wait briefly for obstacle sensing to publish a fresh grid."""
         if not self._ensure_depth_running():
             return False
 
         deadline = time.monotonic() + max(0.0, timeout_s)
         while True:
-            if self._depth_processor.get_obstacle_grid() is not None:
+            if self._fresh_obstacle_grid(
+                self._depth_processor.get_obstacle_grid()
+            ) is not None:
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -3205,6 +4193,8 @@ class NavCore:
             self._clear_planner_and_obstacle_state()
 
         self._odometry.set_pose(node.x, node.y, heading_rad)
+        self._last_metric_localization_pose = self._odometry.get_pose()
+        self._last_metric_localization_time = time.monotonic()
         self._reset_progress_tracker()
         self._ensure_go2()
         if self._go2 and getattr(self._go2, "available", False):
@@ -3456,6 +4446,8 @@ class NavCore:
                 parts.append(
                     f"Current mapped location: {self._topo_map.get_node_label(current_node)}"
                 )
+        else:
+            parts.append("Current mapped location: unverified")
 
         if goal:
             if goal.label:
@@ -3553,6 +4545,7 @@ class NavCore:
         if manual_active:
             if not self._manual_override_active:
                 self._manual_override_active = True
+                self._manual_override_start_pose = self._odometry.get_pose()
                 logger.info("NavCore: autonomous navigation paused for remote control")
                 self._notify_status_change(
                     f"Manual control is active. I paused autonomous navigation to "
@@ -3570,6 +4563,7 @@ class NavCore:
                 self._goal = None
                 self._last_stop_reason = "Relative movement canceled after manual control"
                 self._clear_planner_and_obstacle_state()
+            self._manual_override_start_pose = None
             self._notify_status_change(
                 "Manual control ended, so I canceled the previous relative movement command."
             )
@@ -3577,44 +4571,232 @@ class NavCore:
             return True
 
         measured_pose = self._odometry.get_pose()
-        correction = self._global_planner.project_onto_current_segment(measured_pose)
-        if correction is None:
-            corrected_pose = RobotPose(
-                x=measured_pose.x,
-                y=measured_pose.y,
-                yaw=math.atan2(
-                    goal.y - measured_pose.y,
-                    goal.x - measured_pose.x,
-                ),
-            )
-            status_message = (
-                f"Manual control ended. I accepted the corrected position and am "
-                f"continuing toward {self._goal_display_name(goal)}."
-            )
-            log_args = (self._goal_display_name(goal),)
-            log_message = "NavCore: accepted remote correction toward '%s'"
-        else:
-            corrected_pose, segment_start, segment_target = correction
-            status_message = (
-                f"Manual control ended. I accepted the correction on the route from "
-                f"{self._topo_map.get_node_label(segment_start)} to "
-                f"{self._topo_map.get_node_label(segment_target)} and am "
-                f"continuing toward {self._goal_display_name(goal)}."
-            )
-            log_args = (segment_start.name, segment_target.name)
-            log_message = (
-                "NavCore: accepted remote correction on route segment '%s' -> '%s'"
-            )
-
-        self._odometry.set_pose(
-            corrected_pose.x,
-            corrected_pose.y,
-            corrected_pose.yaw,
+        path = self._global_planner.plan_path(
+            measured_pose,
+            goal.label or "",
+            dynamic_obstacles_xy=None,
         )
+        heading_realigned = False
+        if path is not None and len(path) > 1:
+            first_target = path[1]
+            route_bearing = math.atan2(
+                first_target.y - measured_pose.y,
+                first_target.x - measured_pose.x,
+            )
+            route_heading_error = abs(
+                math.atan2(
+                    math.sin(route_bearing - measured_pose.yaw),
+                    math.cos(route_bearing - measured_pose.yaw),
+                )
+            )
+            start_pose = getattr(self, "_manual_override_start_pose", None)
+            manual_turn = (
+                abs(
+                    math.atan2(
+                        math.sin(measured_pose.yaw - start_pose.yaw),
+                        math.cos(measured_pose.yaw - start_pose.yaw),
+                    )
+                )
+                if isinstance(start_pose, RobotPose)
+                else 0.0
+            )
+            if (
+                manual_turn >= self.REMOTE_HEADING_REALIGN_MIN_TURN_RAD
+                and route_heading_error >= self.REMOTE_HEADING_REALIGN_MIN_ERROR_RAD
+            ):
+                # A substantial human course correction is authoritative.  If
+                # SDK yaw still disagrees sharply with the newly planned route,
+                # re-anchor the map yaw so autonomous control continues in the
+                # physical direction selected with the remote instead of
+                # immediately undoing the correction.
+                measured_pose = RobotPose(
+                    x=measured_pose.x,
+                    y=measured_pose.y,
+                    yaw=route_bearing,
+                    timestamp=time.time(),
+                )
+                self._odometry.apply_pose_correction(
+                    measured_pose.x,
+                    measured_pose.y,
+                    measured_pose.yaw,
+                )
+                heading_realigned = True
+        if path is not None:
+            goal.x, goal.y = path[-1].x, path[-1].y
+            self._local_planner.reset_navigation_state()
         self._reset_progress_tracker()
-        logger.info(log_message, *log_args)
-        self._notify_status_change(status_message)
+        self._manual_override_start_pose = None
+        logger.info(
+            "NavCore: preserved remote correction pose=(%.2f, %.2f, %.0fdeg)%s and %s "
+            "a fresh route toward '%s'",
+            measured_pose.x,
+            measured_pose.y,
+            math.degrees(measured_pose.yaw),
+            " with route-aligned heading" if heading_realigned else "",
+            "planned" if path is not None else "could not plan",
+            self._goal_display_name(goal),
+        )
+        self._notify_status_change(
+            f"Manual control ended. I preserved the corrected position and heading and "
+            f"am continuing toward {self._goal_display_name(goal)}."
+        )
         return False
+
+    def _reset_route_wall_heading_confirmation(self) -> None:
+        self._route_wall_heading_candidate = None
+        self._route_wall_heading_readings = 0
+
+    def _maybe_align_heading_to_route_wall(
+        self,
+        grid: Optional[ObstacleGrid],
+        pose: RobotPose,
+    ) -> RobotPose:
+        """Use a repeatedly observed parallel wall to correct map-frame yaw."""
+        segment_heading = self._global_planner.current_segment_heading()
+        waypoint = self._global_planner.get_current_waypoint()
+        if (
+            grid is None
+            or segment_heading is None
+            or waypoint is None
+            or "metric_transit" not in waypoint.tags
+            or waypoint.name not in {"__metric_001__", "__metric_002__"}
+        ):
+            # Wall yaw re-anchoring corrects a bad starting orientation only.
+            # Once route motion is established, short or slanted wall fragments
+            # must not rewrite map heading and steer the robot off its route.
+            self._reset_route_wall_heading_confirmation()
+            return pose
+        if grid.path_obstacle_m <= self.AVOIDANCE_DISTANCE_M:
+            self._reset_route_wall_heading_confirmation()
+            return pose
+        last_cmd = getattr(self, "_last_motion_command", VelocityCommand())
+        if (
+            abs(last_cmd.vx) < 0.03
+            and abs(last_cmd.vy) < 0.03
+            and abs(last_cmd.vyaw) > 0.12
+        ):
+            self._reset_route_wall_heading_confirmation()
+            return pose
+
+        wall_fits = self._local_planner._visible_wall_fits(grid)
+        candidates = [
+            heading
+            for heading, _lateral in wall_fits.values()
+            if abs(heading) <= self.ROUTE_WALL_MAX_OBSERVED_HEADING_RAD
+        ]
+        if not candidates:
+            self._reset_route_wall_heading_confirmation()
+            return pose
+        observed_heading = min(candidates, key=abs)
+        corrected_yaw = math.atan2(
+            math.sin(segment_heading - observed_heading),
+            math.cos(segment_heading - observed_heading),
+        )
+        correction = math.atan2(
+            math.sin(corrected_yaw - pose.yaw),
+            math.cos(corrected_yaw - pose.yaw),
+        )
+        if not (
+            self.ROUTE_WALL_MIN_YAW_CORRECTION_RAD
+            <= abs(correction)
+            <= self.ROUTE_WALL_MAX_YAW_CORRECTION_RAD
+        ):
+            self._reset_route_wall_heading_confirmation()
+            return pose
+
+        previous = self._route_wall_heading_candidate
+        if previous is None or abs(
+            math.atan2(
+                math.sin(corrected_yaw - previous),
+                math.cos(corrected_yaw - previous),
+            )
+        ) > math.radians(5.0):
+            self._route_wall_heading_candidate = corrected_yaw
+            self._route_wall_heading_readings = 1
+            return pose
+
+        self._route_wall_heading_candidate = corrected_yaw
+        self._route_wall_heading_readings += 1
+        if self._route_wall_heading_readings < self.ROUTE_WALL_HEADING_CONFIRM_READINGS:
+            return pose
+
+        corrected = RobotPose(
+            x=pose.x,
+            y=pose.y,
+            yaw=corrected_yaw,
+            timestamp=time.time(),
+        )
+        self._odometry.apply_pose_correction(corrected.x, corrected.y, corrected.yaw)
+        self._local_planner.reset_navigation_state()
+        self._reset_route_wall_heading_confirmation()
+        logger.info(
+            "NavCore: route-parallel wall corrected map heading by %+.0fdeg",
+            math.degrees(correction),
+        )
+        return corrected
+
+    def _accept_expected_metric_corner(
+        self,
+        pose: RobotPose,
+        grid: Optional[ObstacleGrid],
+    ) -> Tuple[RobotPose, bool]:
+        """Advance a mapped sharp corner when its expected transverse wall appears."""
+        upcoming = self._global_planner.upcoming_turn()
+        segment = self._global_planner.current_segment()
+        if grid is None or upcoming is None or segment is None:
+            return pose, False
+        corner, _following, turn = upcoming
+        if (
+            "metric_transit" not in corner.tags
+            or abs(turn) < self.EXPECTED_CORNER_MIN_TURN_RAD
+            or not (
+                self.EXPECTED_CORNER_MIN_WALL_DISTANCE_M
+                <= grid.path_obstacle_m
+                <= self.EXPECTED_CORNER_MAX_WALL_DISTANCE_M
+            )
+            or abs(grid.path_obstacle_bearing) > self.FORWARD_HAZARD_CONE_RAD
+            or not is_transverse_wall(grid, grid.path_obstacle_m, 0.50)
+        ):
+            return pose, False
+
+        start, target = segment
+        edge_x = target.x - start.x
+        edge_y = target.y - start.y
+        edge_length = math.hypot(edge_x, edge_y)
+        if edge_length <= 1e-6:
+            return pose, False
+        unit_x, unit_y = edge_x / edge_length, edge_y / edge_length
+        remaining_x = target.x - pose.x
+        remaining_y = target.y - pose.y
+        longitudinal_error = remaining_x * unit_x + remaining_y * unit_y
+        lateral_error = abs(remaining_x * unit_y - remaining_y * unit_x)
+        if not (
+            0.0 <= longitudinal_error <= self.EXPECTED_CORNER_MAX_POSE_ERROR_M
+            and lateral_error <= 0.55
+        ):
+            return pose, False
+
+        corrected = RobotPose(
+            x=pose.x + longitudinal_error * unit_x,
+            y=pose.y + longitudinal_error * unit_y,
+            yaw=pose.yaw,
+            timestamp=time.time(),
+        )
+        self._odometry.apply_pose_correction(corrected.x, corrected.y, corrected.yaw)
+        advanced = self._global_planner.advance_current_waypoint(
+            on_advance=self._notify_waypoint_advance,
+        )
+        if advanced is None:
+            return pose, False
+        self._local_planner.reset_navigation_state()
+        self._reset_progress_tracker()
+        logger.info(
+            "NavCore: expected transverse wall accepted metric corner %.2fm early; "
+            "starting the %+.0fdeg route turn",
+            longitudinal_error,
+            math.degrees(turn),
+        )
+        return corrected, True
 
     def _maybe_correct_metric_pose(
         self,
@@ -3625,6 +4807,17 @@ class NavCore:
         metric_map = self._topo_map.metric_map
         if metric_map is None or grid is None:
             return pose
+        last_cmd = self._last_motion_command
+        if last_cmd.vx <= 0.05 or abs(last_cmd.vyaw) > 0.12:
+            return pose
+        if not self._odometry.has_confirmed_translation():
+            return pose
+        distance_since_correction = math.hypot(
+            pose.x - self._last_metric_localization_pose.x,
+            pose.y - self._last_metric_localization_pose.y,
+        )
+        if distance_since_correction < self.METRIC_LOCALIZATION_MIN_TRAVEL_M:
+            return pose
         now = time.monotonic()
         if (
             self.METRIC_LOCALIZATION_INTERVAL_S > 0.0
@@ -3632,13 +4825,27 @@ class NavCore:
             < self.METRIC_LOCALIZATION_INTERVAL_S
         ):
             return pose
-        self._last_metric_localization_time = now
-
+        scan_points = occupied_xy_points(grid)
+        useful = scan_points[
+            (scan_points[:, 0] >= 0.20)
+            & (scan_points[:, 0] <= 4.0)
+            & (np.abs(scan_points[:, 1]) <= 2.5)
+        ]
+        if len(useful) < 30:
+            return pose
+        covariance = np.cov(useful, rowvar=False)
+        eigenvalues = np.linalg.eigvalsh(covariance)
+        if eigenvalues[-1] <= 1e-6 or eigenvalues[0] / eigenvalues[-1] < 0.06:
+            logger.debug("NavCore: skipped ambiguous single-wall pose correction")
+            return pose
         correction = metric_map.match_pose(
-            occupied_xy_points(grid),
+            scan_points,
             pose.x,
             pose.y,
             pose.yaw,
+            minimum_improvement_m=0.08,
+            maximum_score_m=0.12,
+            minimum_matched_fraction=0.45,
         )
         if correction is None:
             return pose
@@ -3667,7 +4874,9 @@ class NavCore:
             yaw=pose.yaw + yaw_delta,
             timestamp=time.time(),
         )
-        self._odometry.set_pose(corrected.x, corrected.y, corrected.yaw)
+        self._odometry.apply_pose_correction(corrected.x, corrected.y, corrected.yaw)
+        self._last_metric_localization_time = now
+        self._last_metric_localization_pose = corrected
         logger.info(
             "NavCore: metric pose correction dx=%+.2fm dy=%+.2fm yaw=%+.1fdeg "
             "score=%.2fm improvement=%.2fm matched=%.0f%%",
@@ -3679,6 +4888,178 @@ class NavCore:
             100.0 * correction.matched_fraction,
         )
         return corrected
+
+    def _parallel_wall_projection_is_clear(
+        self,
+        grid: Optional[ObstacleGrid],
+        pose: RobotPose,
+    ) -> bool:
+        """Ignore a side-wall edge when the mapped route runs parallel to it."""
+        if (
+            grid is None
+            or grid.path_obstacle_m > self.AVOIDANCE_DISTANCE_M
+            or abs(grid.path_obstacle_bearing) < math.radians(10.0)
+            or grid.path_obstacle_m < self.MAPPED_SIDE_ROUTE_MIN_CLEARANCE_M
+        ):
+            return False
+        guidance_heading = self._global_planner.current_segment_guidance(pose)
+        if isinstance(guidance_heading, (int, float)) and math.isfinite(
+            guidance_heading
+        ):
+            route_heading = guidance_heading - pose.yaw
+        else:
+            waypoint = self._global_planner.get_current_waypoint()
+            if not isinstance(waypoint, MapNode):
+                return False
+            route_heading = math.atan2(
+                waypoint.y - pose.y,
+                waypoint.x - pose.x,
+            ) - pose.yaw
+        route_heading = math.atan2(
+            math.sin(route_heading),
+            math.cos(route_heading),
+        )
+        supported = self._local_planner.parallel_wall_supports_route(
+            grid,
+            route_heading,
+        )
+        mapped_side_clear = (
+            grid.path_obstacle_m >= self.MAPPED_SIDE_ROUTE_MIN_CLEARANCE_M
+            and abs(grid.path_obstacle_bearing) >= math.radians(30.0)
+        )
+        supported = supported or mapped_side_clear
+        if supported:
+            logger.debug(
+                "NavCore: treating parallel mapped wall at %+.0fdeg as side "
+                "geometry, not a blocked route",
+                math.degrees(grid.path_obstacle_bearing),
+            )
+        return supported
+
+    def _metric_arrival_sensor_is_confirmed(
+        self,
+        grid: Optional[ObstacleGrid],
+        pose: RobotPose,
+    ) -> bool:
+        """Confirm a claimed destination pose against independent depth geometry."""
+        metric_map = self._topo_map.metric_map
+        if metric_map is None or grid is None:
+            self._arrival_map_consistency_readings = 0
+            return False
+        consistency = metric_map.pose_consistency(
+            occupied_xy_points(grid),
+            pose.x,
+            pose.y,
+            pose.yaw,
+        )
+        if consistency is None:
+            self._arrival_map_consistency_readings = 0
+            logger.info(
+                "NavCore: destination arrival deferred; insufficient structural "
+                "depth geometry for map validation"
+            )
+            return False
+
+        score_m, matched_fraction = consistency
+        consistent = (
+            score_m <= self.ARRIVAL_MAP_MAX_SCORE_M
+            and matched_fraction >= self.ARRIVAL_MAP_MIN_MATCHED_FRACTION
+        )
+        if consistent:
+            self._arrival_map_consistency_readings += 1
+        else:
+            self._arrival_map_consistency_readings = 0
+        logger.info(
+            "NavCore: destination map validation score=%.2fm matched=%.0f%% "
+            "consistent=%s readings=%d/%d",
+            score_m,
+            100.0 * matched_fraction,
+            consistent,
+            self._arrival_map_consistency_readings,
+            self.ARRIVAL_MAP_CONFIRM_READINGS,
+        )
+        return (
+            self._arrival_map_consistency_readings
+            >= self.ARRIVAL_MAP_CONFIRM_READINGS
+        )
+
+    def _recover_regressing_metric_route(
+        self,
+        goal: NavGoal,
+        pose: RobotPose,
+        waypoint: MapNode,
+        waypoint_distance: float,
+    ) -> bool:
+        """Stop and replan when measured motion is persistently leaving the route."""
+        if "metric_transit" not in waypoint.tags:
+            self._route_progress_waypoint_name = None
+            self._route_progress_best_distance = float("inf")
+            self._route_regression_since = None
+            return False
+
+        if self._route_progress_waypoint_name != waypoint.name:
+            self._route_progress_waypoint_name = waypoint.name
+            self._route_progress_best_distance = waypoint_distance
+            self._route_regression_since = None
+            return False
+
+        if waypoint_distance < self._route_progress_best_distance:
+            self._route_progress_best_distance = waypoint_distance
+            self._route_regression_since = None
+            return False
+
+        regression = waypoint_distance - self._route_progress_best_distance
+        if regression < self.METRIC_ROUTE_REGRESSION_DISTANCE_M:
+            self._route_regression_since = None
+            return False
+
+        now = time.monotonic()
+        if self._route_regression_since is None:
+            self._route_regression_since = now
+            logger.warning(
+                "NavCore: route regression detected at '%s': best=%.2fm now=%.2fm; "
+                "holding for confirmation",
+                waypoint.name,
+                self._route_progress_best_distance,
+                waypoint_distance,
+            )
+            return False
+        if now - self._route_regression_since < self.METRIC_ROUTE_REGRESSION_CONFIRM_S:
+            return False
+
+        self._ensure_go2()
+        if self._go2 and getattr(self._go2, "available", False):
+            self._go2.stop_move()
+        path = self._global_planner.plan_path(
+            pose,
+            goal.label or "",
+            dynamic_obstacles_xy=None,
+        )
+        if path is None:
+            self._abort_active_navigation(
+                goal,
+                "Localization/route disagreement",
+                f"I stopped before reaching {self._goal_display_name(goal)} because "
+                "my measured position was moving away from the mapped route and I "
+                "could not establish a safe replacement route.",
+                state=NavState.STUCK,
+            )
+            return True
+
+        goal.x, goal.y = path[-1].x, path[-1].y
+        self._local_planner.reset_navigation_state()
+        self._reset_progress_tracker()
+        self._route_progress_waypoint_name = None
+        self._route_progress_best_distance = float("inf")
+        self._route_regression_since = None
+        logger.warning(
+            "NavCore: replaced regressing route to '%s' from pose=(%.2f, %.2f, %.0fdeg)",
+            self._goal_display_name(goal),
+            pose.x,
+            pose.y,
+            math.degrees(pose.yaw),
+        )
+        return True
 
     def _nav_cycle(self, state: NavState, goal: NavGoal):
         """Execute one navigation cycle: sense -> plan -> safety filter -> actuate."""
@@ -3692,18 +5073,47 @@ class NavCore:
         pose = self._odometry.get_pose()
         pose = self._maybe_correct_metric_pose(raw_grid, pose)
         geometry_grid = self._obstacle_memory.update(raw_grid, pose)
+        pose = self._maybe_align_heading_to_route_wall(raw_grid, pose)
         grid = self._filter_transient_path_obstacle(geometry_grid)
         self._log_obstacle_telemetry(raw_grid, geometry_grid, pose)
         self._update_progress(pose)
 
+        parallel_wall_clear = self._parallel_wall_projection_is_clear(
+            grid,
+            pose,
+        )
+        if parallel_wall_clear:
+            grid = self._without_path_obstacle(grid)
+
         path_dist = grid.path_obstacle_m if grid else float("inf")
         path_bearing = grid.path_obstacle_bearing if grid else 0.0
-        safety_dist = raw_grid.path_obstacle_m if raw_grid else float("inf")
-        safety_bearing = raw_grid.path_obstacle_bearing if raw_grid else 0.0
+        # Forward safety uses the temporally confirmed, center-corroborated
+        # path projection. Raw center depth is merged below as an independent
+        # safety channel. Feeding raw path metadata here let a single stray
+        # off-axis depth cluster bypass both filters and abort a clear route.
+        safety_dist = grid.path_obstacle_m if grid else float("inf")
+        safety_bearing = grid.path_obstacle_bearing if grid else 0.0
+        if (
+            raw_grid is not None
+            and raw_grid.path_obstacle_m <= self.SAFETY_DISTANCE_M
+            and abs(raw_grid.path_obstacle_bearing) <= self.FORWARD_HAZARD_CONE_RAD
+            and self._path_obstacle_matches_center_depth(
+                raw_grid.path_obstacle_m
+            )
+        ):
+            # A center-corroborated imminent obstacle holds motion immediately
+            # while the temporal tracker decides whether it is persistent.
+            safety_dist = raw_grid.path_obstacle_m
+            safety_bearing = raw_grid.path_obstacle_bearing
 
         # 2. Check if goal reached
         dist_to_goal = math.hypot(goal.x - pose.x, goal.y - pose.y)
-        if dist_to_goal < self.GOAL_TOLERANCE_M:
+        metric_semantic_route = (
+            goal.goal_type == "semantic"
+            and self._topo_map.metric_map is not None
+            and self._global_planner.get_current_waypoint() is not None
+        )
+        if dist_to_goal < self.GOAL_TOLERANCE_M and not metric_semantic_route:
             self._complete_navigation(goal, dist_to_goal)
             return
 
@@ -3723,18 +5133,46 @@ class NavCore:
         # 3. Compute velocity command
         if state == NavState.NAVIGATING:
             accepted_landmark = False
+            slow_for_arrival = True
             metric_route = (
                 goal.goal_type == "semantic"
                 and self._topo_map.metric_map is not None
             )
             if metric_route:
                 self._update_path_obstacle_event(path_dist, goal)
+                self._poll_metric_replan(goal, pose)
                 self._maybe_replan_blocked_metric_route(goal, pose, grid)
             if goal.goal_type == "semantic":
+                if metric_route:
+                    pose, _ = self._accept_expected_metric_corner(
+                        pose,
+                        geometry_grid,
+                    )
+                active_waypoint = self._global_planner.get_current_waypoint()
+                final_sensor_confirmed = True
+                if (
+                    metric_route
+                    and isinstance(active_waypoint, MapNode)
+                    and "metric_transit" not in active_waypoint.tags
+                    and math.hypot(
+                        active_waypoint.x - pose.x,
+                        active_waypoint.y - pose.y,
+                    )
+                    <= (
+                        active_waypoint.arrival_tolerance_m
+                        or self.SEMANTIC_ARRIVAL_TOLERANCE_M
+                    )
+                ):
+                    final_sensor_confirmed = (
+                        self._metric_arrival_sensor_is_confirmed(raw_grid, pose)
+                    )
+                else:
+                    self._arrival_map_consistency_readings = 0
                 waypoint = self._global_planner.get_next_waypoint(
                     pose,
                     self.SEMANTIC_ARRIVAL_TOLERANCE_M,
                     on_advance=self._notify_waypoint_advance,
+                    final_arrival_sensor_confirmed=final_sensor_confirmed,
                 )
                 if waypoint is None:
                     self._complete_navigation(goal)
@@ -3748,6 +5186,7 @@ class NavCore:
                     self._complete_navigation(goal)
                     return
                 target_x, target_y = waypoint.x, waypoint.y
+                slow_for_arrival = "metric_transit" not in waypoint.tags
             else:
                 target_x, target_y = goal.x, goal.y
 
@@ -3758,10 +5197,87 @@ class NavCore:
             # Normalize to [-pi, pi]
             goal_dir = math.atan2(math.sin(goal_dir), math.cos(goal_dir))
             goal_dist = math.hypot(target_x - pose.x, target_y - pose.y)
+            if (
+                metric_route
+                and isinstance(waypoint, MapNode)
+                and self._recover_regressing_metric_route(
+                    goal,
+                    pose,
+                    waypoint,
+                    goal_dist,
+                )
+            ):
+                return
+            pivot_heading = goal_dir
+            if metric_route:
+                segment_heading = self._global_planner.current_segment_heading()
+                if isinstance(segment_heading, (int, float)) and math.isfinite(
+                    segment_heading
+                ):
+                    pivot_heading = math.atan2(
+                        math.sin(segment_heading - pose.yaw),
+                        math.cos(segment_heading - pose.yaw),
+                    )
+                guidance_heading = self._global_planner.current_segment_guidance(
+                    pose,
+                    max_correction_rad=(
+                        self.FINAL_ROUTE_MAX_CROSS_TRACK_CORRECTION_RAD
+                        if slow_for_arrival
+                        else math.radians(10.0)
+                    ),
+                )
+                if isinstance(guidance_heading, (int, float)) and math.isfinite(
+                    guidance_heading
+                ):
+                    goal_dir = math.atan2(
+                        math.sin(guidance_heading - pose.yaw),
+                        math.cos(guidance_heading - pose.yaw),
+                    )
 
-            cmd = self._local_planner.compute_velocity(grid, goal_dir, goal_dist)
+            cmd = self._local_planner.compute_velocity(
+                grid,
+                goal_dir,
+                goal_dist,
+                slow_for_arrival=slow_for_arrival,
+                pivot_heading=pivot_heading,
+            )
+            stabilized = self._local_planner.stabilize_translating_steering(cmd)
+            if isinstance(stabilized, VelocityCommand):
+                cmd = stabilized
             if goal.goal_type == "semantic":
-                cmd = self._local_planner.apply_corridor_course_correction(cmd, grid)
+                # Stabilize route steering first.  Wall/corner clearance is a
+                # safety correction and must be able to take effect immediately.
+                corrected = self._local_planner.apply_corridor_course_correction(
+                    cmd,
+                    grid,
+                    correction_limit=0.02 if metric_route else None,
+                    align_only=metric_route and slow_for_arrival,
+                )
+                if isinstance(corrected, VelocityCommand):
+                    cmd = corrected
+                if metric_route and slow_for_arrival:
+                    cmd = self._local_planner.maintain_effective_final_approach(
+                        cmd,
+                        grid,
+                        goal_dist,
+                        min(
+                            self.SEMANTIC_ARRIVAL_TOLERANCE_M,
+                            GlobalPlanner.FINAL_METRIC_LONGITUDINAL_TOLERANCE_M,
+                        ),
+                    )
+
+            if (
+                getattr(self, "_locomotion_recovery_verification_pending", None)
+                and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                and raw_grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                and cmd.vx >= 0.03
+                and cmd.vx < self.LOCOMOTION_VERIFICATION_SPEED_MPS
+            ):
+                # Verification must use a command known to initiate a Go2 gait;
+                # repeating a marginal low-speed command can falsely make a
+                # healthy, freshly reset service look unresponsive.  Keep the
+                # planner's route-aligned yaw and all ordinary safety filtering.
+                cmd = replace(cmd, vx=self.LOCOMOTION_VERIFICATION_SPEED_MPS)
 
         elif state == NavState.AVOIDING:
             if grid:
@@ -3783,16 +5299,58 @@ class NavCore:
             cmd,
             safety_dist,
             safety_bearing,
+            parallel_wall_clear=parallel_wall_clear,
         )
         now = time.monotonic()
-        # Heading changes let a normal planned pivot finish, but they must not
-        # postpone stall detection forever when the robot only oscillates or
-        # turns beside an obstacle. Ten seconds is longer than a 180-degree
-        # pivot at the configured pivot rate.
-        seconds_since_progress = max(
-            now - self._last_progress_time,
-            now - self._last_translation_progress_time,
+        # A commanded pivot is making useful progress when measured yaw changes;
+        # a translating command must produce measured position change. Mixing the
+        # two clocks made valid turns expire on the translation-only timeout.
+        pivot_only = (
+            abs(cmd.vx) < 1e-3
+            and abs(cmd.vy) < 1e-3
+            and abs(cmd.vyaw) > 1e-3
         )
+        if pivot_only and raw_grid is not None:
+            # A forward-path projection is insufficient for turns in place:
+            # the rear legs sweep sideways around the robot.  Use a supported
+            # low percentile of occupied cells rather than the minimum raw
+            # depth pixel: the latter repeatedly reported a 0.19m peripheral
+            # speck while every populated view sector was 0.36-0.95m away.
+            nearest, nearest_bearing = self._robust_pivot_clearance(raw_grid)
+            if math.isfinite(nearest) and nearest < safety_dist:
+                safety_dist = nearest
+                safety_bearing = nearest_bearing
+        seconds_since_progress = (
+            now - self._last_progress_time
+            if pivot_only
+            else now - self._last_translation_progress_time
+        )
+        locomotion_verification_requested = (
+            abs(cmd.vx) >= self.LOCOMOTION_MIN_VERIFICATION_COMMAND_MPS
+            or abs(cmd.vy) >= self.LOCOMOTION_MIN_VERIFICATION_COMMAND_MPS
+        )
+        if pivot_only:
+            # Turning is not failed translation. Keep the translation watchdog
+            # fresh throughout a planned pivot so the first forward command
+            # afterward receives a complete acknowledgement window.
+            self._last_translation_progress_time = now
+            self._last_translation_progress_pose = pose
+        measured_translation = self._odometry.has_confirmed_translation()
+        if (
+            locomotion_verification_requested
+            and measured_translation
+            and grid is not None
+            and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+            and raw_grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+            and seconds_since_progress >= self.CLEAR_MOTION_ACK_TIMEOUT_S
+        ):
+            # The SDK accepted the command, but measured odometry did not follow
+            # it. Trigger the clear-path locomotion recovery promptly rather than
+            # waiting for the longer spatial-obstruction timeout.
+            seconds_since_progress = max(
+                seconds_since_progress,
+                self.STUCK_TIMEOUT_S,
+            )
         cmd, event = self._safety.filter_command(
             cmd,
             nearest_obstacle_m=safety_dist,
@@ -3807,6 +5365,7 @@ class NavCore:
                     and self._should_defer_close_obstacle_stop(
                         safety_dist,
                         safety_bearing,
+                        pivot_only=pivot_only,
                     )
                 ):
                     return
@@ -3816,6 +5375,36 @@ class NavCore:
                 else:
                     reason = f"E-STOP: {event.split(':', 1)[-1].replace('_', ' ')}"
                 logger.warning("NavCore: safety event: %s (%s)", event, reason)
+                if (
+                    event == "e_stop:obstacle_too_close"
+                    and goal.goal_type == "semantic"
+                ):
+                    self._ensure_go2()
+                    if self._go2 and getattr(self._go2, "available", False):
+                        self._go2.stop_move()
+                    self._reset_close_obstacle_confirmation()
+                    logger.warning(
+                        "NavCore: confirmed close obstacle; attempting autonomous "
+                        "semantic-route recovery before giving up"
+                    )
+                    # An obstacle-triggered safety stop is not evidence that the
+                    # SportClient is unresponsive.  Preserve the measured hazard
+                    # in the recovery grid even when temporal filtering removed
+                    # it from route planning, so this path tries a guarded escape
+                    # rather than resetting locomotion and then testing forward
+                    # motion against the same obstacle.
+                    recovery_grid = replace(
+                        grid if grid is not None else raw_grid,
+                        path_obstacle_m=safety_dist,
+                        path_obstacle_bearing=safety_bearing,
+                    )
+                    if self._recover_from_stall(
+                        goal,
+                        pose,
+                        recovery_grid,
+                        allow_locomotion_recovery=False,
+                    ):
+                        return
                 if event == "e_stop:obstacle_too_close":
                     message = (
                         f"I stopped before reaching {self._goal_display_name(goal)} "
@@ -3830,14 +5419,58 @@ class NavCore:
                 self._abort_active_navigation(goal, reason, message, state=NavState.E_STOP)
                 return
             elif event.startswith("stuck"):
-                if self._recover_from_stall(goal, pose, grid):
+                # Only diagnose an unresponsive locomotion service after a
+                # meaningful translation command was sent on a genuinely clear
+                # route.  Obstacle-slowed commands below gait-start speed (the
+                # failing run reached vx=0.024m/s) cannot verify locomotion.
+                clear_motion_candidate = (
+                    locomotion_verification_requested
+                    and grid is not None
+                    and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                    and raw_grid is not None
+                    and raw_grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                )
+                recovery_grid = grid
+                if not clear_motion_candidate and raw_grid is not None:
+                    recovery_grid = raw_grid
+                if self._recover_from_stall(
+                    goal,
+                    pose,
+                    recovery_grid,
+                    allow_locomotion_recovery=clear_motion_candidate,
+                ):
                     return
-                reason = "Stuck: no progress toward the goal"
+                clear_motion_failure = (
+                    grid is not None
+                    and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                    and self._clear_motion_recovery_attempts
+                    >= self.MAX_CLEAR_MOTION_RECOVERY_ATTEMPTS
+                )
+                reason = (
+                    "Locomotion recovery failed: "
+                    + (
+                        getattr(self, "_locomotion_recovery_error", None)
+                        or "accepted commands produced no measured motion"
+                    )
+                    if clear_motion_failure
+                    else "Stuck: no progress toward the goal"
+                )
+                message = (
+                    f"I stopped before reaching {self._goal_display_name(goal)} "
+                    "because the path was clear, but locomotion recovery could not "
+                    "be verified. "
+                    + (
+                        getattr(self, "_locomotion_recovery_error", None)
+                        or "Commands were accepted without measured movement."
+                    )
+                    if clear_motion_failure
+                    else f"I stopped before reaching {self._goal_display_name(goal)} "
+                    "because I was not making progress."
+                )
                 self._abort_active_navigation(
                     goal,
                     reason,
-                    f"I stopped before reaching {self._goal_display_name(goal)} "
-                    "because I was not making progress.",
+                    message,
                 )
                 return
 
@@ -3878,11 +5511,19 @@ class NavCore:
         cmd: VelocityCommand,
         path_dist: float,
         path_bearing: float,
+        *,
+        parallel_wall_clear: bool = False,
     ) -> Tuple[float, float]:
         """Merge projected path clearance with raw center depth for one safety gate."""
         if cmd.vx <= 1e-3:
             self._reset_center_only_close_confirmation()
             return path_dist, path_bearing
+
+        if parallel_wall_clear and abs(path_bearing) > math.radians(10.0):
+            # A mapped route parallel to a fitted side wall is not blocked by
+            # that wall merely because the swept corridor includes its edge.
+            # Raw center depth remains authoritative for anything truly ahead.
+            path_dist = max(path_dist, self.AVOIDANCE_DISTANCE_M)
 
         reading, supported = self._read_center_depth(
             max_depth_m=self.AVOIDANCE_DISTANCE_M,
@@ -3927,6 +5568,59 @@ class NavCore:
         if center_dist < path_dist:
             return center_dist, 0.0
         return path_dist, path_bearing
+
+    def _robust_pivot_clearance(
+        self,
+        grid: ObstacleGrid,
+    ) -> Tuple[float, float]:
+        """Return supported front-hemisphere clearance for an in-place turn."""
+        points = occupied_xy_points(grid)
+        if points.size == 0:
+            return float("inf"), 0.0
+
+        distances = np.hypot(points[:, 0], points[:, 1])
+        bearings = np.arctan2(points[:, 1], points[:, 0])
+        visible = (
+            (points[:, 0] >= 0.0)
+            & (np.abs(bearings) <= math.radians(60.0))
+        )
+        if not np.any(visible):
+            return float("inf"), 0.0
+
+        visible_distances = distances[visible]
+        visible_bearings = bearings[visible]
+        percentile = float(
+            np.clip(self.PIVOT_CLEARANCE_PERCENTILE, 0.0, 50.0)
+        )
+        inflated_clearance = float(
+            np.percentile(visible_distances, percentile)
+        )
+        # Occupied cells are already dilated by the robot radius.  Convert the
+        # percentile back to an approximate sensor-to-surface range before the
+        # SafetyMonitor applies its physical pivot clearance threshold.
+        raw_nearest = grid.nearest_obstacle_m
+        if (
+            isinstance(raw_nearest, (int, float))
+            and math.isfinite(raw_nearest)
+            and abs(float(raw_nearest) - inflated_clearance)
+            <= max(0.10, grid.resolution * 2.0)
+        ):
+            # Synthetic/non-inflated providers may already express the same
+            # supported surface range directly.
+            surface_clearance = float(raw_nearest)
+        else:
+            surface_clearance = inflated_clearance + max(
+                0.0,
+                self.PIVOT_GRID_INFLATION_M,
+            )
+        band = max(grid.resolution * 2.0, 0.08)
+        near = np.abs(visible_distances - inflated_clearance) <= band
+        bearing = (
+            float(np.median(visible_bearings[near]))
+            if np.any(near)
+            else 0.0
+        )
+        return surface_clearance, bearing
 
     def _log_obstacle_telemetry(
         self,
@@ -4070,15 +5764,10 @@ class NavCore:
         self,
         nearest_dist: float,
         nearest_bearing: float,
+        *,
+        pivot_only: bool = False,
     ) -> bool:
         """Hold briefly on borderline close obstacles to reject transient frames."""
-        if (
-            nearest_dist <= self.PIVOT_HARD_STOP_DISTANCE_M
-            or abs(nearest_bearing) > self.FORWARD_HAZARD_CONE_RAD
-        ):
-            self._reset_close_obstacle_confirmation()
-            return False
-
         if self._center_only_close_pending:
             self._last_progress_time = time.monotonic()
             self._ensure_go2()
@@ -4167,7 +5856,29 @@ class NavCore:
         if not isinstance(center_dist, (int, float)) or not math.isfinite(center_dist):
             return True
 
-        return float(center_dist) <= max(max_depth, distance_m)
+        # The raw-depth percentile is computed only from samples nearer than
+        # max_depth.  Without a coverage floor, a tiny patch of invalid/edge
+        # pixels can therefore report 0.19m even while the actual center view is
+        # 0.5-1.0m clear.  The grid remains the primary detector; this check only
+        # decides whether the independent center channel corroborates it.
+        coverage = getattr(reading, "coverage", 0.0)
+        if (
+            not isinstance(coverage, (int, float))
+            or not math.isfinite(coverage)
+            or float(coverage) < self.PATH_OBSTACLE_MIN_CENTER_COVERAGE
+        ):
+            logger.debug(
+                "NavCore: rejecting sparse center-depth corroboration at %.2fm "
+                "(coverage=%.1f%%)",
+                float(center_dist),
+                100.0 * float(coverage or 0.0),
+            )
+            return False
+
+        return float(center_dist) <= min(
+            max_depth,
+            distance_m + self.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M,
+        )
 
     @staticmethod
     def _without_path_obstacle(grid: ObstacleGrid) -> ObstacleGrid:
@@ -4191,8 +5902,12 @@ class NavCore:
         self._last_progress_time = now
         self._last_translation_progress_pose = pose
         self._last_translation_progress_time = now
+        self._route_progress_waypoint_name = None
+        self._route_progress_best_distance = float("inf")
+        self._route_regression_since = None
         if reset_recovery_attempts:
             self._stuck_recovery_attempts = 0
+            self._clear_motion_recovery_attempts = 0
             self._last_stall_scan_direction = None
         self._reset_close_obstacle_confirmation()
         self._reset_center_only_close_confirmation()
@@ -4222,7 +5937,25 @@ class NavCore:
             self._last_translation_progress_pose = current_pose
             self._last_translation_progress_time = time.monotonic()
             self._stuck_recovery_attempts = 0
+            self._clear_motion_recovery_attempts = 0
             self._last_stall_scan_direction = None
+            pending_recovery = getattr(
+                self,
+                "_locomotion_recovery_verification_pending",
+                None,
+            )
+            if pending_recovery:
+                self._locomotion_recovery_verification_pending = None
+                self._locomotion_recovery_error = None
+                logger.info(
+                    "NavCore: %s verified by %.2fm measured translation; route resumed",
+                    pending_recovery,
+                    translation_moved,
+                )
+                self._notify_status_change(
+                    "Locomotion recovery was verified by measured movement, and I am "
+                    "continuing the existing route."
+                )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -4248,6 +5981,10 @@ class NavCore:
             self._thread = None
         self._depth_processor.stop()
         self._odometry.shutdown()
+        executor = getattr(self, "_metric_replan_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+            self._metric_replan_executor = None
         logger.info("NavCore: shutdown complete")
 
     def __del__(self):

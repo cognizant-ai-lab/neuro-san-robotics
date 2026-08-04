@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Sequence, Tuple
 
 import numpy as np
-from PIL import Image
 
 
 def _long_runs(mask: np.ndarray, dr: int, dc: int, minimum: int) -> np.ndarray:
@@ -48,6 +47,64 @@ def _long_runs(mask: np.ndarray, dr: int, dc: int, minimum: int) -> np.ndarray:
     return kept
 
 
+def _compact_structures(
+    mask: np.ndarray,
+    *,
+    minimum_area_cells: int,
+    minimum_span_cells: int,
+) -> np.ndarray:
+    """Keep connected compact shapes while rejecting isolated plan text strokes.
+
+    Walls and long furniture edges are retained by :func:`_long_runs`. Chairs,
+    small tables, cabinets, and desk-pod outlines can be shorter in every
+    direction, so retain 8-connected components only when they have meaningful
+    area and span in both axes. Individual characters and dimension ticks are
+    normally too narrow or too small to pass both gates.
+    """
+    rows, cols = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    kept = np.zeros_like(mask, dtype=bool)
+    neighbors = (
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1), (0, 1),
+        (1, -1), (1, 0), (1, 1),
+    )
+
+    for start_row, start_col in zip(*np.nonzero(mask & ~visited)):
+        if visited[start_row, start_col]:
+            continue
+        stack = [(int(start_row), int(start_col))]
+        visited[start_row, start_col] = True
+        component = []
+        min_row = max_row = int(start_row)
+        min_col = max_col = int(start_col)
+        while stack:
+            row, col = stack.pop()
+            component.append((row, col))
+            min_row, max_row = min(min_row, row), max(max_row, row)
+            min_col, max_col = min(min_col, col), max(max_col, col)
+            for dr, dc in neighbors:
+                next_row, next_col = row + dr, col + dc
+                if (
+                    0 <= next_row < rows
+                    and 0 <= next_col < cols
+                    and mask[next_row, next_col]
+                    and not visited[next_row, next_col]
+                ):
+                    visited[next_row, next_col] = True
+                    stack.append((next_row, next_col))
+
+        if (
+            len(component) >= minimum_area_cells
+            and max_row - min_row + 1 >= minimum_span_cells
+            and max_col - min_col + 1 >= minimum_span_cells
+        ):
+            rr, cc = zip(*component)
+            kept[rr, cc] = True
+
+    return kept
+
+
 def _inside_polygon(
     x: np.ndarray,
     y: np.ndarray,
@@ -65,6 +122,27 @@ def _inside_polygon(
     return inside
 
 
+def _dilate_mask(mask: np.ndarray, radius_px: int) -> np.ndarray:
+    """Expand annotation-colored pixels to cover their dark outlines and text."""
+    if radius_px <= 0:
+        return mask.copy()
+    expanded = mask.copy()
+    rows, cols = mask.shape
+    for dr in range(-radius_px, radius_px + 1):
+        for dc in range(-radius_px, radius_px + 1):
+            if dr * dr + dc * dc > radius_px * radius_px:
+                continue
+            source_r0, source_r1 = max(0, -dr), min(rows, rows - dr)
+            source_c0, source_c1 = max(0, -dc), min(cols, cols - dc)
+            target_r0, target_r1 = source_r0 + dr, source_r1 + dr
+            target_c0, target_c1 = source_c0 + dc, source_c1 + dc
+            expanded[target_r0:target_r1, target_c0:target_c1] |= mask[
+                source_r0:source_r1,
+                source_c0:source_c1,
+            ]
+    return expanded
+
+
 def build_occupancy(
     map_json: Path,
     floor_plan: Path,
@@ -73,6 +151,8 @@ def build_occupancy(
     gray_threshold: int,
     minimum_structure_length_m: float,
 ) -> Tuple[np.ndarray, dict]:
+    from PIL import Image
+
     data = json.loads(map_json.read_text(encoding="utf-8"))
     coordinates = data["coordinate_system"]
     bbox = coordinates["source_floor_bbox_px"]
@@ -84,14 +164,15 @@ def build_occupancy(
         int(bbox["left"]):int(bbox["right"]),
     ].copy()
 
-    # Red circles and labels are annotations, not physical obstacles.  Their
-    # black borders are removed later by the minimum structural-run filter.
+    # Red circles and labels are annotations, not physical obstacles. Expand
+    # their red fill enough to erase the black outline and dark character too;
+    # otherwise a marker centered on the robot becomes a false enclosing wall.
     red = (
         (crop[:, :, 0] >= 145)
         & (crop[:, :, 0] >= crop[:, :, 1].astype(np.int16) * 1.35)
         & (crop[:, :, 0] >= crop[:, :, 2].astype(np.int16) * 1.35)
     )
-    crop[red] = 255
+    crop[_dilate_mask(red, radius_px=10)] = 255
 
     width_cells = int(math.ceil(float(dimensions["east_west"]) / resolution_m))
     height_cells = int(math.ceil(float(dimensions["north_south"]) / resolution_m))
@@ -112,6 +193,11 @@ def build_occupancy(
     occupied = np.zeros_like(dark)
     for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
         occupied |= _long_runs(dark, dr, dc, minimum_cells)
+    occupied |= _compact_structures(
+        dark,
+        minimum_area_cells=6,
+        minimum_span_cells=3,
+    )
 
     yy, xx = np.indices(occupied.shape, dtype=np.float32)
     world_x = (xx + 0.5) * resolution_m

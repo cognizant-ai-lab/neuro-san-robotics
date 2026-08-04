@@ -86,6 +86,7 @@ class Go2Macros:
         self.cli = None
         self.avoidance_cli = None
         self.available = False
+        self.last_recovery_error = None
         self._move_log_interval_s = _env_float("GO2_MOVE_LOG_INTERVAL_SECONDS", 1.0)
         self._last_move_log_at = 0.0
 
@@ -249,6 +250,97 @@ class Go2Macros:
                 return True
             self._log("Preparing locomotion for navigation")
             return self._prepare_locomotion()
+
+    def recover_locomotion(self):
+        """Re-enter a known locomotion mode after accepted commands stop moving."""
+        if not self.cli:
+            self.last_recovery_error = "SportClient is unavailable"
+            return False
+        with _ROBOT_INIT_LOCK:
+            self._log("Recovering locomotion after unacknowledged motion commands")
+            try:
+                self._call("StopMove", self.cli.StopMove)
+            finally:
+                _ROBOT_INIT_STATE["locomotion_ready"] = False
+            ready = self._prepare_locomotion()
+            self.last_recovery_error = (
+                None if ready else "RecoveryStand or BalanceStand was rejected"
+            )
+            return ready
+
+    def reinitialize_locomotion(self):
+        """Replace the SportClient and prepare locomotion on the existing DDS domain.
+
+        CycloneDDS initialization is process-global and must not be repeated.  A
+        fresh SportClient, however, replaces stale request/reply state without
+        touching navigation pose, localization, or route state held by NavCore.
+        """
+        if sport_client is None or not _ROBOT_INIT_STATE.get("channel_initialized"):
+            self.last_recovery_error = "DDS channel or SportClient module is unavailable"
+            return False
+
+        with _ROBOT_INIT_LOCK:
+            self._log("Reinitializing SportClient after unverified locomotion recovery")
+            previous_client = self.cli
+            if previous_client is not None:
+                try:
+                    self._call("StopMove", previous_client.StopMove)
+                except Exception as exc:
+                    self._log(f"⚠️ StopMove before SportClient replacement failed: {exc}")
+
+            self.available = False
+            self.cli = None
+            self.avoidance_cli = None
+            _ROBOT_INIT_STATE.update(
+                {
+                    "available": False,
+                    "client": None,
+                    "avoidance_client": None,
+                    "locomotion_ready": False,
+                }
+            )
+            try:
+                replacement = sport_client.SportClient()
+                replacement.SetTimeout(10.0)
+                replacement.Init()
+                self.cli = replacement
+                self._configure_startup_motion_modes()
+                self.available = True
+                _ROBOT_INIT_STATE.update(
+                    {
+                        "attempted": True,
+                        "available": True,
+                        "error": None,
+                        "reported_disabled": False,
+                        "client": replacement,
+                        "avoidance_client": self.avoidance_cli,
+                        "last_failure_at": 0.0,
+                        "locomotion_ready": False,
+                    }
+                )
+                ready = self._prepare_locomotion()
+                if not ready:
+                    raise RuntimeError("RecoveryStand or BalanceStand was rejected")
+                self.last_recovery_error = None
+                self._log("✅ SportClient reinitialized; awaiting measured-motion verification")
+                return True
+            except Exception as exc:
+                self.available = False
+                self.last_recovery_error = str(exc)
+                _ROBOT_INIT_STATE.update(
+                    {
+                        "attempted": True,
+                        "available": False,
+                        "error": str(exc),
+                        "reported_disabled": False,
+                        "client": None,
+                        "avoidance_client": None,
+                        "last_failure_at": time.monotonic(),
+                        "locomotion_ready": False,
+                    }
+                )
+                self._log(f"❌ SportClient reinitialization failed: {exc}")
+                return False
 
     def _timed_move(
         self,

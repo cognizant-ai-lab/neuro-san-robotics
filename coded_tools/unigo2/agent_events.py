@@ -51,6 +51,27 @@ def remember_navigation_awareness(text: str) -> None:
         logger.warning("Could not retain navigation awareness", exc_info=True)
 
 
+def route_navigation_status(text: str) -> None:
+    """Retain routine nav state, but wake the agent for terminal outcomes only."""
+    text = str(text).strip()
+    if not text:
+        return
+    remember_navigation_awareness(text)
+    terminal_prefixes = (
+        "I arrived at ",
+        "I am already at ",
+        "I stopped before reaching ",
+        "I did not move ",
+        "I could not ",
+    )
+    if text.startswith(terminal_prefixes):
+        # Terminal motion outcomes must never disappear into an internal-only
+        # thought. Deliver the authoritative sentence to both UI and speech;
+        # retain the agent event only as a fallback if the UI bridge is down.
+        if not publish_ui_output(thought=text, say=text):
+            queue_agent_event(text, source="navigation")
+
+
 def latest_navigation_awareness() -> str:
     """Return recent navigation awareness shared by the native and Flask processes."""
     path = _navigation_awareness_path()

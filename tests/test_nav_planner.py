@@ -15,8 +15,14 @@ class NavPlannerToolTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("coded_tools.unigo2.nav_core.NavCore.get_instance", return_value=nav),
             patch("coded_tools.unigo2.nav_core.NavCore.set_status_callback"),
+            patch(
+                "coded_tools.unigo2.agent_events.publish_ui_output",
+                return_value=True,
+            ) as publish,
         ):
-            self.assertEqual(await tool.async_invoke({"command": "status"}, {}), "status")
+            result = await tool.async_invoke({"command": "status"}, {})
+            self.assertIn("delivered directly", result)
+            publish.assert_called_once_with(thought="status", say="status")
             self.assertEqual(
                 await tool.async_invoke({"command": "destinations"}, {}),
                 "destinations",
@@ -25,6 +31,40 @@ class NavPlannerToolTests(unittest.IsolatedAsyncioTestCase):
                 await tool.async_invoke({"command": "obstacles"}, {}),
                 "obstacles",
             )
+
+    async def test_status_can_be_queried_without_announcing(self):
+        nav = MagicMock()
+        nav.get_status_summary.return_value = "status"
+        tool = NavPlannerTool()
+
+        with (
+            patch("coded_tools.unigo2.nav_core.NavCore.get_instance", return_value=nav),
+            patch("coded_tools.unigo2.nav_core.NavCore.set_status_callback"),
+            patch("coded_tools.unigo2.agent_events.publish_ui_output") as publish,
+        ):
+            result = await tool.async_invoke(
+                {"command": "status", "announce": False},
+                {},
+            )
+
+        self.assertEqual(result, "status")
+        publish.assert_not_called()
+
+    async def test_stop_returns_authoritative_post_stop_location(self):
+        nav = MagicMock()
+        nav.get_status_summary.return_value = (
+            "Navigation state: idle; Current mapped location: unverified"
+        )
+        tool = NavPlannerTool()
+
+        with (
+            patch("coded_tools.unigo2.nav_core.NavCore.get_instance", return_value=nav),
+            patch("coded_tools.unigo2.nav_core.NavCore.set_status_callback"),
+        ):
+            result = await tool.async_invoke({"command": "stop"}, {})
+
+        nav.stop.assert_called_once()
+        self.assertIn("Current mapped location: unverified", result)
 
 
 if __name__ == "__main__":

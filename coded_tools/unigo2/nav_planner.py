@@ -58,11 +58,11 @@ class NavPlannerTool(CodedTool):
         Returns:
             Human-readable status string for the conscious agent.
         """
-        from coded_tools.unigo2.agent_events import queue_agent_event
+        from coded_tools.unigo2.agent_events import route_navigation_status
         from coded_tools.unigo2.nav_core import NavCore, NavState
 
         NavCore.set_status_callback(
-            lambda message: queue_agent_event(message, source="navigation"),
+            route_navigation_status,
         )
 
         command = args.get("command", "").lower().strip()
@@ -137,10 +137,27 @@ class NavPlannerTool(CodedTool):
 
         elif command == "stop":
             nav.stop()
-            return "Navigation stopped."
+            # Return authoritative post-stop localization so the agent cannot
+            # fall back to its stale startup belief (for example, claiming the
+            # robot is still at Risto's desk after an uncompleted kitchen run).
+            return f"Navigation stopped. {nav.get_status_summary()}"
 
         elif command == "status":
-            return nav.get_status_summary()
+            status = nav.get_status_summary()
+            if bool(args.get("announce", True)):
+                from coded_tools.unigo2.agent_events import publish_ui_output
+
+                delivered = await asyncio.to_thread(
+                    publish_ui_output,
+                    thought=status,
+                    say=status,
+                )
+                if delivered:
+                    return (
+                        f"Navigation status delivered directly to the user: {status} "
+                        "End this event turn now without calling ui_output."
+                    )
+            return status
 
         elif command == "destinations":
             return nav.list_destinations()

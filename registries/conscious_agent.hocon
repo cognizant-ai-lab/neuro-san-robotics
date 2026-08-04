@@ -91,8 +91,8 @@ navigation event. Use set_location only when the robot was physically carried, r
 a known location in a way odometry could not measure.
 
 For every user question about where you are, whether you arrived, navigation progress, or navigation
-state, call nav_planner with command `status` before answering. The live navigation status is the
-source of truth even when a recent navigation-awareness system line is included in the event.
+state, call nav_planner with command `status` and `announce: true`. That call delivers the live status
+directly to the UI and speaker, so end the event turn after it returns and do not call ui_output.
 
             """,
             "allow": {
@@ -181,6 +181,10 @@ source of truth even when a recent navigation-awareness system line is included 
                         "heading_degrees": {
                             "type": "int",
                             "description": "Optional current heading in degrees for set_location; omit unless the user gives a heading"
+                        },
+                        "announce": {
+                            "type": "boolean",
+                            "description": "For status: true for a user navigation-status question so the tool guarantees delivery to the UI and speaker; false only for an internal silent query"
                         }
                     },
                     "required": ["command"]

@@ -517,6 +517,173 @@
   ],
   "exclusion_zones": [
     {
+      "name": "central_elevator_glass_core",
+      "type": "polygon",
+      "reason": "Elevator bank, service rooms, and glass doors separate the lower corridor near marker 4 from the upper corridor near marker F; there is no through walkway",
+      "tags": ["transparent_wall", "building_core", "no_bot_zone"],
+      "points": [
+        [9.9, 10.0],
+        [16.9, 10.0],
+        [16.9, 30.2],
+        [9.9, 30.2]
+      ],
+      "source_pixels": [
+        {"x": 2892, "y": 1470},
+        {"x": 2892, "y": 895},
+        {"x": 1233, "y": 895},
+        {"x": 1233, "y": 1470}
+      ],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "conference_table_21_028",
+      "type": "polygon",
+      "reason": "Fixed conference table and surrounding chairs beyond marker B",
+      "tags": ["static_furniture", "table", "chairs", "no_bot_zone"],
+      "points": [
+        [15.5, 1.3],
+        [17.9, 1.3],
+        [17.9, 5.5],
+        [15.5, 5.5]
+      ],
+      "source_pixels": [
+        {"x": 3606, "y": 1010},
+        {"x": 3606, "y": 813},
+        {"x": 3261, "y": 813},
+        {"x": 3261, "y": 1010}
+      ],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "kitchen_table_21_006",
+      "type": "polygon",
+      "reason": "Fixed kitchen table and surrounding chairs beside marker 0; the sparse floor-plan outline is not a safe navigation boundary",
+      "tags": ["static_furniture", "table", "chairs", "no_bot_zone"],
+      "points": [
+        [5.20, 1.30],
+        [8.40, 1.30],
+        [8.40, 4.70],
+        [5.20, 4.70]
+      ],
+      "source_pixels": [
+        {"x": 3606, "y": 1856},
+        {"x": 3606, "y": 1593},
+        {"x": 3327, "y": 1593},
+        {"x": 3327, "y": 1856}
+      ],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "kitchen_south_table_21_006",
+      "type": "polygon",
+      "reason": "Second fixed kitchen table and chairs along the southeast wall",
+      "tags": ["static_furniture", "table", "chairs", "no_bot_zone"],
+      "points": [[2.60, 0.00], [5.60, 0.00], [5.60, 3.10], [2.60, 3.10]],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "desk_cluster_21_crc_03",
+      "type": "polygon",
+      "reason": "Fixed desk cluster and chairs between markers 9 and the kitchen",
+      "tags": ["static_furniture", "desk", "chairs", "no_bot_zone"],
+      "points": [[1.30, 3.30], [5.70, 3.30], [5.70, 7.35], [1.30, 7.35]],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "desk_cluster_21_132",
+      "type": "polygon",
+      "reason": "Fixed six-seat desk cluster between markers 7 and 9",
+      "tags": ["static_furniture", "desk", "chairs", "no_bot_zone"],
+      "points": [[1.20, 8.30], [5.70, 8.30], [5.70, 12.70], [1.20, 12.70]],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "desk_cluster_21_120",
+      "type": "polygon",
+      "reason": "Fixed six-seat desk cluster between markers 2 and 7",
+      "tags": ["static_furniture", "desk", "chairs", "no_bot_zone"],
+      "points": [[1.20, 14.40], [5.70, 14.40], [5.70, 18.00], [1.20, 18.00]],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "desk_cluster_21_111",
+      "type": "polygon",
+      "reason": "Fixed open-office desk cluster below markers 5 and O",
+      "tags": ["static_furniture", "desk", "chairs", "no_bot_zone"],
+      "points": [[0.60, 23.70], [5.70, 23.70], [5.70, 28.30], [0.60, 28.30]],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "desk_cluster_21_103_105",
+      "type": "polygon",
+      "reason": "Fixed open-office desk cluster below markers M and O",
+      "tags": ["static_furniture", "desk", "chairs", "no_bot_zone"],
+      "points": [[0.50, 28.50], [5.70, 28.50], [5.70, 33.70], [0.50, 33.70]],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "gathering_area_tables_21_012",
+      "type": "polygon",
+      "reason": "Fixed lounge tables and seating in the southwest gathering area",
+      "tags": ["static_furniture", "table", "chairs", "no_bot_zone"],
+      "points": [[3.00, 38.60], [6.40, 38.60], [6.40, 42.50], [3.00, 42.50]],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "immersive_flower_desk_cluster",
+      "type": "polygon",
+      "reason": "Fixed flower-shaped desk cluster and chairs in the immersive room",
+      "tags": ["static_furniture", "desk", "chairs", "no_bot_zone"],
+      "points": [[21.00, 7.60], [25.90, 7.60], [25.90, 11.80], [21.00, 11.80]],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "immersive_lounge_tables",
+      "type": "polygon",
+      "reason": "Fixed lounge tables, sofa, and chairs along the northeast windows",
+      "tags": ["static_furniture", "table", "chairs", "no_bot_zone"],
+      "points": [[19.00, 0.80], [26.30, 0.80], [26.30, 6.60], [19.00, 6.60]],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "ping_pong_table_21_009",
+      "type": "polygon",
+      "reason": "Fixed ping-pong table near marker C",
+      "tags": ["static_furniture", "table", "no_bot_zone"],
+      "points": [
+        [17.7, 6.8],
+        [20.6, 6.8],
+        [20.6, 8.7],
+        [17.7, 8.7]
+      ],
+      "source_pixels": [
+        {"x": 3154, "y": 829},
+        {"x": 3154, "y": 591},
+        {"x": 2998, "y": 591},
+        {"x": 2998, "y": 829}
+      ],
+      "buffer_m": 0.0
+    },
+    {
+      "name": "immersive_half_circle_desk",
+      "type": "polygon",
+      "reason": "Fixed half-circle desk and chairs facing the immersive room",
+      "tags": ["static_furniture", "desk", "chairs", "no_bot_zone"],
+      "points": [
+        [18.8, 13.2],
+        [25.5, 13.2],
+        [25.5, 17.5],
+        [18.8, 17.5]
+      ],
+      "source_pixels": [
+        {"x": 2629, "y": 739},
+        {"x": 2629, "y": 189},
+        {"x": 2276, "y": 189},
+        {"x": 2276, "y": 739}
+      ],
+      "buffer_m": 0.0
+    },
+    {
       "name": "glass_enclosure_21_002_21_018",
       "type": "polygon",
       "reason": "Glass enclosure around 21-002 and 21-018 - robot cannot detect transparent barriers",
