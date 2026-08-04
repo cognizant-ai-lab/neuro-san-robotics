@@ -805,7 +805,7 @@ class GlobalPlanner:
         tolerance_m: float = 0.3,
         on_advance: Optional[Callable[[MapNode, MapNode], None]] = None,
         *,
-        final_arrival_sensor_confirmed: bool = True,
+        final_arrival_sensor_confirmed: bool = False,
     ) -> Optional[MapNode]:
         """Return the next waypoint to steer toward, advancing when within tolerance.
 
@@ -828,15 +828,29 @@ class GlobalPlanner:
             and "metric_transit"
             in self._current_path[self._waypoint_index - 1].tags
         )
+        route_arrival_consistent = (
+            self._metric_final_arrival_is_consistent(current_pose)
+            if metric_final
+            else True
+        )
+        # Inside the destination's configured radius, repeated depth-to-map
+        # agreement is stronger evidence than dead-reckoned progress along the
+        # last short segment.  The latter can disagree after a safe detour or a
+        # recovery replan.  Requiring both creates a deadlock: the robot is close
+        # enough to slow down, but can never satisfy the stricter route gate.
         arrival_consistent = (
-            not metric_final
-            or (
-                self._metric_final_arrival_is_consistent(current_pose)
-                and final_arrival_sensor_confirmed
-            )
+            not metric_final or final_arrival_sensor_confirmed
         )
 
         if dist < arrival_tolerance and arrival_consistent:
+            if metric_final and not route_arrival_consistent:
+                logger.info(
+                    "GlobalPlanner: accepting sensor-confirmed final waypoint "
+                    "'%s' inside %.2fm arrival region despite stale final-segment "
+                    "progress",
+                    wp.name,
+                    arrival_tolerance,
+                )
             logger.info(
                 "GlobalPlanner: accepted waypoint '%s' within %.2fm arrival region",
                 wp.name,
@@ -5246,7 +5260,10 @@ class NavCore:
                         cmd,
                         grid,
                         goal_dist,
-                        self.SEMANTIC_ARRIVAL_TOLERANCE_M,
+                        min(
+                            self.SEMANTIC_ARRIVAL_TOLERANCE_M,
+                            GlobalPlanner.FINAL_METRIC_LONGITUDINAL_TOLERANCE_M,
+                        ),
                     )
 
             if (

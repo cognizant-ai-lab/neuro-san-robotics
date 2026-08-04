@@ -582,6 +582,20 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertAlmostEqual(cmd.vx, planner.MIN_EFFECTIVE_APPROACH_SPEED_MPS)
         self.assertAlmostEqual(cmd.vyaw, steering.vyaw)
 
+    def test_pending_metric_arrival_keeps_effective_speed_inside_semantic_radius(self):
+        planner = LocalPlanner(max_linear_speed=0.4, max_yaw_rate=0.08)
+        steering = VelocityCommand(vx=0.063, vy=0.0, vyaw=0.02)
+
+        cmd = planner.maintain_effective_final_approach(
+            steering,
+            _empty_grid(),
+            goal_distance=0.63,
+            arrival_tolerance=GlobalPlanner.FINAL_METRIC_LONGITUDINAL_TOLERANCE_M,
+        )
+
+        self.assertAlmostEqual(cmd.vx, planner.MIN_EFFECTIVE_APPROACH_SPEED_MPS)
+        self.assertAlmostEqual(cmd.vyaw, steering.vyaw)
+
     def test_final_approach_does_not_override_tight_clearance(self):
         planner = LocalPlanner(max_linear_speed=0.4, max_yaw_rate=0.08)
         grid = replace(_empty_grid(), path_obstacle_m=0.50)
@@ -1169,6 +1183,7 @@ class TestGlobalPlanner(unittest.TestCase):
         waypoint = planner.get_next_waypoint(
             RobotPose(2.75, 0.10, math.radians(5.0)),
             tolerance_m=0.65,
+            final_arrival_sensor_confirmed=True,
         )
 
         self.assertIsNone(waypoint)
@@ -1192,6 +1207,25 @@ class TestGlobalPlanner(unittest.TestCase):
 
         self.assertIsNotNone(deferred)
         self.assertEqual(deferred.name, "B")
+
+    def test_metric_final_accepts_sensor_confirmed_pose_inside_arrival_radius(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "B",
+            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        )
+        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
+
+        arrived = planner.get_next_waypoint(
+            RobotPose(2.40, 0.0, 0.0),
+            tolerance_m=0.65,
+            final_arrival_sensor_confirmed=True,
+        )
+
+        self.assertIsNone(arrived)
 
     def test_metric_final_rejects_wrong_heading_or_lateral_approach(self):
         topo = _create_test_map()
