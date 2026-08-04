@@ -307,6 +307,37 @@ class MetricOccupancyMap:
             matched_fraction=best[1],
         )
 
+    def pose_consistency(
+        self,
+        points_robot_xy: np.ndarray,
+        pose_x: float,
+        pose_y: float,
+        pose_yaw: float,
+        *,
+        minimum_points: int = 30,
+    ) -> Optional[Tuple[float, float]]:
+        """Score whether a live structural scan agrees with the claimed map pose.
+
+        Unlike ``match_pose``, this does not search for or apply a correction. It
+        provides an independent arrival check so odometry proximity alone cannot
+        certify a destination from a physically different corridor.
+        """
+        points = np.asarray(points_robot_xy, dtype=np.float32)
+        if points.ndim != 2 or points.shape[1] != 2:
+            return None
+        useful = (
+            (points[:, 0] >= 0.20)
+            & (points[:, 0] <= 4.0)
+            & (np.abs(points[:, 1]) <= 2.5)
+        )
+        points = points[useful]
+        if len(points) < max(1, int(minimum_points)):
+            return None
+        if len(points) > 400:
+            indexes = np.linspace(0, len(points) - 1, 400, dtype=np.int32)
+            points = points[indexes]
+        return self._pose_score(points, pose_x, pose_y, pose_yaw)
+
     def _pose_score(
         self,
         points: np.ndarray,

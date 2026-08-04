@@ -301,6 +301,25 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertGreater(corrected.vyaw, cmd.vyaw)
         self.assertLessEqual(corrected.vyaw - cmd.vyaw, 0.06)
 
+    def test_final_route_uses_single_wall_for_alignment_not_clearance_drift(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.30)
+        cmd = VelocityCommand(vx=0.30, vy=0.0, vyaw=0.0)
+        grid = self._corridor_grid(
+            slope=0.0,
+            center_offset=0.30,
+            include_right_wall=False,
+        )
+
+        ordinary = planner.apply_corridor_course_correction(cmd, grid)
+        final_route = planner.apply_corridor_course_correction(
+            cmd,
+            grid,
+            align_only=True,
+        )
+
+        self.assertNotAlmostEqual(ordinary.vyaw, 0.0)
+        self.assertAlmostEqual(final_route.vyaw, 0.0, places=3)
+
     def test_close_slanted_left_wall_steers_robot_right(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
         grid = _empty_grid()
@@ -1057,6 +1076,88 @@ class TestGlobalPlanner(unittest.TestCase):
 
         self.assertIsNone(wp)
 
+    def test_metric_final_does_not_arrive_at_outer_edge_of_radius(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "B",
+            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        )
+        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(2.40, 0.0, 0.0),
+            tolerance_m=0.65,
+        )
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "B")
+
+    def test_metric_final_arrives_after_crossing_aligned_entrance_gate(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "B",
+            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        )
+        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(2.75, 0.10, math.radians(5.0)),
+            tolerance_m=0.65,
+        )
+
+        self.assertIsNone(waypoint)
+
+    def test_metric_final_requires_independent_sensor_confirmation(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "B",
+            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        )
+        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
+
+        deferred = planner.get_next_waypoint(
+            RobotPose(2.75, 0.0, 0.0),
+            tolerance_m=0.65,
+            final_arrival_sensor_confirmed=False,
+        )
+
+        self.assertIsNotNone(deferred)
+        self.assertEqual(deferred.name, "B")
+
+    def test_metric_final_rejects_wrong_heading_or_lateral_approach(self):
+        topo = _create_test_map()
+        topo.nodes["B"].arrival_tolerance_m = 0.65
+        planner = GlobalPlanner(topo)
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "B",
+            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+        )
+        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
+
+        wrong_heading = planner.get_next_waypoint(
+            RobotPose(2.80, 0.0, math.radians(90.0)),
+            tolerance_m=0.65,
+        )
+        wide = planner.get_next_waypoint(
+            RobotPose(2.80, 0.50, 0.0),
+            tolerance_m=0.65,
+        )
+
+        self.assertIsNotNone(wrong_heading)
+        self.assertIsNotNone(wide)
+        self.assertEqual(wrong_heading.name, "B")
+        self.assertEqual(wide.name, "B")
+
     def test_get_next_waypoint_accepts_passed_intermediate_waypoint(self):
         topo = _create_test_map()
         topo.nodes["B"].pass_through_tolerance_m = 0.75
@@ -1518,6 +1619,29 @@ class TestOdometryProvider(unittest.TestCase):
 
 class TestNavCoreStatus(unittest.TestCase):
 
+    def test_metric_arrival_requires_repeated_scan_to_map_consistency(self):
+        core = NavCore.__new__(NavCore)
+        metric_map = MagicMock()
+        metric_map.pose_consistency.return_value = (0.05, 0.80)
+        core._topo_map = SimpleNamespace(metric_map=metric_map)
+        core._arrival_map_consistency_readings = 0
+        core.ARRIVAL_MAP_MAX_SCORE_M = 0.16
+        core.ARRIVAL_MAP_MIN_MATCHED_FRACTION = 0.35
+        core.ARRIVAL_MAP_CONFIRM_READINGS = 2
+        grid = _grid_with_wall_right(0.8)
+        pose = RobotPose(6.75, 5.75, math.radians(-90.0))
+
+        first = core._metric_arrival_sensor_is_confirmed(grid, pose)
+        second = core._metric_arrival_sensor_is_confirmed(grid, pose)
+
+        self.assertFalse(first)
+        self.assertTrue(second)
+        self.assertEqual(metric_map.pose_consistency.call_count, 2)
+
+        metric_map.pose_consistency.return_value = (0.40, 0.05)
+        self.assertFalse(core._metric_arrival_sensor_is_confirmed(grid, pose))
+        self.assertEqual(core._arrival_map_consistency_readings, 0)
+
     def test_parallel_wall_reanchors_bad_initial_route_heading_after_confirmation(self):
         core = NavCore.__new__(NavCore)
         core._topo_map = _create_test_map()
@@ -1568,6 +1692,38 @@ class TestNavCoreStatus(unittest.TestCase):
             pose = core._maybe_align_heading_to_route_wall(grid, pose)
 
         self.assertAlmostEqual(pose.yaw, math.radians(14.0), places=2)
+        core._odometry.apply_pose_correction.assert_not_called()
+
+    def test_parallel_wall_does_not_reanchor_late_metric_transit_segment(self):
+        core = NavCore.__new__(NavCore)
+        core._topo_map = _create_test_map()
+        core._global_planner = GlobalPlanner(core._topo_map)
+        core._global_planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, math.radians(20.0)),
+            "C",
+            [(float(index), 0.0) for index in range(7)],
+        )
+        for _ in range(3):
+            core._global_planner.advance_current_waypoint()
+        self.assertEqual(
+            core._global_planner.get_current_waypoint().name,
+            "__metric_004__",
+        )
+        core._local_planner = LocalPlanner()
+        core._odometry = MagicMock()
+        core._route_wall_heading_candidate = None
+        core._route_wall_heading_readings = 0
+        grid = replace(
+            _grid_with_wall_right(0.8),
+            path_obstacle_m=float("inf"),
+            path_obstacle_bearing=0.0,
+        )
+        pose = RobotPose(4.0, 0.0, math.radians(20.0))
+
+        for _ in range(core.ROUTE_WALL_HEADING_CONFIRM_READINGS):
+            pose = core._maybe_align_heading_to_route_wall(grid, pose)
+
+        self.assertAlmostEqual(pose.yaw, math.radians(20.0), places=2)
         core._odometry.apply_pose_correction.assert_not_called()
 
     def test_expected_transverse_wall_advances_metric_corner_early(self):

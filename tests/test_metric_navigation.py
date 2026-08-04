@@ -99,6 +99,37 @@ class TestMetricOccupancyMap(unittest.TestCase):
         self.assertAlmostEqual(correction.x, 0.50, delta=0.09)
         self.assertAlmostEqual(correction.y, 2.00, delta=0.01)
 
+    def test_pose_consistency_distinguishes_correct_and_wrong_lateral_corridor(self):
+        occupied = np.zeros((40, 40), dtype=bool)
+        occupied[:, 15] = True
+        metric_map = MetricOccupancyMap(
+            occupied,
+            resolution_m=0.10,
+            robot_clearance_m=0.10,
+        )
+        points = np.column_stack(
+            (
+                np.full(80, 1.0),
+                np.linspace(-1.0, 1.0, 80),
+            )
+        )
+
+        correct_score, correct_fraction = metric_map.pose_consistency(
+            points,
+            pose_x=0.50,
+            pose_y=2.00,
+            pose_yaw=0.0,
+        )
+        wrong_score, wrong_fraction = metric_map.pose_consistency(
+            points,
+            pose_x=0.00,
+            pose_y=2.00,
+            pose_yaw=0.0,
+        )
+
+        self.assertLess(correct_score, wrong_score)
+        self.assertGreater(correct_fraction, wrong_fraction)
+
     def test_saved_map_round_trips_without_image_dependencies(self):
         metric_map = MetricOccupancyMap(
             np.eye(10, dtype=bool),
@@ -118,4 +149,3 @@ class TestMetricOccupancyMap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
