@@ -548,6 +548,8 @@ class GlobalPlanner:
     FINAL_METRIC_LONGITUDINAL_TOLERANCE_M = 0.30
     FINAL_METRIC_CROSS_TRACK_TOLERANCE_M = 0.40
     FINAL_METRIC_HEADING_TOLERANCE_RAD = math.radians(25.0)
+    STRAIGHT_METRIC_PASS_TOLERANCE_M = 0.75
+    STRAIGHT_METRIC_PASS_MAX_TURN_RAD = math.radians(20.0)
 
     def __init__(self, topo_map: TopologicalMap):
         """Initialize the global planner with a topological map reference."""
@@ -850,7 +852,7 @@ class GlobalPlanner:
                 dist,
             )
 
-        pass_tolerance = wp.pass_through_tolerance_m
+        pass_tolerance = self._effective_pass_through_tolerance(wp)
         if pass_tolerance is not None and self._passed_waypoint_plane(
             current_pose,
             lateral_tolerance_m=pass_tolerance,
@@ -863,6 +865,46 @@ class GlobalPlanner:
             return advanced[1] if advanced is not None else None
 
         return wp
+
+    def _effective_pass_through_tolerance(
+        self,
+        waypoint: MapNode,
+    ) -> Optional[float]:
+        """Allow a wider pass gate only for straight metric transit points.
+
+        Dense metric waypoints are guidance samples, not destinations.  A robot
+        that crosses a sample just outside its ordinary arrival radius while
+        continuing along the same corridor must advance to the next sample;
+        otherwise the missed point moves behind it and provokes a reverse
+        replan.  Corners retain their configured, tighter pass tolerance.
+        """
+        tolerance = waypoint.pass_through_tolerance_m
+        if (
+            tolerance is None
+            or "metric_transit" not in waypoint.tags
+            or not 0 < self._waypoint_index < len(self._current_path) - 1
+        ):
+            return tolerance
+
+        previous = self._current_path[self._waypoint_index - 1]
+        upcoming = self._current_path[self._waypoint_index + 1]
+        incoming_heading = math.atan2(
+            waypoint.y - previous.y,
+            waypoint.x - previous.x,
+        )
+        outgoing_heading = math.atan2(
+            upcoming.y - waypoint.y,
+            upcoming.x - waypoint.x,
+        )
+        turn = abs(
+            math.atan2(
+                math.sin(outgoing_heading - incoming_heading),
+                math.cos(outgoing_heading - incoming_heading),
+            )
+        )
+        if turn <= self.STRAIGHT_METRIC_PASS_MAX_TURN_RAD:
+            return max(tolerance, self.STRAIGHT_METRIC_PASS_TOLERANCE_M)
+        return tolerance
 
     def _metric_final_arrival_is_consistent(self, pose: RobotPose) -> bool:
         """Require the final route corridor and entrance gate, not radius alone."""
@@ -1131,7 +1173,7 @@ class LocalPlanner:
     SINGLE_WALL_TARGET_CLEARANCE_M = _env_float("NAV_WALL_CLEARANCE", 0.55)
     EARLY_WALL_ALIGNMENT_CLEARANCE_M = _env_float(
         "NAV_EARLY_WALL_ALIGNMENT_CLEARANCE",
-        0.90,
+        0.70,
     )
     EARLY_WALL_CONVERGENCE_RAD = _env_float(
         "NAV_EARLY_WALL_CONVERGENCE_RAD",
@@ -1584,7 +1626,8 @@ class LocalPlanner:
                 )
                 too_close = clearance < self.SINGLE_WALL_TARGET_CLEARANCE_M
                 if (
-                    clearance <= self.EARLY_WALL_ALIGNMENT_CLEARANCE_M
+                    not align_only
+                    and clearance <= self.EARLY_WALL_ALIGNMENT_CLEARANCE_M
                     and (converging or too_close)
                 ):
                     # Route cross-track error can be wrong when localization has

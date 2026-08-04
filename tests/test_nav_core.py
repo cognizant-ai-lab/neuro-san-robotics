@@ -361,6 +361,41 @@ class TestLocalPlanner(unittest.TestCase):
             -planner.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
         )
 
+    def test_comfortably_distant_wall_does_not_reverse_mapped_route_steering(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            lateral = 0.95 - 0.05 * forward
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.28, vy=0.0, vyaw=0.08),
+            grid,
+            correction_limit=0.02,
+        )
+
+        self.assertGreater(corrected.vyaw, 0.0)
+
+    def test_final_route_alignment_does_not_use_side_clearance_override(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            lateral = 0.48 - 0.04 * forward
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.18, vy=0.0, vyaw=0.08),
+            grid,
+            correction_limit=0.02,
+            align_only=True,
+        )
+
+        self.assertGreater(corrected.vyaw, 0.0)
+
     def test_parallel_side_wall_supports_straight_mapped_route(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
         grid = self._corridor_grid(
@@ -1204,6 +1239,38 @@ class TestGlobalPlanner(unittest.TestCase):
 
         self.assertIsNotNone(wp)
         self.assertEqual(wp.name, "B")
+
+    def test_straight_metric_waypoint_accepts_corridor_width_pass(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (4.0, 0.0)],
+        )
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(1.10, 0.62, 0.0),
+            tolerance_m=0.45,
+        )
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "__metric_002__")
+
+    def test_metric_corner_keeps_tight_pass_tolerance(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (1.0, 0.0), (1.0, -1.0), (4.0, 0.0)],
+        )
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(1.10, 0.62, 0.0),
+            tolerance_m=0.45,
+        )
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "__metric_001__")
 
     def test_replan_does_not_reinstate_completed_waypoint(self):
         topo = _create_test_map()
