@@ -2507,6 +2507,14 @@ class NavCore:
     # In-place turns sweep the Go2's body and legs through a much wider area
     # than straight motion.  Reserve enough visible clearance before pivoting.
     PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.40)
+    PIVOT_CLEARANCE_PERCENTILE: float = _env_float(
+        "NAV_PIVOT_CLEARANCE_PERCENTILE",
+        10.0,
+    )
+    PIVOT_GRID_INFLATION_M: float = _env_float(
+        "NAV_PIVOT_GRID_INFLATION_M",
+        0.15,
+    )
     FORWARD_HAZARD_CONE_RAD: float = _env_float(
         "NAV_FORWARD_HAZARD_CONE_RAD",
         math.radians(20.0),
@@ -2538,6 +2546,10 @@ class NavCore:
     PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M: float = _env_float(
         "NAV_PATH_OBSTACLE_CENTER_DEPTH_MARGIN",
         0.15,
+    )
+    PATH_OBSTACLE_MIN_CENTER_COVERAGE: float = _env_float(
+        "NAV_PATH_OBSTACLE_MIN_CENTER_COVERAGE",
+        0.06,
     )
     PATH_OBSTACLE_CLEAR_CONFIRM_S: float = _env_float(
         "NAV_PATH_OBSTACLE_CLEAR_CONFIRM_S",
@@ -3571,6 +3583,8 @@ class NavCore:
         goal: NavGoal,
         pose: RobotPose,
         grid: Optional[ObstacleGrid],
+        *,
+        allow_locomotion_recovery: bool = True,
     ) -> bool:
         """Change position safely, then replan while preserving the destination."""
         planner = getattr(self, "_global_planner", None)
@@ -3580,7 +3594,11 @@ class NavCore:
             if isinstance(waypoint, MapNode)
             else float("inf")
         )
-        if grid is not None and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M:
+        if (
+            allow_locomotion_recovery
+            and grid is not None
+            and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+        ):
             clear_attempts = getattr(self, "_clear_motion_recovery_attempts", 0)
             if (
                 clear_attempts
@@ -5121,12 +5139,14 @@ class NavCore:
         )
         if pivot_only and raw_grid is not None:
             # A forward-path projection is insufficient for turns in place:
-            # the rear legs sweep sideways around the robot.  Include every
-            # visible nearby obstacle in the pivot-clearance gate.
-            nearest = raw_grid.nearest_obstacle_m
+            # the rear legs sweep sideways around the robot.  Use a supported
+            # low percentile of occupied cells rather than the minimum raw
+            # depth pixel: the latter repeatedly reported a 0.19m peripheral
+            # speck while every populated view sector was 0.36-0.95m away.
+            nearest, nearest_bearing = self._robust_pivot_clearance(raw_grid)
             if math.isfinite(nearest) and nearest < safety_dist:
                 safety_dist = nearest
-                safety_bearing = raw_grid.nearest_obstacle_bearing
+                safety_bearing = nearest_bearing
         seconds_since_progress = (
             now - self._last_progress_time
             if pivot_only
@@ -5184,7 +5204,23 @@ class NavCore:
                         "NavCore: confirmed close obstacle; attempting autonomous "
                         "semantic-route recovery before giving up"
                     )
-                    if self._recover_from_stall(goal, pose, grid):
+                    # An obstacle-triggered safety stop is not evidence that the
+                    # SportClient is unresponsive.  Preserve the measured hazard
+                    # in the recovery grid even when temporal filtering removed
+                    # it from route planning, so this path tries a guarded escape
+                    # rather than resetting locomotion and then testing forward
+                    # motion against the same obstacle.
+                    recovery_grid = replace(
+                        grid if grid is not None else raw_grid,
+                        path_obstacle_m=safety_dist,
+                        path_obstacle_bearing=safety_bearing,
+                    )
+                    if self._recover_from_stall(
+                        goal,
+                        pose,
+                        recovery_grid,
+                        allow_locomotion_recovery=False,
+                    ):
                         return
                 if event == "e_stop:obstacle_too_close":
                     message = (
@@ -5200,7 +5236,24 @@ class NavCore:
                 self._abort_active_navigation(goal, reason, message, state=NavState.E_STOP)
                 return
             elif event.startswith("stuck"):
-                if self._recover_from_stall(goal, pose, grid):
+                # Only diagnose an unresponsive locomotion service after a
+                # meaningful translation command was sent on a genuinely clear
+                # route.  Obstacle-slowed commands below gait-start speed (the
+                # failing run reached vx=0.024m/s) cannot verify locomotion.
+                clear_motion_candidate = (
+                    translation_requested
+                    and grid is not None
+                    and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                )
+                recovery_grid = grid
+                if not clear_motion_candidate and raw_grid is not None:
+                    recovery_grid = raw_grid
+                if self._recover_from_stall(
+                    goal,
+                    pose,
+                    recovery_grid,
+                    allow_locomotion_recovery=clear_motion_candidate,
+                ):
                     return
                 clear_motion_failure = (
                     grid is not None
@@ -5330,6 +5383,59 @@ class NavCore:
         if center_dist < path_dist:
             return center_dist, 0.0
         return path_dist, path_bearing
+
+    def _robust_pivot_clearance(
+        self,
+        grid: ObstacleGrid,
+    ) -> Tuple[float, float]:
+        """Return supported front-hemisphere clearance for an in-place turn."""
+        points = occupied_xy_points(grid)
+        if points.size == 0:
+            return float("inf"), 0.0
+
+        distances = np.hypot(points[:, 0], points[:, 1])
+        bearings = np.arctan2(points[:, 1], points[:, 0])
+        visible = (
+            (points[:, 0] >= 0.0)
+            & (np.abs(bearings) <= math.radians(60.0))
+        )
+        if not np.any(visible):
+            return float("inf"), 0.0
+
+        visible_distances = distances[visible]
+        visible_bearings = bearings[visible]
+        percentile = float(
+            np.clip(self.PIVOT_CLEARANCE_PERCENTILE, 0.0, 50.0)
+        )
+        inflated_clearance = float(
+            np.percentile(visible_distances, percentile)
+        )
+        # Occupied cells are already dilated by the robot radius.  Convert the
+        # percentile back to an approximate sensor-to-surface range before the
+        # SafetyMonitor applies its physical pivot clearance threshold.
+        raw_nearest = grid.nearest_obstacle_m
+        if (
+            isinstance(raw_nearest, (int, float))
+            and math.isfinite(raw_nearest)
+            and abs(float(raw_nearest) - inflated_clearance)
+            <= max(0.10, grid.resolution * 2.0)
+        ):
+            # Synthetic/non-inflated providers may already express the same
+            # supported surface range directly.
+            surface_clearance = float(raw_nearest)
+        else:
+            surface_clearance = inflated_clearance + max(
+                0.0,
+                self.PIVOT_GRID_INFLATION_M,
+            )
+        band = max(grid.resolution * 2.0, 0.08)
+        near = np.abs(visible_distances - inflated_clearance) <= band
+        bearing = (
+            float(np.median(visible_bearings[near]))
+            if np.any(near)
+            else 0.0
+        )
+        return surface_clearance, bearing
 
     def _log_obstacle_telemetry(
         self,
@@ -5564,6 +5670,25 @@ class NavCore:
         center_dist = getattr(reading, "distance_m", None)
         if not isinstance(center_dist, (int, float)) or not math.isfinite(center_dist):
             return True
+
+        # The raw-depth percentile is computed only from samples nearer than
+        # max_depth.  Without a coverage floor, a tiny patch of invalid/edge
+        # pixels can therefore report 0.19m even while the actual center view is
+        # 0.5-1.0m clear.  The grid remains the primary detector; this check only
+        # decides whether the independent center channel corroborates it.
+        coverage = getattr(reading, "coverage", 0.0)
+        if (
+            not isinstance(coverage, (int, float))
+            or not math.isfinite(coverage)
+            or float(coverage) < self.PATH_OBSTACLE_MIN_CENTER_COVERAGE
+        ):
+            logger.debug(
+                "NavCore: rejecting sparse center-depth corroboration at %.2fm "
+                "(coverage=%.1f%%)",
+                float(center_dist),
+                100.0 * float(coverage or 0.0),
+            )
+            return False
 
         return float(center_dist) <= min(
             max_depth,

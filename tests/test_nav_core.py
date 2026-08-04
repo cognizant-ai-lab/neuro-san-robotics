@@ -3672,6 +3672,80 @@ class TestNavCoreStatus(unittest.TestCase):
             "SportClient reinitialization",
         )
 
+    def test_obstacle_recovery_never_reinitializes_locomotion_on_filtered_clear_grid(self):
+        nav = NavCore.__new__(NavCore)
+        nav.AVOIDANCE_DISTANCE_M = 0.75
+        nav.MAX_STUCK_RECOVERY_ATTEMPTS = 2
+        nav._stuck_recovery_attempts = 0
+        nav._clear_motion_recovery_attempts = 0
+        nav._state = NavState.NAVIGATING
+        nav._state_lock = threading.Lock()
+        nav._go2 = MagicMock(available=True)
+        nav._ensure_go2 = MagicMock()
+        nav._execute_stall_escape = MagicMock(return_value=None)
+        nav._execute_stall_turn_scan = MagicMock(
+            return_value=(RobotPose(0.0, 0.0, 0.2), "left")
+        )
+        nav._global_planner = MagicMock()
+        nav._global_planner.get_current_waypoint.return_value = MapNode(
+            name="__metric_001__", x=1.0, y=0.0, tags=["metric_transit"]
+        )
+        nav._global_planner.replan_path_preserving_progress.return_value = [
+            MapNode(name="Kitchen", x=2.0, y=0.0)
+        ]
+        nav._topo_map = MagicMock(metric_map=None)
+        nav._depth_processor = MagicMock()
+        nav._fresh_obstacle_grid = MagicMock(return_value=_empty_grid())
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        nav._notify_status_change = MagicMock()
+
+        recovered = nav._recover_from_stall(
+            NavGoal(goal_type="semantic", label="Kitchen"),
+            RobotPose(),
+            _empty_grid(),
+            allow_locomotion_recovery=False,
+        )
+
+        self.assertTrue(recovered)
+        nav._go2.recover_locomotion.assert_not_called()
+        nav._go2.reinitialize_locomotion.assert_not_called()
+        nav._execute_stall_escape.assert_called_once()
+        nav._execute_stall_turn_scan.assert_called_once()
+
+    def test_sparse_center_depth_does_not_corroborate_close_grid_artifact(self):
+        nav = NavCore.__new__(NavCore)
+        nav.AVOIDANCE_DISTANCE_M = 0.75
+        nav.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M = 0.15
+        nav.PATH_OBSTACLE_MIN_CENTER_COVERAGE = 0.06
+        nav._read_center_depth = MagicMock(
+            return_value=(
+                CenterDepthReading(distance_m=0.19, coverage=0.025),
+                True,
+            )
+        )
+
+        self.assertFalse(nav._path_obstacle_matches_center_depth(0.19))
+
+        nav._read_center_depth.return_value = (
+            CenterDepthReading(distance_m=0.19, coverage=0.20),
+            True,
+        )
+        self.assertTrue(nav._path_obstacle_matches_center_depth(0.19))
+
+    def test_pivot_clearance_ignores_single_raw_minimum_and_uses_supported_grid(self):
+        nav = NavCore.__new__(NavCore)
+        nav.PIVOT_CLEARANCE_PERCENTILE = 10.0
+        nav.PIVOT_GRID_INFLATION_M = 0.15
+        grid = _grid_with_wall_ahead(distance_m=0.50)
+        grid.nearest_obstacle_m = 0.19
+        grid.nearest_obstacle_bearing = math.radians(55.0)
+
+        clearance, bearing = nav._robust_pivot_clearance(grid)
+
+        self.assertGreater(clearance, 0.40)
+        self.assertLess(abs(bearing), math.radians(20.0))
+
     def test_measured_translation_verifies_recovery_and_resets_watchdog(self):
         nav = NavCore.__new__(NavCore)
         nav._last_progress_pose = RobotPose()
