@@ -1129,6 +1129,22 @@ class LocalPlanner:
     CORRIDOR_MIN_WIDTH_M = 0.55
     CORRIDOR_MAX_WIDTH_M = 2.50
     SINGLE_WALL_TARGET_CLEARANCE_M = _env_float("NAV_WALL_CLEARANCE", 0.55)
+    EARLY_WALL_ALIGNMENT_CLEARANCE_M = _env_float(
+        "NAV_EARLY_WALL_ALIGNMENT_CLEARANCE",
+        0.90,
+    )
+    EARLY_WALL_CONVERGENCE_RAD = _env_float(
+        "NAV_EARLY_WALL_CONVERGENCE_RAD",
+        math.radians(3.0),
+    )
+    EARLY_WALL_MAX_ALIGNMENT_YAW_RPS = _env_float(
+        "NAV_EARLY_WALL_MAX_ALIGNMENT_YAW",
+        0.06,
+    )
+    EARLY_WALL_MIN_AWAY_YAW_RPS = _env_float(
+        "NAV_EARLY_WALL_MIN_AWAY_YAW",
+        0.02,
+    )
     ROUTE_CENTER_LOOKAHEAD_M = _env_float("NAV_ROUTE_CENTER_LOOKAHEAD", 1.50)
     ROUTE_CENTER_HALF_WIDTH_M = _env_float("NAV_ROUTE_CENTER_HALF_WIDTH", 0.42)
     ROUTE_CENTER_MAX_HEADING_RAD = _env_float(
@@ -1200,6 +1216,7 @@ class LocalPlanner:
         self._steering_sign = 0
         self._pending_steering_sign = 0
         self._pending_steering_cycles = 0
+        self._wall_alignment_override_active = False
 
     def reset_navigation_state(self) -> None:
         """Forget steering history after a new route or waypoint transition."""
@@ -1210,6 +1227,7 @@ class LocalPlanner:
         self._steering_sign = 0
         self._pending_steering_sign = 0
         self._pending_steering_cycles = 0
+        self._wall_alignment_override_active = False
 
     def stabilize_translating_steering(self, cmd: VelocityCommand) -> VelocityCommand:
         """Require a persistent request before reversing translating steering."""
@@ -1543,13 +1561,77 @@ class LocalPlanner:
     ) -> VelocityCommand:
         """Add bounded steering from visible corridor or one-sided wall geometry."""
         if cmd.vx <= 0.05:
+            self._wall_alignment_override_active = False
             return cmd
 
         wall_geometry = self._estimate_wall_geometry(obstacle_grid)
         if wall_geometry is None:
+            self._wall_alignment_override_active = False
             return cmd
 
         wall_heading, lateral_error, geometry_type = wall_geometry
+        if geometry_type == "single_wall":
+            walls = self._visible_wall_fits(obstacle_grid)
+            candidates = []
+            if "left" in walls:
+                candidates.append((abs(walls["left"][1]), 1.0, walls["left"]))
+            if "right" in walls:
+                candidates.append((abs(walls["right"][1]), -1.0, walls["right"]))
+            if candidates:
+                clearance, side, (heading, _lateral) = min(candidates)
+                converging = (
+                    side * heading <= -self.EARLY_WALL_CONVERGENCE_RAD
+                )
+                too_close = clearance < self.SINGLE_WALL_TARGET_CLEARANCE_M
+                if (
+                    clearance <= self.EARLY_WALL_ALIGNMENT_CLEARANCE_M
+                    and (converging or too_close)
+                ):
+                    # Route cross-track error can be wrong when localization has
+                    # drifted. A repeatedly fitted wall that is visibly converging
+                    # is direct physical evidence: align with it now rather than
+                    # allowing a stronger route command to keep aiming into it.
+                    desired_yaw = float(
+                        np.clip(
+                            0.45 * heading,
+                            -self.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
+                            self.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
+                        )
+                    )
+                    if too_close:
+                        desired_yaw += float(
+                            np.clip(0.50 * lateral_error, -0.04, 0.04)
+                        )
+                        away_sign = -side
+                        if desired_yaw * away_sign < self.EARLY_WALL_MIN_AWAY_YAW_RPS:
+                            desired_yaw = (
+                                away_sign * self.EARLY_WALL_MIN_AWAY_YAW_RPS
+                            )
+                    desired_yaw = float(
+                        np.clip(
+                            desired_yaw,
+                            -self.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
+                            self.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
+                        )
+                    )
+                    if not self._wall_alignment_override_active:
+                        logger.info(
+                            "LocalPlanner: early wall alignment override side=%s "
+                            "clearance=%.2fm heading=%+.0fdeg route_yaw=%+.3f "
+                            "corrected_yaw=%+.3f",
+                            "left" if side > 0.0 else "right",
+                            clearance,
+                            math.degrees(heading),
+                            cmd.vyaw,
+                            desired_yaw,
+                        )
+                    self._wall_alignment_override_active = True
+                    return VelocityCommand(
+                        vx=cmd.vx,
+                        vy=cmd.vy,
+                        vyaw=desired_yaw,
+                    )
+        self._wall_alignment_override_active = False
         if align_only:
             # On the mapped final approach, lateral odometry is less reliable
             # than the known route.  Use the wall only as a heading reference;
@@ -2561,7 +2643,7 @@ class NavCore:
     )
     MAPPED_SIDE_ROUTE_MIN_CLEARANCE_M: float = _env_float(
         "NAV_MAPPED_SIDE_ROUTE_MIN_CLEARANCE",
-        0.34,
+        0.50,
     )
     METRIC_BLOCKED_REPLAN_DELAY_S: float = _env_float(
         "NAV_METRIC_BLOCKED_REPLAN_DELAY",
@@ -4719,6 +4801,7 @@ class NavCore:
             grid is None
             or grid.path_obstacle_m > self.AVOIDANCE_DISTANCE_M
             or abs(grid.path_obstacle_bearing) < math.radians(10.0)
+            or grid.path_obstacle_m < self.MAPPED_SIDE_ROUTE_MIN_CLEARANCE_M
         ):
             return False
         guidance_heading = self._global_planner.current_segment_guidance(pose)

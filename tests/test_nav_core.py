@@ -336,6 +336,31 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertLess(corrected.vyaw, 0.0)
 
+    def test_converging_left_wall_overrides_route_command_toward_wall_early(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            # A left wall that draws inward with distance means the robot is
+            # angled toward it.  Its current clearance is still recoverable.
+            lateral = 0.65 - 0.12 * forward
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        route_toward_wall = VelocityCommand(vx=0.28, vy=0.0, vyaw=0.08)
+        corrected = planner.apply_corridor_course_correction(
+            route_toward_wall,
+            grid,
+            correction_limit=0.02,
+        )
+
+        self.assertAlmostEqual(corrected.vx, route_toward_wall.vx)
+        self.assertLess(corrected.vyaw, 0.0)
+        self.assertGreaterEqual(
+            corrected.vyaw,
+            -planner.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
+        )
+
     def test_parallel_side_wall_supports_straight_mapped_route(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
         grid = self._corridor_grid(
@@ -1765,7 +1790,7 @@ class TestNavCoreStatus(unittest.TestCase):
         core._local_planner = LocalPlanner()
         grid = replace(
             _empty_grid(),
-            path_obstacle_m=0.35,
+            path_obstacle_m=0.55,
             path_obstacle_bearing=math.radians(-45.0),
             path_obstacle_points=20,
         )
@@ -1773,6 +1798,14 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertTrue(
             core._parallel_wall_projection_is_clear(
                 grid,
+                RobotPose(0.5, 0.0, 0.0),
+            )
+        )
+
+        close_grid = replace(grid, path_obstacle_m=0.35)
+        self.assertFalse(
+            core._parallel_wall_projection_is_clear(
+                close_grid,
                 RobotPose(0.5, 0.0, 0.0),
             )
         )
