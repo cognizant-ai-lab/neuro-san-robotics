@@ -2484,6 +2484,10 @@ class NavCore:
         "NAV_LOCOMOTION_VERIFICATION_SPEED",
         0.28,
     )
+    LOCOMOTION_MIN_VERIFICATION_COMMAND_MPS: float = _env_float(
+        "NAV_LOCOMOTION_MIN_VERIFICATION_COMMAND",
+        0.20,
+    )
     FINAL_ROUTE_MAX_CROSS_TRACK_CORRECTION_RAD: float = _env_float(
         "NAV_FINAL_ROUTE_MAX_CROSS_TRACK_CORRECTION_RAD",
         math.radians(3.0),
@@ -2673,6 +2677,14 @@ class NavCore:
         "NAV_METRIC_REPLAN_MIN_ROUTE_CHANGE_RAD",
         math.radians(15.0),
     )
+    METRIC_ROUTE_REGRESSION_DISTANCE_M: float = _env_float(
+        "NAV_METRIC_ROUTE_REGRESSION_DISTANCE",
+        0.65,
+    )
+    METRIC_ROUTE_REGRESSION_CONFIRM_S: float = _env_float(
+        "NAV_METRIC_ROUTE_REGRESSION_CONFIRM_S",
+        1.0,
+    )
     REMOTE_HEADING_REALIGN_MIN_TURN_RAD: float = _env_float(
         "NAV_REMOTE_HEADING_REALIGN_MIN_TURN_RAD",
         math.radians(20.0),
@@ -2779,6 +2791,9 @@ class NavCore:
         self._metric_replan_future: Optional[Future] = None
         self._metric_replan_context: Optional[Dict[str, Any]] = None
         self._last_motion_command = VelocityCommand()
+        self._route_progress_waypoint_name: Optional[str] = None
+        self._route_progress_best_distance = float("inf")
+        self._route_regression_since: Optional[float] = None
 
         # Go2 macros (lazy init)
         self._go2 = None
@@ -2899,6 +2914,9 @@ class NavCore:
         self._obstacle_grid_unavailable_since = None
         self._obstacle_grid_unavailable_notified = False
         self._last_stall_scan_direction = None
+        self._route_progress_waypoint_name = None
+        self._route_progress_best_distance = float("inf")
+        self._route_regression_since = None
         self._locomotion_recovery_verification_pending = None
         self._locomotion_recovery_error = None
         self._arrival_map_consistency_readings = 0
@@ -2908,6 +2926,9 @@ class NavCore:
 
     def _notify_waypoint_advance(self, reached: MapNode, upcoming: MapNode) -> None:
         """Publish topological progress without exposing noisy coordinates."""
+        self._route_progress_waypoint_name = None
+        self._route_progress_best_distance = float("inf")
+        self._route_regression_since = None
         if "metric_transit" in reached.tags or "metric_transit" in upcoming.tags:
             planner = getattr(self, "_global_planner", None)
             turn_change = (
@@ -4368,6 +4389,8 @@ class NavCore:
                 parts.append(
                     f"Current mapped location: {self._topo_map.get_node_label(current_node)}"
                 )
+        else:
+            parts.append("Current mapped location: unverified")
 
         if goal:
             if goal.label:
@@ -4903,6 +4926,84 @@ class NavCore:
             >= self.ARRIVAL_MAP_CONFIRM_READINGS
         )
 
+    def _recover_regressing_metric_route(
+        self,
+        goal: NavGoal,
+        pose: RobotPose,
+        waypoint: MapNode,
+        waypoint_distance: float,
+    ) -> bool:
+        """Stop and replan when measured motion is persistently leaving the route."""
+        if "metric_transit" not in waypoint.tags:
+            self._route_progress_waypoint_name = None
+            self._route_progress_best_distance = float("inf")
+            self._route_regression_since = None
+            return False
+
+        if self._route_progress_waypoint_name != waypoint.name:
+            self._route_progress_waypoint_name = waypoint.name
+            self._route_progress_best_distance = waypoint_distance
+            self._route_regression_since = None
+            return False
+
+        if waypoint_distance < self._route_progress_best_distance:
+            self._route_progress_best_distance = waypoint_distance
+            self._route_regression_since = None
+            return False
+
+        regression = waypoint_distance - self._route_progress_best_distance
+        if regression < self.METRIC_ROUTE_REGRESSION_DISTANCE_M:
+            self._route_regression_since = None
+            return False
+
+        now = time.monotonic()
+        if self._route_regression_since is None:
+            self._route_regression_since = now
+            logger.warning(
+                "NavCore: route regression detected at '%s': best=%.2fm now=%.2fm; "
+                "holding for confirmation",
+                waypoint.name,
+                self._route_progress_best_distance,
+                waypoint_distance,
+            )
+            return False
+        if now - self._route_regression_since < self.METRIC_ROUTE_REGRESSION_CONFIRM_S:
+            return False
+
+        self._ensure_go2()
+        if self._go2 and getattr(self._go2, "available", False):
+            self._go2.stop_move()
+        path = self._global_planner.plan_path(
+            pose,
+            goal.label or "",
+            dynamic_obstacles_xy=None,
+        )
+        if path is None:
+            self._abort_active_navigation(
+                goal,
+                "Localization/route disagreement",
+                f"I stopped before reaching {self._goal_display_name(goal)} because "
+                "my measured position was moving away from the mapped route and I "
+                "could not establish a safe replacement route.",
+                state=NavState.STUCK,
+            )
+            return True
+
+        goal.x, goal.y = path[-1].x, path[-1].y
+        self._local_planner.reset_navigation_state()
+        self._reset_progress_tracker()
+        self._route_progress_waypoint_name = None
+        self._route_progress_best_distance = float("inf")
+        self._route_regression_since = None
+        logger.warning(
+            "NavCore: replaced regressing route to '%s' from pose=(%.2f, %.2f, %.0fdeg)",
+            self._goal_display_name(goal),
+            pose.x,
+            pose.y,
+            math.degrees(pose.yaw),
+        )
+        return True
+
     def _nav_cycle(self, state: NavState, goal: NavGoal):
         """Execute one navigation cycle: sense -> plan -> safety filter -> actuate."""
         if state in {NavState.IDLE, NavState.STUCK, NavState.E_STOP}:
@@ -5039,6 +5140,17 @@ class NavCore:
             # Normalize to [-pi, pi]
             goal_dir = math.atan2(math.sin(goal_dir), math.cos(goal_dir))
             goal_dist = math.hypot(target_x - pose.x, target_y - pose.y)
+            if (
+                metric_route
+                and isinstance(waypoint, MapNode)
+                and self._recover_regressing_metric_route(
+                    goal,
+                    pose,
+                    waypoint,
+                    goal_dist,
+                )
+            ):
+                return
             pivot_heading = goal_dir
             if metric_route:
                 segment_heading = self._global_planner.current_segment_heading()
@@ -5097,6 +5209,7 @@ class NavCore:
             if (
                 getattr(self, "_locomotion_recovery_verification_pending", None)
                 and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                and raw_grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
                 and cmd.vx >= 0.03
                 and cmd.vx < self.LOCOMOTION_VERIFICATION_SPEED_MPS
             ):
@@ -5152,13 +5265,23 @@ class NavCore:
             if pivot_only
             else now - self._last_translation_progress_time
         )
-        translation_requested = abs(cmd.vx) >= 0.03 or abs(cmd.vy) >= 0.03
+        locomotion_verification_requested = (
+            abs(cmd.vx) >= self.LOCOMOTION_MIN_VERIFICATION_COMMAND_MPS
+            or abs(cmd.vy) >= self.LOCOMOTION_MIN_VERIFICATION_COMMAND_MPS
+        )
+        if pivot_only:
+            # Turning is not failed translation. Keep the translation watchdog
+            # fresh throughout a planned pivot so the first forward command
+            # afterward receives a complete acknowledgement window.
+            self._last_translation_progress_time = now
+            self._last_translation_progress_pose = pose
         measured_translation = self._odometry.has_confirmed_translation()
         if (
-            translation_requested
+            locomotion_verification_requested
             and measured_translation
             and grid is not None
             and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+            and raw_grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
             and seconds_since_progress >= self.CLEAR_MOTION_ACK_TIMEOUT_S
         ):
             # The SDK accepted the command, but measured odometry did not follow
@@ -5241,9 +5364,11 @@ class NavCore:
                 # route.  Obstacle-slowed commands below gait-start speed (the
                 # failing run reached vx=0.024m/s) cannot verify locomotion.
                 clear_motion_candidate = (
-                    translation_requested
+                    locomotion_verification_requested
                     and grid is not None
                     and grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
+                    and raw_grid is not None
+                    and raw_grid.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
                 )
                 recovery_grid = grid
                 if not clear_motion_candidate and raw_grid is not None:
@@ -5717,6 +5842,9 @@ class NavCore:
         self._last_progress_time = now
         self._last_translation_progress_pose = pose
         self._last_translation_progress_time = now
+        self._route_progress_waypoint_name = None
+        self._route_progress_best_distance = float("inf")
+        self._route_regression_since = None
         if reset_recovery_attempts:
             self._stuck_recovery_attempts = 0
             self._clear_motion_recovery_attempts = 0

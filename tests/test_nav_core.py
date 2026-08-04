@@ -3733,6 +3733,92 @@ class TestNavCoreStatus(unittest.TestCase):
         )
         self.assertTrue(nav._path_obstacle_matches_center_depth(0.19))
 
+    def test_metric_route_regression_replans_before_running_farther_away(self):
+        nav = NavCore.__new__(NavCore)
+        nav.METRIC_ROUTE_REGRESSION_DISTANCE_M = 0.65
+        nav.METRIC_ROUTE_REGRESSION_CONFIRM_S = 0.0
+        nav._route_progress_waypoint_name = None
+        nav._route_progress_best_distance = float("inf")
+        nav._route_regression_since = None
+        nav._go2 = MagicMock(available=True)
+        nav._ensure_go2 = MagicMock()
+        nav._global_planner = MagicMock()
+        nav._global_planner.plan_path.return_value = [
+            MapNode(name="start", x=0.0, y=0.0, tags=["metric_transit"]),
+            MapNode(name="Kitchen", x=2.0, y=0.0),
+        ]
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        waypoint = MapNode(
+            name="__metric_008__",
+            x=1.0,
+            y=0.0,
+            tags=["metric_transit"],
+        )
+        goal = NavGoal(goal_type="semantic", x=2.0, y=0.0, label="Kitchen")
+
+        self.assertFalse(
+            nav._recover_regressing_metric_route(
+                goal, RobotPose(), waypoint, 0.50
+            )
+        )
+        self.assertFalse(
+            nav._recover_regressing_metric_route(
+                goal, RobotPose(), waypoint, 1.20
+            )
+        )
+        self.assertTrue(
+            nav._recover_regressing_metric_route(
+                goal, RobotPose(), waypoint, 1.20
+            )
+        )
+
+        nav._go2.stop_move.assert_called_once()
+        nav._global_planner.plan_path.assert_called_once()
+        nav._local_planner.reset_navigation_state.assert_called_once()
+        nav._reset_progress_tracker.assert_called_once()
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_raw_obstacle_cannot_trigger_clear_path_locomotion_reinit(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            raw_blocked = _grid_with_wall_ahead(distance_m=0.50)
+            nav._depth_processor = MagicMock()
+            nav._depth_processor.get_obstacle_grid.return_value = raw_blocked
+            nav._filter_transient_path_obstacle = MagicMock(
+                return_value=_empty_grid()
+            )
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.20)
+            nav._recover_from_stall = MagicMock(return_value=True)
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            stale = time.monotonic() - nav.STUCK_TIMEOUT_S - 0.1
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._last_progress_time = stale
+                nav._last_translation_progress_time = stale
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertFalse(
+                nav._recover_from_stall.call_args.kwargs[
+                    "allow_locomotion_recovery"
+                ]
+            )
+            fake_go2.recover_locomotion.assert_not_called()
+            fake_go2.reinitialize_locomotion.assert_not_called()
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
     def test_pivot_clearance_ignores_single_raw_minimum_and_uses_supported_grid(self):
         nav = NavCore.__new__(NavCore)
         nav.PIVOT_CLEARANCE_PERCENTILE = 10.0

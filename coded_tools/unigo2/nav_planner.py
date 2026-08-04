@@ -137,7 +137,10 @@ class NavPlannerTool(CodedTool):
 
         elif command == "stop":
             nav.stop()
-            return "Navigation stopped."
+            # Return authoritative post-stop localization so the agent cannot
+            # fall back to its stale startup belief (for example, claiming the
+            # robot is still at Risto's desk after an uncompleted kitchen run).
+            return f"Navigation stopped. {nav.get_status_summary()}"
 
         elif command == "status":
             status = nav.get_status_summary()
