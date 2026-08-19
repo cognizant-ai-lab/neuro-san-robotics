@@ -1,11 +1,15 @@
 # neuro-san-robotics
 Neuro SAN Robotics
 
-## Start CAIL-E
+## Start the robot
 
-1. Physically start CAIL-E with a short press followed by a long press
+The examples below use CAIL-E, the original unit in San Francisco. A sibling
+robot differs only by its `ROBOT_NAME` and `ROBOT_HOME`; see
+[Robot identity](#robot-identity).
+
+1. Physically start the robot with a short press followed by a long press
 on its power button.
-2. Find CAIL-E's IP address and ssh into it:
+2. Find the robot's IP address and ssh into it:
     ```shell
     ssh unitree@10.194.17.116
     ```
@@ -25,7 +29,7 @@ on its power button.
    python apps/conscious_assistant/interface_flask.py
    ```
 You can now navigate to https://10.194.17.116:5001 (check the IP address)
-to interact with CAIL-E.
+to interact with the robot.
 
 The Flask process starts one local Neuro SAN event service on port `8188` before
 serving the browser. Flask only transports browser input/output, TTS playback,
@@ -33,7 +37,7 @@ voice transcription, and the latest camera image. The native service owns agent
 events and periodic autonomous turns; `NavCore` remains the independent real-time
 navigation controller. A lightweight Python observer service captures the scene
 periodically, updates the UI image, and sends compact `observation:` events to
-CAIL-E. Stop the Flask process to stop the service it started.
+the agent. Stop the Flask process to stop the service it started.
 
 ### Ambient listening mode
 
@@ -42,10 +46,12 @@ When enabled, the browser keeps a WebRTC microphone stream connected to OpenAI's
 Realtime transcription service. Server voice-activity detection produces complete
 utterances, and each is queued to the native agent as an `ambient:` event. There
 is no LLM pre-filter and no acknowledgement or automatic speech for these events.
-All raw **Heard:** text appears in the Thoughts pane. CAIL-E remains silent unless
+All raw **Heard:** text appears in the Thoughts pane. The robot remains silent unless
 the transcript clearly addresses or refers to it; when it responds, the relevant
 addressed speech is also promoted into chat like a push-to-talk transcript.
-Capture pauses while CAIL-E speaks so it does not transcribe its own TTS output.
+There is no wake-word matcher: the agent decides it was addressed from its own
+name in the persona prompt, which is why `ROBOT_NAME` matters for this to work.
+Capture pauses while the robot speaks so it does not transcribe its own TTS output.
 The Flask backend mints a short-lived Realtime client token; the standard API key
 never leaves the robot, and the browser negotiates its WebRTC session directly
 with OpenAI. Transient gateway failures are retried once.
@@ -84,6 +90,45 @@ after `source setmyenv.sh`, the shell prints only the values that differ by
 checkout or local install path. Navigation, camera, network-interface, and
 behavior tuning defaults live in code and are logged by the app at startup.
 
+#### Robot identity
+
+One checkout serves every unit. Two variables carry everything that differs
+between robots, and both belong in the robot's `setmyenv.sh`. The template in
+`.env.example` already includes them with CAIL-E as the default; if your
+`setmyenv.sh` predates this, add these two lines to it:
+
+```shell
+export ROBOT_NAME="${ROBOT_NAME:-CAIL-E}"
+export ROBOT_HOME="${ROBOT_HOME:-the Cognizant AI Lab (CAIL) in San Francisco}"
+```
+
+On a sibling robot, set them to that unit's values instead:
+
+```shell
+export ROBOT_NAME="BIT-2"
+export ROBOT_HOME="the Cognizant AI Lab in Bengaluru"
+```
+
+| Variable | Reaches | Notes |
+| --- | --- | --- |
+| `ROBOT_NAME` | agent persona, speech recogniser, web UI | The name the robot answers to. With no wake-word matcher, this is what makes it recognise being addressed in ambient mode. |
+| `ROBOT_HOME` | agent persona, speech recogniser | Rendered mid-sentence as "You live in ...", so keep the leading lowercase article. |
+
+Three independent consumers read these, which is worth knowing when debugging:
+`registries/conscious_agent.hocon` resolves `${?ROBOT_NAME}` through pyhocon
+without passing through Python, `apps/conscious_assistant/robot_identity.py`
+serves the recogniser prompt, and a Flask context processor serves the
+templates. All three read the environment when the app starts, so **restart the
+app after changing either value**; the manifest reload will not pick it up.
+
+Both have working defaults in code as well, so a robot whose `setmyenv.sh`
+predates this still behaves as CAIL-E. The lab branding in the web UI footer
+stays hardcoded, since every unit lives in a Cognizant AI Lab.
+
+Site-specific data is separate and not covered by these variables: each lab
+needs its own `maps/<lab>.json` and occupancy grid, a `NAV_INITIAL_LOCATION`
+naming a real node in it, and its own `face_database/`.
+
 #### Environment variable meanings
 
 | Variable | Value above | Meaning |
@@ -103,7 +148,7 @@ specific robot really needs a temporary override.
 | Setting | Code default | Meaning |
 | --- | --- | --- |
 | `CONSCIOUS_ENABLE_SCENE_OBSERVER` | enabled on Linux | Keeps the latest camera scene available in the UI and face-learning tools. |
-| Native scene observation | every 15 seconds | The native runtime's Python observer service captures the scene and sends its metadata to CAIL-E as an internal event. |
+| Native scene observation | every 15 seconds | The native runtime's Python observer service captures the scene and sends its metadata to the agent as an internal event. |
 | `GO2_MOVE_LOG_INTERVAL_SECONDS` | `-1` | Suppresses repeated raw `Move(vx, vy, vyaw)` logs. |
 | `GO2_USE_SDK_SPECIAL_MOTIONS` | `1` | Uses Unitree SDK special motions when available. |
 | `GO2_NETWORK_INTERFACE` / `CYCLONEDDS_NETWORK_INTERFACE` | `eth0` | Unitree SDK communication interface. Override only if the robot network is not on `eth0`. |
@@ -268,7 +313,7 @@ cmake .. -DCMAKE_INSTALL_PREFIX=../install
 # If that’s the case, you can skip building ddsperf altogether (it’s just a benchmark tool, not needed for runtime).
 # In your CMake command:
 # cmake .. -DCMAKE_INSTALL_PREFIX=../install -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DBUILD_DDSPERF=OFF
-# This will still install CycloneDDS core libraries — without building the ddsperf tool.
+# This will still install CycloneDDS core libraries, without building the ddsperf tool.
 
 # Install cyclonedds
 cmake --build . --target install
@@ -433,95 +478,9 @@ The Neuro SAN agent command `move_until_obstacle` uses the same guarded
 movement path. `move_forward` also uses this path with a time backstop derived
 from the requested distance until real odometry is available.
 
-### Troubleshooting
-
-If you run into the following error:
-```shell
-      building 'cyclonedds._clayer' extension
-      creating build/temp.macosx-14.7-arm64-cpython-313/clayer
-      clang -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -I/Users/754337/workspace/neuro-san-robotics/cyclonedds/install/include -I/private/var/folders/w6/w8ptt70j5ylfrcw1rgjc5pfr0000gq/T/pip-install-_cut3gf5/cyclonedds_7518aeede8314c2c995982c34d1e59f6/clayer -I/Users/754337/workspace/neuro-san-robotics/venv/include -I/Users/754337/.pyenv/versions/3.13.5/include/python3.13 -c clayer/cdrkeyvm.c -o build/temp.macosx-14.7-arm64-cpython-313/clayer/cdrkeyvm.o
-      clang -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -I/Users/754337/workspace/neuro-san-robotics/cyclonedds/install/include -I/private/var/folders/w6/w8ptt70j5ylfrcw1rgjc5pfr0000gq/T/pip-install-_cut3gf5/cyclonedds_7518aeede8314c2c995982c34d1e59f6/clayer -I/Users/754337/workspace/neuro-san-robotics/venv/include -I/Users/754337/.pyenv/versions/3.13.5/include/python3.13 -c clayer/pysertype.c -o build/temp.macosx-14.7-arm64-cpython-313/clayer/pysertype.o
-      clayer/pysertype.c:610:10: error: call to undeclared function '_Py_IsFinalizing'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
-        610 |     if (!_Py_IsFinalizing()) {
-            |          ^
-      clayer/pysertype.c:610:10: note: did you mean 'Py_IsFinalizing'?
-      /Users/754337/.pyenv/versions/3.13.5/include/python3.13/pylifecycle.h:68:17: note: 'Py_IsFinalizing' declared here
-         68 | PyAPI_FUNC(int) Py_IsFinalizing(void);
-            |                 ^
-      clayer/pysertype.c:1784:48: warning: passing 'const dds_typeid_t *' (aka 'const struct ddsi_typeid *') to parameter of type 'dds_typeid_t *' (aka 'struct ddsi_typeid *') discards qualifiers [-Wincompatible-pointer-types-discards-qualifiers]
-       1784 |             ddspy_typeid_ser(&type_obj_stream, type_id);
-            |                                                ^~~~~~~
-      clayer/typeser.h:19:54: note: passing argument to parameter here
-         19 | void ddspy_typeid_ser (dds_ostream_t*, dds_typeid_t *);
-            |                                                      ^
-      clayer/pysertype.c:1875:48: warning: passing 'const dds_typeid_t *' (aka 'const struct ddsi_typeid *') to parameter of type 'dds_typeid_t *' (aka 'struct ddsi_typeid *') discards qualifiers [-Wincompatible-pointer-types-discards-qualifiers]
-       1875 |             ddspy_typeid_ser(&type_obj_stream, type_id);
-            |                                                ^~~~~~~
-      clayer/typeser.h:19:54: note: passing argument to parameter here
-         19 | void ddspy_typeid_ser (dds_ostream_t*, dds_typeid_t *);
-            |                                                      ^
-      clayer/pysertype.c:1962:48: warning: passing 'const dds_typeid_t *' (aka 'const struct ddsi_typeid *') to parameter of type 'dds_typeid_t *' (aka 'struct ddsi_typeid *') discards qualifiers [-Wincompatible-pointer-types-discards-qualifiers]
-       1962 |             ddspy_typeid_ser(&type_obj_stream, type_id);
-            |                                                ^~~~~~~
-      clayer/typeser.h:19:54: note: passing argument to parameter here
-         19 | void ddspy_typeid_ser (dds_ostream_t*, dds_typeid_t *);
-            |                                                      ^
-      clayer/pysertype.c:2079:48: warning: passing 'const dds_typeid_t *' (aka 'const struct ddsi_typeid *') to parameter of type 'dds_typeid_t *' (aka 'struct ddsi_typeid *') discards qualifiers [-Wincompatible-pointer-types-discards-qualifiers]
-       2079 |             ddspy_typeid_ser(&type_obj_stream, type_id);
-            |                                                ^~~~~~~
-      clayer/typeser.h:19:54: note: passing argument to parameter here
-         19 | void ddspy_typeid_ser (dds_ostream_t*, dds_typeid_t *);
-            |                                                      ^
-      4 warnings and 1 error generated.
-      error: command '/usr/bin/clang' failed with exit code 1
-      [end of output]
-
-  note: This error originates from a subprocess, and is likely not a problem with pip.
-  ERROR: Failed building wheel for cyclonedds
-Failed to build cyclonedds
-```
-
-That's because you're using Python 3.12.x or 3.13. You need to downgrade to Python 3.11.x.
-
-## Test
-
-Run the `hello_world` test:
-
-In one terminal, run the subscriber:
-```bash
-# Navigate to the project's repo
-cd neuro-san-robotics
-
-# Activate the virtual environment
-source venv/bin/activate && export PYTHONPATH=`pwd`
-
-# Navigate to the unitree_sdk2_python directory
-cd  unitree_sdk2_python
-
-# Run the subscriber
-python ./example/helloworld/subscriber.py
-```
-
-In another terminal, run the publisher:
-```bash
-# Navigate to the project's repo
-cd neuro-san-robotics
-
-# Activate the virtual environment
-source venv/bin/activate && export PYTHONPATH=`pwd`
-
-# Navigate to the unitree_sdk2_python directory
-cd  unitree_sdk2_python
-
-# Run the publisher
-python ./example/helloworld/publisher.py
-```
-
-For more information look at the [Unitree SDK2 Python documentation](https://github.com/unitreerobotics/unitree_sdk2_python).
-
 ---
 
-## How to run neuro-san agents on Cailey
+## How to run neuro-san agents on the robot
 
 **Step1:** 
 - Set env variables:
@@ -575,3 +534,7 @@ The robot has stood up. How else can I assist you today?
 Please enter your response ('quit' to terminate):
 quit
 ```
+
+---
+
+For Troubleshooting, refer to [./docs/troubleshooting.md](./docs/troubleshooting.md)
