@@ -1,5 +1,14 @@
 # Neuro SAN
 neuro-san==0.6.76
+# Pin leaf-common into a narrow working window:
+#  - 1.3.0+ dropped leaf_common.session, which leaf-server-common 0.1.25 still
+#    imports (ModuleNotFoundError: No module named 'leaf_common.session').
+#  - 1.2.49+ call asyncio.eager_task_factory in AsyncioExecutor, which only
+#    exists on Python 3.12+. This venv is 3.11, so it breaks
+#    PeriodicEventInitiator and TempNetworkStorageUpdater at runtime.
+# 1.2.45-1.2.48 have session and avoid eager_task_factory. Pinned exact to
+# 1.2.47 to match the known-good fleet config on the other Go2.
+leaf-common==1.2.47
 
 nsflow==0.5.20
 langchain-google-genai
@@ -11,6 +20,10 @@ python-dotenv==1.0.1
 aiofiles>=24.1.0
 
 # Web app dependencies for apps/conscious_assistant/interface_flask.py
+# cryptography already arrives transitively (leaf-common, google-auth, pyjwt);
+# declared here because scripts/setup_tls_certs.py imports it directly to build
+# the UI's self-signed cert.
+cryptography>=41.0
 flask>=2.3,<3.0
 flask-socketio>=5.3,<6.0
 simple-websocket>=0.10,<2.0

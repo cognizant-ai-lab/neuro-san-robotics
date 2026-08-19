@@ -62,14 +62,14 @@ shell file or as a manual export.
 ```shell
 source venv/bin/activate
 
-export PYTHONPATH="$HOME/librealsense-2.54.2/build/Release:$PWD:$PWD/coded_tools:${PYTHONPATH:-}"
+export PYTHONPATH="$HOME/librealsense-2.55.1/build/Release:$PWD:$PWD/coded_tools:${PYTHONPATH:-}"
 export AGENT_TOOL_PATH="$PWD/coded_tools"
 export AGENT_MANIFEST_FILE="$PWD/registries/manifest.hocon"
 
 export CYCLONEDDS_HOME="$PWD/cyclonedds/install"
 export CYCLONEDDS_URI="file://$HOME/cyclonedds.xml"
 
-export LD_LIBRARY_PATH="$PWD/cyclonedds/install/lib:$HOME/librealsense-2.54.2/build:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$PWD/cyclonedds/install/lib:$HOME/librealsense-2.55.1/build:${LD_LIBRARY_PATH:-}"
 
 printf 'PYTHONPATH=%s\n' "$PYTHONPATH"
 printf 'AGENT_TOOL_PATH=%s\n' "$AGENT_TOOL_PATH"
