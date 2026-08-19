@@ -13,7 +13,7 @@ from coded_tools.unigo2.agent_events import queue_agent_event
 
 
 class SceneObserverService:
-    """Capture scenes on a fixed interval and forward their metadata to CAIL-E."""
+    """Capture scenes on a fixed interval and forward their metadata to the agent."""
 
     def __init__(
         self,

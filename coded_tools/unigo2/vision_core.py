@@ -268,7 +268,7 @@ def _opencv_gui_available() -> bool:
     Return whether it is safe to use OpenCV HighGUI windows on this machine.
 
     On Linux, OpenCV window backends usually require an X11/Wayland session.
-    CAIL-E is typically headless, so we default to non-GUI mode there.
+    The robot is typically headless, so we default to non-GUI mode there.
     """
     if _env_flag("VISION_HEADLESS", default=False):
         return False
