@@ -28,7 +28,7 @@ def _navigation_awareness_path() -> Path:
     return Path(
         os.environ.get(
             "CONSCIOUS_NAVIGATION_AWARENESS_FILE",
-            "/tmp/cail-e-navigation-awareness.json",
+            "/tmp/robot-navigation-awareness.json",
         )
     )
 
