@@ -98,8 +98,8 @@ between robots, and both belong in the robot's `setmyenv.sh`. The template in
 `setmyenv.sh` predates this, add these two lines to it:
 
 ```shell
-export ROBOT_NAME="${ROBOT_NAME:-CAIL-E}"
-export ROBOT_HOME="${ROBOT_HOME:-the Cognizant AI Lab (CAIL) in San Francisco}"
+export ROBOT_NAME="CAIL-E"
+export ROBOT_HOME="the Cognizant AI Lab (CAIL) in San Francisco"
 ```
 
 On a sibling robot, set them to that unit's values instead:
@@ -128,6 +128,50 @@ stays hardcoded, since every unit lives in a Cognizant AI Lab.
 Site-specific data is separate and not covered by these variables: each lab
 needs its own `maps/<lab>.json` and occupancy grid, a `NAV_INITIAL_LOCATION`
 naming a real node in it, and its own `face_database/`.
+
+#### Site map
+
+The navigation map describes a building, not a robot, so every robot in the
+same lab points at the same file. Set it in that robot's `setmyenv.sh`:
+
+```shell
+export NAV_MAP_FILE="$PWD/maps/cail_lab.json"
+export NAV_INITIAL_LOCATION="charging_station"
+```
+
+Use a direct assignment, not `${NAV_MAP_FILE:-default}`. Bash's `:-` treats an
+empty value as unset, so it would replace `""` with the default and hand an
+unmapped robot somebody else's building.
+
+**There is no default in code.** A robot that has not been told where it lives
+loads no map and answers navigation questions with:
+
+> No map loaded. Only relative navigation (move_forward, turn) is available.
+
+That is deliberate. The alternative, falling back to whatever map ships in the
+repo, means a robot in Bangalore confidently offering to walk to a desk in San
+Francisco. Failing loudly beats being silently wrong about the building you are
+standing in. `move_forward`, `move_until_obstacle`, and `turn` all keep working
+with depth obstacle avoidance, so an unmapped robot is still useful.
+
+| Variable | Meaning |
+| --- | --- |
+| `NAV_MAP_FILE` | Path to this site's map JSON. Empty or unset means no map. |
+| `NAV_INITIAL_LOCATION` | Node where the robot is parked at startup. Must exist in `NAV_MAP_FILE`; the robot warns and starts unanchored if it does not. |
+
+Bringing up a new lab:
+
+1. Leave `NAV_MAP_FILE=""` at first. The robot walks, avoids obstacles, and
+   tells people it has no map of this place.
+2. Author `maps/<lab>.json` for the building. `maps/cail_lab.json` is the
+   worked example, and `maps/build_occupancy_map.py` generates the occupancy
+   grid from an annotated floor plan.
+3. Point `NAV_MAP_FILE` at it and set `NAV_INITIAL_LOCATION` to a node that
+   exists in it.
+
+A map without an `occupancy_map` section still works: named destinations and
+topological routing come up, and only clearance-aware metric planning is
+skipped. So a handful of hand-placed nodes is a usable first map.
 
 #### Environment variable meanings
 
