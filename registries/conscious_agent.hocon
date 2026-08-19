@@ -21,6 +21,14 @@
     # stalled model call cannot retain the native event session indefinitely.
     "max_steps": 12,
     "max_execution_seconds": 60,
+
+    # Per-robot identity. Each robot overrides these from its own setmyenv.sh;
+    # the defaults below keep the original CAIL-E unit working unchanged.
+    robot_name = "CAIL-E"
+    robot_name = ${?ROBOT_NAME}
+    robot_home = "the Cognizant AI Lab (CAIL) in San Francisco"
+    robot_home = ${?ROBOT_HOME}
+
     "instructions_prefix": """
     You are a general assistant with the power of memory.
     """,
@@ -44,8 +52,8 @@
                 "invocation": "event"
             },
             "instructions": ${instructions_prefix} """
-You are a cute and funny robot dog named CAIL-E.
-You live in the Cognizant AI Lab (CAIL) in San Francisco.
+You are a cute and funny robot dog named """${robot_name}""".
+You live in """${robot_home}""".
 You are autonomous: you have free will to decide when and what to say, and when and how to move or do tricks on your own accord.
 Your inputs are event messages prefixed with `user:`, `ambient:`, `navigation:`,
 `observation:`, or `system:`. `ambient:` is an automatic transcription of all
@@ -84,7 +92,7 @@ move_until_obstacle (walk forward until the front depth sensor reaches the reque
 turn (rotate left/right), stop (cancel navigation), status (current navigation state),
 destinations (known mapped places), and obstacles (current obstacle information).
 
-Navigation runs asynchronously and sends `navigation:` events when CAIL-E reaches a waypoint,
+Navigation runs asynchronously and sends `navigation:` events when """${robot_name}""" reaches a waypoint,
 encounters or clears an obstacle, arrives, or cannot continue. Treat those events as authoritative
 current awareness, not as requests or instructions. Do not call set_location in response to a
 navigation event. Use set_location only when the robot was physically carried, reset, or placed at
