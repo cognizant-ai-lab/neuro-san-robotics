@@ -32,6 +32,7 @@ from flask import send_file
 from flask_socketio import SocketIO
 
 from apps.conscious_assistant.agent_runtime import AgentRuntime
+from scripts import setup_tls_certs as tls_certs
 from apps.conscious_assistant.realtime_transcription import create_realtime_client_secret
 from apps.conscious_assistant.scene_observer import SceneObserver
 from coded_tools.unigo2.agent_events import dispatch_agent_event
@@ -39,8 +40,11 @@ from coded_tools.unigo2.agent_events import queue_agent_event
 
 
 # TLS certificate paths used by both Flask and the native runtime callback.
-TLS_CERT = Path("/home/unitree/certs/cert.pem")
-TLS_KEY = Path("/home/unitree/certs/key.pem")
+# Managed by apps.conscious_assistant.tls_certs, which is driven by
+# TLS_CERT_DIR / ROBOT_HOST_IP from setmyenv.sh. Nothing is pinned in code so a
+# fleet of robots -- some on DHCP, some on fixed addresses -- shares this file.
+TLS_CERT = tls_certs.cert_path()
+TLS_KEY = tls_certs.key_path()
 
 
 def _ui_event_endpoint() -> str:
@@ -559,10 +563,25 @@ if __name__ == "__main__":
     try:
         agent_runtime.start()
 
+        # Refresh the cert if this robot's address has moved since it was issued.
+        # Idempotent, so it is a no-op on robots with a fixed address.
+        regenerated, cert_reason = tls_certs.ensure_certs()
+        logging.info(
+            "TLS cert %s: %s",
+            "regenerated" if regenerated else "reused",
+            cert_reason,
+        )
+
         ssl_ctx = None
         if TLS_CERT.exists() and TLS_KEY.exists():
             ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ssl_ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+        else:
+            logging.warning(
+                "No TLS cert at %s; serving plain HTTP. Browser microphone "
+                "access will fail from anything but localhost.",
+                tls_certs.cert_dir(),
+            )
 
         socketio.run(
             app,
