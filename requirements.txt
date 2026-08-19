@@ -20,6 +20,10 @@ python-dotenv==1.0.1
 aiofiles>=24.1.0
 
 # Web app dependencies for apps/conscious_assistant/interface_flask.py
+# cryptography already arrives transitively (leaf-common, google-auth, pyjwt);
+# declared here because scripts/setup_tls_certs.py imports it directly to build
+# the UI's self-signed cert.
+cryptography>=41.0
 flask>=2.3,<3.0
 flask-socketio>=5.3,<6.0
 simple-websocket>=0.10,<2.0
