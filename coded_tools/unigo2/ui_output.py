@@ -1,4 +1,4 @@
-"""Agent-owned presentation tool for CAIL-E's browser and speaker."""
+"""Agent-owned presentation tool for the robot's browser and speaker."""
 
 from __future__ import annotations
 

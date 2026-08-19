@@ -5,9 +5,21 @@ import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from apps.conscious_assistant.robot_identity import robot_home
+from apps.conscious_assistant.robot_identity import robot_name
+
 
 REALTIME_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 TRANSIENT_STATUSES = {502, 503, 504}
+
+
+def transcription_prompt() -> str:
+    """Bias the recogniser toward this robot's name so it is heard reliably."""
+    return (
+        f"Ambient speech in {robot_home()}. "
+        f"{robot_name()} is the robot's name. "
+        "Preserve names and technical terms accurately."
+    )
 
 
 def transcription_session_config(model: str) -> dict:
@@ -20,10 +32,7 @@ def transcription_session_config(model: str) -> dict:
                 "transcription": {
                     "model": model,
                     "language": "en",
-                    "prompt": (
-                        "Ambient speech in the Cognizant AI Lab. CAIL-E is the robot's "
-                        "name. Preserve names and technical terms accurately."
-                    ),
+                    "prompt": transcription_prompt(),
                 },
                 "turn_detection": {
                     "type": "server_vad",

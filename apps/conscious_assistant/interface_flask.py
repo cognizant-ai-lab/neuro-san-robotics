@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 
+from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +35,7 @@ from flask_socketio import SocketIO
 from apps.conscious_assistant.agent_runtime import AgentRuntime
 from scripts import setup_tls_certs as tls_certs
 from apps.conscious_assistant.realtime_transcription import create_realtime_client_secret
+from apps.conscious_assistant.robot_identity import robot_name
 from apps.conscious_assistant.scene_observer import SceneObserver
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 from coded_tools.unigo2.agent_events import queue_agent_event
@@ -83,6 +85,18 @@ os.environ.setdefault("VISION_FACE_DB_PATH", str(REPO_ROOT / "face_database"))
 os.environ["CONSCIOUS_UI_EVENT_ENDPOINT"] = _ui_event_endpoint()
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "secret!"
+
+
+@app.context_processor
+def inject_template_identity() -> dict:
+    """Give every template this robot's name and the current year.
+
+    The lab branding stays hardcoded in the template: every robot lives in a
+    Cognizant AI Lab, so only the robot's own name varies between units.
+    """
+    return {"robot_name": robot_name(), "year": datetime.now().year}
+
+
 socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 shutdown_event = threading.Event()
 
@@ -484,7 +498,7 @@ def handle_ambient_transcript(json, *_):
 
     Ambient mode deliberately has no acknowledgement, processing indicator, or
     automatic speech.  The native agent receives every usable transcript and
-    decides from its event instructions whether CAIL-E was being addressed.
+    decides from its event instructions whether the robot was being addressed.
     """
     transcript = str((json or {}).get("data", "")).strip()
     if not transcript:

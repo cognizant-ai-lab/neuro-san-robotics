@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>CAIL-E The Conscious Dog</title>
+    <title>{{ robot_name }} The Conscious Dog</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <!-- Google Fonts for a modern, futuristic look -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -11,7 +11,7 @@
 </head>
 <body>
         <header class="site-header">
-            <h1><img src="{{ url_for('static', filename='go2.png') }}" alt="CAIL-E Robot" class="header-icon"> CAIL-E The Conscious Dog</h1>
+            <h1><img src="{{ url_for('static', filename='go2.png') }}" alt="{{ robot_name }} Robot" class="header-icon"> {{ robot_name }} The Conscious Dog</h1>
             <p class="subtitle">Powered by Neuro-San from Cognizant AI Lab (CAIL)</p>
         </header>
 
@@ -20,10 +20,10 @@
             <section id="chat-history-section" aria-label="Chat History">
                 <h2>Chat History</h2>
                 <div id="chat-history" class="chat-box chat-history-box">
-                    <div class="empty-state">Your conversation with CAIL-E will appear here...</div>
+                    <div class="empty-state">Your conversation with {{ robot_name }} will appear here...</div>
                 </div>
                 <form id="user-input-section" autocomplete="off">
-                    <textarea id="user-input" rows="3" placeholder="Communicate with CAIL-E the conscious dog... (type 'exit' to disconnect)" aria-label="Type your message"></textarea>
+                    <textarea id="user-input" rows="3" placeholder="Communicate with {{ robot_name }} the conscious dog... (type 'exit' to disconnect)" aria-label="Type your message"></textarea>
                     <div class="button-group">
                         <button type="button" id="send-button" onclick="sendUserInput()">
                             <span class="button-text">Send</span>
@@ -35,7 +35,7 @@
 
         <aside id="assistant-thoughts-section" class="thoughts-sidebar collapsed" aria-label="Assistant's Thoughts">
             <div class="thoughts-header">
-                <h2>CAIL-E Thoughts</h2>
+                <h2>{{ robot_name }} Thoughts</h2>
                 <button id="toggle-thoughts" type="button">
                     <span id="toggle-text">Show Thoughts</span>
                 </button>
@@ -69,7 +69,7 @@
         </button>
     </div>
     <footer>
-        <small>&copy; {{year}} CAIL-E The Conscious Dog &mdash; Powered by Neuro-San from Cognizant AI Lab (CAIL)</small>
+        <small>&copy; {{ year }} {{ robot_name }} The Conscious Dog. Powered by Neuro-San from Cognizant AI Lab (CAIL)</small>
     </footer>
 
     <script>
@@ -79,6 +79,9 @@
             transports: ["polling"],
             upgrade: false,
         });
+        // Injected once by the Flask context processor; tojson keeps the value a
+        // safe JS string literal even if the name contains a quote.
+        const ROBOT_NAME = {{ robot_name | tojson }};
         const MAX_CHAT_HISTORY = 120;
         const MAX_THOUGHT_HISTORY = 120;
         var thoughtsInitialized = false;
@@ -311,7 +314,7 @@
                                 var userInput = document.getElementById('user-input').value.trim();
                                 if (userInput) {
                                     if (!socket.connected) {
-                                        alert('Connection to CAIL-E is not ready yet. Refresh the page and try again.');
+                                        alert('Connection to ' + ROBOT_NAME + ' is not ready yet. Refresh the page and try again.');
                                         return;
                                     }
                                     socket.emit('user_input', {data: userInput, skip_echo: true});
@@ -816,7 +819,7 @@
 
             var image = document.createElement('img');
             image.className = 'observation-entry-image';
-            image.alt = 'Camera observation from CAIL-E';
+            image.alt = 'Camera observation from ' + ROBOT_NAME;
             image.src = data.image_url;
 
             var caption = document.createElement('div');
@@ -903,7 +906,7 @@
             var userInput = document.getElementById('user-input').value.trim();
             if (userInput) {
                 if (!socket.connected) {
-                    alert('Connection to CAIL-E is not ready yet. Refresh the page and try again.');
+                    alert('Connection to ' + ROBOT_NAME + ' is not ready yet. Refresh the page and try again.');
                     return;
                 }
                 socket.emit('user_input', {data: userInput});

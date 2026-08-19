@@ -13,7 +13,7 @@
 """
 NavCore - Navigation Engine for Unitree Go2 EDU
 
-Provides autonomous navigation for the CAIL-E robot dog:
+Provides autonomous navigation for the robot dog:
 - Local reactive obstacle avoidance (VFH+ algorithm)
 - Clearance-aware occupancy planning with live-obstacle overlays
 - Semantic destinations with topological fallback for simulation maps
@@ -4246,7 +4246,7 @@ class NavCore:
     ) -> str:
         """Move forward continuously while forward obstacle clearance stays clear.
 
-        This is the hardware-safe forward primitive validated on CAIL-E. It does
+        This is the hardware-safe forward primitive validated on the robot. It does
         not declare success from dead-reckoned distance. Instead, it keeps a
         continuous Go2 gait command active and stops immediately when the active
         obstacle provider sees a path obstacle at or inside stop_distance_m.
