@@ -345,6 +345,50 @@ header h1 {
     letter-spacing: 0.5px;
 }
 
+/* Credit link in the header subtitle and the footer. Inherits the muted colour
+   of whichever it sits in, so it reads as a link without shouting. */
+.credit-link {
+    color: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-color: rgba(143, 163, 191, 0.45);
+    transition: color 0.2s ease, text-decoration-color 0.2s ease;
+}
+
+.credit-link:hover,
+.credit-link:focus-visible {
+    color: #cfe0f5;
+    text-decoration-color: currentColor;
+}
+
+/* GitHub mark pinned to the top right of the header. The SVG uses
+   currentColor, so colour and glow are driven entirely from here. */
+.github-link {
+    position: absolute;
+    top: 18px;
+    right: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px;
+    border-radius: 8px;
+    line-height: 0;
+    color: #8fa3bf;
+    transition: color 0.2s ease, filter 0.2s ease, transform 0.2s ease;
+}
+
+.github-link:hover {
+    color: #00ffff;
+    filter: drop-shadow(0 0 10px rgba(0, 255, 255, 0.45));
+    transform: translateY(-1px);
+}
+
+.github-link:focus-visible {
+    color: #00ffff;
+    outline: 2px solid rgba(0, 255, 255, 0.7);
+    outline-offset: 2px;
+}
+
 section {
     margin-bottom: 28px;
     animation: sectionSlideIn 0.5s ease-out backwards;
@@ -820,6 +864,17 @@ footer {
     
     header h1 {
         font-size: 1.6em;
+    }
+
+    .github-link {
+        top: 10px;
+        right: 12px;
+        padding: 4px;
+    }
+
+    .github-link svg {
+        width: 22px;
+        height: 22px;
     }
     
     section {
