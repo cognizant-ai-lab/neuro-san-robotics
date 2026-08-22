@@ -17,7 +17,7 @@ from coded_tools.unigo2.depth_processor import (
     ObstacleGrid,
 )
 from coded_tools.unigo2.nav_core import (
-    DEFAULT_MAP_FILE,
+    CAIL_LAB_MAP_FILE,
     GlobalPlanner,
     LocalPlanner,
     LocalObstacleMemory,
@@ -1333,7 +1333,7 @@ class TestTopologicalMap(unittest.TestCase):
     def test_default_map_loads_required_metric_occupancy(self):
         topo = TopologicalMap()
 
-        loaded = topo.load_from_file(str(DEFAULT_MAP_FILE))
+        loaded = topo.load_from_file(str(CAIL_LAB_MAP_FILE))
 
         self.assertTrue(loaded)
         self.assertIsNotNone(topo.metric_map)
@@ -1341,7 +1341,7 @@ class TestTopologicalMap(unittest.TestCase):
 
     def test_charging_pose_is_not_enclosed_by_its_map_annotation(self):
         topo = TopologicalMap()
-        self.assertTrue(topo.load_from_file(str(DEFAULT_MAP_FILE)))
+        self.assertTrue(topo.load_from_file(str(CAIL_LAB_MAP_FILE)))
         charging = topo.get_node("charging_station")
         immersive = topo.get_node("immersive_room")
 
@@ -1365,7 +1365,7 @@ class TestTopologicalMap(unittest.TestCase):
 
     def test_default_map_blocks_false_marker_4_to_f_core_shortcut(self):
         topo = TopologicalMap()
-        self.assertTrue(topo.load_from_file(str(DEFAULT_MAP_FILE)))
+        self.assertTrue(topo.load_from_file(str(CAIL_LAB_MAP_FILE)))
         marker_4 = topo.get_node("entrance")
         immersive = topo.get_node("immersive_room")
 
@@ -1384,7 +1384,7 @@ class TestTopologicalMap(unittest.TestCase):
 
     def test_default_map_routes_clear_of_fixed_furniture(self):
         topo = TopologicalMap()
-        self.assertTrue(topo.load_from_file(str(DEFAULT_MAP_FILE)))
+        self.assertTrue(topo.load_from_file(str(CAIL_LAB_MAP_FILE)))
         charging = topo.get_node("charging_station")
         immersive = topo.get_node("immersive_room")
         furniture = {
@@ -2114,18 +2114,55 @@ class TestNavCoreStatus(unittest.TestCase):
 
         self.assertIsNone(core._fresh_obstacle_grid(grid))
 
-    def test_robot_map_default_is_in_code(self):
-        old_map = os.environ.pop("NAV_MAP_FILE", None)
-        old_sim = os.environ.pop("NAV_SIMULATION_MODE", None)
-        try:
-            self.assertEqual(_configured_map_file(), str(DEFAULT_MAP_FILE))
-            os.environ["NAV_SIMULATION_MODE"] = "1"
+    def test_a_robot_with_no_configured_map_gets_no_map(self):
+        # Each site sets NAV_MAP_FILE in its own setmyenv.sh. A robot that has
+        # not been told where it lives must say so rather than load some other
+        # office and offer destinations that do not exist here.
+        with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(_configured_map_file(), "")
+
+    def test_configured_map_file_is_used(self):
+        with patch.dict(os.environ, {"NAV_MAP_FILE": "/tmp/bengaluru.json"}, clear=True):
+            self.assertEqual(_configured_map_file(), "/tmp/bengaluru.json")
+
+    def test_simulation_mode_disables_the_map(self):
+        environment = {"NAV_SIMULATION_MODE": "1"}
+        with patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(_configured_map_file(), "")
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_initial_location_missing_from_the_map_is_reported(self, mock_go2):
+        import json
+        import tempfile
+
+        mock_go2.return_value = MagicMock()
+        map_data = {
+            "name": "somewhere else",
+            "nodes": [{"name": "reception", "x": 0.0, "y": 0.0}],
+            "edges": [],
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
+            json.dump(map_data, handle)
+            map_path = handle.name
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        os.environ["NAV_MAP_FILE"] = map_path
+        os.environ["NAV_INITIAL_LOCATION"] = "charging_station"
+        try:
+            with self.assertLogs("coded_tools.unigo2.nav_core", level="WARNING") as logs:
+                nav = NavCore.get_instance()
+            self.assertTrue(
+                any("charging_station" in line for line in logs.output),
+                f"expected a warning naming the missing node, got {logs.output}",
+            )
+            nav.shutdown()
         finally:
-            if old_map is not None:
-                os.environ["NAV_MAP_FILE"] = old_map
-            if old_sim is not None:
-                os.environ["NAV_SIMULATION_MODE"] = old_sim
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+            os.environ.pop("NAV_MAP_FILE", None)
+            os.environ.pop("NAV_INITIAL_LOCATION", None)
+            os.unlink(map_path)
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_get_status_summary(self, mock_go2):

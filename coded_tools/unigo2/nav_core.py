@@ -65,7 +65,10 @@ from coded_tools.unigo2.metric_navigation import MetricOccupancyMap
 
 logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MAP_FILE = REPO_ROOT / "maps" / "cail_lab.json"
+# The San Francisco map that ships with the repo. This is NOT a default: every
+# site sets NAV_MAP_FILE in its own setmyenv.sh. Kept as a named path because
+# tests load it as a realistic map fixture.
+CAIL_LAB_MAP_FILE = REPO_ROOT / "maps" / "cail_lab.json"
 
 
 # ---------------------------------------------------------------------------
@@ -85,13 +88,18 @@ def _get_go2_macros():
 
 
 def _configured_map_file() -> str:
-    """Return the map file for production navigation, with env only as an override."""
+    """Return the map file for navigation, or "" when this site has no map.
+
+    The map belongs to the site, not to the robot, so each site sets
+    NAV_MAP_FILE in its own setmyenv.sh and every robot in that building
+    shares the value. There is deliberately no in-code default: a robot that
+    has not been told where it lives reports that it has no map, rather than
+    loading another office and offering destinations that do not exist here.
+    """
     configured = os.environ.get("NAV_MAP_FILE")
     if configured is not None:
         return configured.strip()
-    if _env_flag("NAV_SIMULATION_MODE", False):
-        return ""
-    return str(DEFAULT_MAP_FILE)
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -2888,6 +2896,13 @@ class NavCore:
         initial_location = os.environ.get("NAV_INITIAL_LOCATION", "charging_station")
         node = self._topo_map.get_node(initial_location)
         if node is None:
+            logger.warning(
+                "NavCore: initial location '%s' is not in map '%s'; starting unanchored. "
+                "Set NAV_INITIAL_LOCATION to one of: %s",
+                initial_location,
+                self._topo_map.name or "unnamed",
+                ", ".join(self._topo_map.list_destinations()) or "(none)",
+            )
             return
 
         heading_deg = _env_float("NAV_INITIAL_HEADING_DEGREES", 0.0)
