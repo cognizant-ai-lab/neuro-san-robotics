@@ -82,14 +82,16 @@ filter is what makes an open microphone safe.
 |----------|---------|--------|
 | `CONSCIOUS_SELF_ECHO_TAIL_SECONDS` | `1.5` | How long after playback a transcript can still be self-echo |
 | `CONSCIOUS_SELF_ECHO_OVERLAP` | `0.6` | Word overlap needed to call a transcript self-echo |
+| `CONSCIOUS_SELF_ECHO_NOVEL_WORDS` | `2` | Consecutive words the robot never said that mark a real person |
 | `CONSCIOUS_BARGE_IN_MIN_WORDS` | `2` | Words required before a transcript may cut the robot off |
 | `CONSCIOUS_DUCK_RELEASE_SECONDS` | `2.5` | When to undo a duck no transcript confirmed |
-| `CONSCIOUS_SUPERSEDED_TURN_WINDOW_SECONDS` | `12.0` | How long agent speech is still attributed to an interrupted turn |
+| `CONSCIOUS_SUPERSEDED_SPEECH_GRACE_SECONDS` | `1.5` | How long after a barge-in agent speech is treated as the interrupted turn's |
 | `CONSCIOUS_ACKNOWLEDGE_USER_INPUT` | `0` | Speak a filler phrase ("On it") before answering |
 | `GO2_TTS_DUCK_VOLUME` | `20` | Mixer percentage held while ducked |
 
 Raise `CONSCIOUS_BARGE_IN_MIN_WORDS` if background conversation keeps cutting the
-robot off; lower `CONSCIOUS_SELF_ECHO_OVERLAP` if the robot answers its own
-speech.
+robot off. If the robot cuts *itself* off and answers its own sentence, raise
+`CONSCIOUS_SELF_ECHO_NOVEL_WORDS` to 3; if it ignores real interruptions, drop
+it to 1.
 
 ---

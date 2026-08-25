@@ -136,7 +136,6 @@ speech_queue = queue.Queue()
 # it was really a person.
 _speech_state_lock = threading.RLock()
 _speech_epoch = 0
-_pending_turn_epoch = 0
 _speech_active = False
 _active_speech_text = ""
 _active_speech_ended_at = 0.0
@@ -152,17 +151,27 @@ SELF_ECHO_OVERLAP = float(os.environ.get("CONSCIOUS_SELF_ECHO_OVERLAP", "0.6"))
 # person, whatever the overall overlap. Talking over the robot puts both voices
 # in one transcript, and word overlap alone would read that as pure echo.
 SELF_ECHO_NOVEL_WORDS = int(os.environ.get("CONSCIOUS_SELF_ECHO_NOVEL_WORDS", "2"))
+# Words that do not count towards that run. Room-mic transcription of the
+# robot's own voice routinely picks up leading fillers and swaps small function
+# words, and treating those as an interruption makes the robot cut itself off
+# and feed its own sentence back to the agent.
+_ECHO_NOISE_WORDS = frozenset({
+    "a", "ah", "an", "and", "eh", "er", "erm", "hmm", "huh", "in", "is", "it",
+    "like", "mhm", "mm", "of", "oh", "ok", "okay", "right", "so", "the", "to",
+    "uh", "um", "well", "yeah", "yep", "you", "know",
+})
 # A duck with no transcript behind it is a false trigger; restore after this.
 DUCK_RELEASE_SECONDS = float(os.environ.get("CONSCIOUS_DUCK_RELEASE_SECONDS", "2.5"))
 # Words a transcript needs before it may cut the robot off, so a stray syllable
 # or a one-word mis-transcription does not truncate an answer.
 BARGE_IN_MIN_WORDS = int(os.environ.get("CONSCIOUS_BARGE_IN_MIN_WORDS", "2"))
-# How long after a barge-in agent speech is still presumed to belong to the
-# turn that was interrupted. Past this the agent has had time to start
-# something new -- a navigation or observation announcement, say -- and
-# silencing it would be wrong.
-SUPERSEDED_TURN_WINDOW_SECONDS = float(
-    os.environ.get("CONSCIOUS_SUPERSEDED_TURN_WINDOW_SECONDS", "12.0")
+# Speech arriving this soon after a barge-in belongs to the turn that was
+# interrupted: the agent was already mid-answer when it got cut off, and its
+# POST lands almost immediately. A reply to what the user actually said needs
+# a round trip through the model and cannot come back this fast, so keeping
+# the window short is what stops this from swallowing the real answer.
+SUPERSEDED_SPEECH_GRACE_SECONDS = float(
+    os.environ.get("CONSCIOUS_SUPERSEDED_SPEECH_GRACE_SECONDS", "1.5")
 )
 # Output that does not belong to a conversational turn and so cannot be
 # superseded by one. A navigation outcome ("I arrived at the kitchen") is
@@ -221,8 +230,8 @@ def receive_agent_output():
         with _speech_state_lock:
             superseded = (
                 source not in UNINTERRUPTIBLE_SPEECH_SOURCES
-                and _speech_epoch > _pending_turn_epoch
-                and time.monotonic() - _last_barge_in_at <= SUPERSEDED_TURN_WINDOW_SECONDS
+                and _last_barge_in_at > 0.0
+                and time.monotonic() - _last_barge_in_at <= SUPERSEDED_SPEECH_GRACE_SECONDS
             )
         if superseded:
             logging.info("Discarding speech from a superseded turn: %s", say.strip()[:60])
@@ -370,6 +379,10 @@ def is_self_echo(transcript: str) -> bool:
     longest_novel_run = 0
     novel_run = 0
     for word in heard_words:
+        if word in _ECHO_NOISE_WORDS:
+            # Neither breaks the run nor extends it: filler carries no signal
+            # about who was speaking.
+            continue
         novel_run = 0 if word in spoken_words else novel_run + 1
         longest_novel_run = max(longest_novel_run, novel_run)
     if longest_novel_run >= SELF_ECHO_NOVEL_WORDS:
@@ -530,6 +543,13 @@ def speech_worker():
 
             logging.info("Speech worker: starting TTS job (%d chars)", len(text) if text else 0)
             if text:
+                # Re-check as late as possible: a barge-in can land while the
+                # speaking state and socket event above are being published.
+                with _speech_state_lock:
+                    still_current = job_epoch >= _speech_epoch
+                if not still_current:
+                    logging.info("Speech worker: utterance cancelled before playback")
+                    continue
                 speak_text(text)
                 logging.info("Speech worker: TTS completed")
                 if emit_to_ui:
@@ -745,7 +765,6 @@ def handle_user_input(json, *_):
     # An explicit turn is unambiguous: it always supersedes whatever the robot
     # was saying and whatever it was still queued to say.
     cancel_speech(reason="user input")
-    _mark_turn_dispatched()
     socketio.emit("processing_started", {"interactive": True}, namespace="/chat")
     if ACKNOWLEDGE_USER_INPUT:
         enqueue_speech(random.choice(ACKNOWLEDGMENT_PHRASES), emit_to_ui=True)
@@ -757,13 +776,6 @@ def handle_user_input(json, *_):
         socketio.emit("processing_complete", {"interactive": True}, namespace="/chat")
 
     socketio.start_background_task(submit)
-
-
-def _mark_turn_dispatched() -> None:
-    """Record the epoch a turn was sent at, so a later barge-in can age it out."""
-    global _pending_turn_epoch  # pylint: disable=global-statement
-    with _speech_state_lock:
-        _pending_turn_epoch = _speech_epoch
 
 
 def _should_barge_in(transcript: str) -> bool:
@@ -828,7 +840,6 @@ def handle_ambient_transcript(json, *_):
         # leaving the robot quiet until the release timer fires.
         duck_speech(False)
 
-    _mark_turn_dispatched()
     logging.info("Ambient transcript queued (%d chars): %s", len(transcript), transcript)
     socketio.emit(
         "ambient_transcript",

@@ -23,7 +23,6 @@ class SpeechStateTestCase(unittest.TestCase):
             name: getattr(interface_flask, name)
             for name in (
                 "_speech_epoch",
-                "_pending_turn_epoch",
                 "_speech_active",
                 "_active_speech_text",
                 "_active_speech_ended_at",
@@ -86,6 +85,32 @@ class SelfEchoTests(SpeechStateTestCase):
         self.assertFalse(
             interface_flask.is_self_echo("no wait the kitchen is down the hall")
         )
+
+    def test_filler_words_do_not_fake_an_interruption(self):
+        # Room-mic transcription of the robot's own voice routinely adds
+        # leading fillers and swaps small function words. Counting those as a
+        # person makes the robot cut itself off and feed its own sentence back.
+        self.set_speaking("the kitchen is down the hall past the main desk area")
+
+        for transcript in (
+            "uh the kitchen is down the hall past the main desk area",
+            "yeah so the kitchen is down the hall past the main desk area",
+            "the kitchen is down the hall past the main desk in a area",
+            "so uh the kitchen is down the hall",
+        ):
+            with self.subTest(transcript=transcript):
+                self.assertTrue(interface_flask.is_self_echo(transcript))
+
+    def test_substantive_words_still_signal_a_person(self):
+        self.set_speaking("the kitchen is down the hall past the main desk area")
+
+        for transcript in (
+            "no wait the kitchen is down the hall",
+            "stop walking and sit down",
+            "actually never mind go to the charging station",
+        ):
+            with self.subTest(transcript=transcript):
+                self.assertFalse(interface_flask.is_self_echo(transcript))
 
     def test_a_garbled_echo_is_still_an_echo(self):
         self.set_speaking("the kitchen is down the hall past the main desk area")
@@ -217,9 +242,6 @@ class AmbientEventCoalescingTests(unittest.TestCase):
         self.assertEqual(self.submitted, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class BargeInSocketFlowTests(SpeechStateTestCase):
     """End-to-end cover of the duck-then-decide sequence over Socket.IO."""
@@ -285,7 +307,6 @@ class BargeInSocketFlowTests(SpeechStateTestCase):
         self.assertTrue(self.stop_speaking.called)
 
     def test_navigation_announcements_survive_a_barge_in(self):
-        interface_flask._mark_turn_dispatched()
         self.set_speaking("partway through an answer")
         self.client.emit("barge_in", {"confirmed": True}, namespace="/chat")
 
@@ -301,7 +322,6 @@ class BargeInSocketFlowTests(SpeechStateTestCase):
         self.assertEqual(job["text"], "I arrived at the kitchen")
 
     def test_agent_speech_from_an_interrupted_turn_is_not_spoken(self):
-        interface_flask._mark_turn_dispatched()
         self.set_speaking("partway through an answer")
         self.client.emit("barge_in", {"confirmed": True}, namespace="/chat")
 
@@ -312,3 +332,51 @@ class BargeInSocketFlowTests(SpeechStateTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(self.speech_queue.empty())
+    def test_speech_from_a_turn_interrupted_by_talking_is_dropped(self):
+        self.set_speaking("the kitchen is down the hall")
+
+        with patch.object(interface_flask, "queue_agent_event"):
+            self.client.emit(
+                "ambient_transcript",
+                {"data": "no wait stop and sit down"},
+                namespace="/chat",
+            )
+        # The interrupted turn's in-flight output lands right after the cancel.
+        response = interface_flask.app.test_client().post(
+            "/api/agent-output", json={"say": "past the main desk on your left"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.speech_queue.empty())
+
+    def test_speech_from_a_typed_turn_interruption_is_dropped(self):
+        self.set_speaking("the kitchen is down the hall")
+
+        with patch.object(interface_flask, "dispatch_agent_event", return_value=True):
+            self.client.emit("user_input", {"data": "never mind"}, namespace="/chat")
+        response = interface_flask.app.test_client().post(
+            "/api/agent-output", json={"say": "past the main desk on your left"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.speech_queue.empty())
+
+    def test_the_answer_to_the_interruption_is_still_spoken(self):
+        self.set_speaking("the kitchen is down the hall")
+        self.client.emit("barge_in", {"confirmed": True}, namespace="/chat")
+
+        # A real reply needs a model round trip, so it lands past the grace
+        # window. Suppressing that would be far worse than the stale line.
+        interface_flask._last_barge_in_at = time.monotonic() - (
+            interface_flask.SUPERSEDED_SPEECH_GRACE_SECONDS + 1.0
+        )
+        response = interface_flask.app.test_client().post(
+            "/api/agent-output", json={"say": "okay, stopping here"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.speech_queue.get_nowait()["text"], "okay, stopping here")
+
+
+if __name__ == "__main__":
+    unittest.main()

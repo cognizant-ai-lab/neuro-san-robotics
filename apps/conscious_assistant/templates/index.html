@@ -969,57 +969,54 @@
             }
         });
 
-        document.getElementById('floating-mic-button').addEventListener('mousedown', async function(e) {
-            e.preventDefault();
-            if (isVoiceInputLocked()) {
-                console.log('Cannot record while robot is processing or speaking');
+        // startWhisperRecording()/stopWhisperRecording() own the .recording
+        // class. These handlers must not touch it: in ambient mode the press
+        // only interrupts and no recording begins, so a class added here would
+        // never be cleared.
+        async function beginMicPress() {
+            if (isRecording || isTranscribing) {
                 return;
             }
-            if (!isRecording && !isTranscribing) {
-                const hasPermission = await ensureMicPermission();
-                if (hasPermission) {
-                    await startWhisperRecording();
-                    document.getElementById('floating-mic-button').classList.add('recording');
-                }
+            if (ambientListening) {
+                // Ambient capture already holds the mic. Go straight through so
+                // the press still interrupts, but skip ensureMicPermission() --
+                // it would open a second capture stream nothing ever reads.
+                await startWhisperRecording();
+                return;
             }
+            if (await ensureMicPermission()) {
+                await startWhisperRecording();
+            }
+        }
+
+        function endMicPress() {
+            if (isRecording) {
+                stopWhisperRecording();
+            }
+        }
+
+        document.getElementById('floating-mic-button').addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            beginMicPress();
         });
 
         document.getElementById('floating-mic-button').addEventListener('mouseup', function(e) {
             e.preventDefault();
-            if (isRecording) {
-                stopWhisperRecording();
-                document.getElementById('floating-mic-button').classList.remove('recording');
-            }
+            endMicPress();
         });
 
-        document.getElementById('floating-mic-button').addEventListener('mouseleave', function(e) {
-            if (isRecording) {
-                stopWhisperRecording();
-                document.getElementById('floating-mic-button').classList.remove('recording');
-            }
+        document.getElementById('floating-mic-button').addEventListener('mouseleave', function() {
+            endMicPress();
         });
 
-        document.getElementById('floating-mic-button').addEventListener('touchstart', async function(e) {
+        document.getElementById('floating-mic-button').addEventListener('touchstart', function(e) {
             e.preventDefault();
-            if (isVoiceInputLocked()) {
-                console.log('Cannot record while robot is processing or speaking');
-                return;
-            }
-            if (!isRecording && !isTranscribing) {
-                const hasPermission = await ensureMicPermission();
-                if (hasPermission) {
-                    await startWhisperRecording();
-                    document.getElementById('floating-mic-button').classList.add('recording');
-                }
-            }
+            beginMicPress();
         }, {passive: false});
 
         document.getElementById('floating-mic-button').addEventListener('touchend', function(e) {
             e.preventDefault();
-            if (isRecording) {
-                stopWhisperRecording();
-                document.getElementById('floating-mic-button').classList.remove('recording');
-            }
+            endMicPress();
         });
 
         // Ambient listening is the default conversational mode: the robot is

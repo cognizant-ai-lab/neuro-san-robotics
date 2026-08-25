@@ -179,26 +179,23 @@ class _PlaybackController:
             if proc in self._processes:
                 self._processes.remove(proc)
 
-    def cancel(self) -> tuple:
+    def cancel(self) -> bool:
         """
         Bump the generation and terminate everything currently playing.
 
-        Returns:
-            (stopped_audio, was_ducked). The caller restores the mixer, which
-            must happen outside this lock because it shells out to amixer.
+        The duck is deliberately left alone here; stop_speaking() clears it
+        under the mixer lock so the flag and the amixer write stay atomic.
         """
         with self._lock:
             self._generation += 1
             processes = list(self._processes)
             self._processes.clear()
-            was_ducked = self._ducked
-            self._ducked = False
         stopped = False
         for proc in processes:
             if not _process_exited(proc):
                 stopped = True
             _terminate_process(proc)
-        return stopped, was_ducked
+        return stopped
 
     def set_ducked(self, ducked: bool) -> bool:
         """Record the duck state and report whether it actually changed."""
@@ -210,6 +207,10 @@ class _PlaybackController:
 
 
 _PLAYBACK = _PlaybackController()
+# Serializes every duck-state transition with the amixer write that carries it
+# out. Ducking, cancelling, and starting an utterance all move this state from
+# different threads, and flask-socketio dispatches each event on its own.
+_MIXER_LOCK = threading.Lock()
 
 
 def _process_exited(proc: Any) -> bool:
@@ -258,10 +259,11 @@ def stop_speaking() -> bool:
         playing. The generation is bumped either way, so an utterance that is
         still being synthesized is also discarded before it reaches a speaker.
     """
-    stopped, was_ducked = _PLAYBACK.cancel()
-    if was_ducked:
-        # Leaving the mixer down would mute the next utterance too.
-        _apply_mixer_volume(DEFAULT_VOLUME_PERCENT)
+    stopped = _PLAYBACK.cancel()
+    with _MIXER_LOCK:
+        if _PLAYBACK.set_ducked(False):
+            # Leaving the mixer down would mute the next utterance too.
+            _apply_mixer_volume(DEFAULT_VOLUME_PERCENT)
     logging.info("GO2_TTS: stop_speaking (interrupted_audio=%s)", stopped)
     return stopped
 
@@ -284,10 +286,11 @@ def duck_playback(ducked: bool) -> None:
     reversible, so a false trigger (a cough, or the robot hearing itself) costs
     a brief volume dip instead of a truncated sentence.
     """
-    if not _PLAYBACK.set_ducked(ducked):
-        return
-    logging.info("GO2_TTS: %s playback", "ducking" if ducked else "restoring")
-    _apply_mixer_volume(DUCK_VOLUME_PERCENT if ducked else DEFAULT_VOLUME_PERCENT)
+    with _MIXER_LOCK:
+        if not _PLAYBACK.set_ducked(ducked):
+            return
+        logging.info("GO2_TTS: %s playback", "ducking" if ducked else "restoring")
+        _apply_mixer_volume(DUCK_VOLUME_PERCENT if ducked else DEFAULT_VOLUME_PERCENT)
 
 
 def _raise_if_cancelled(generation: int) -> None:
@@ -648,13 +651,15 @@ def _openai_say_streaming(
                             interrupted = True
                             break
             finally:
-                _PLAYBACK.unregister(aplay_proc)
                 try:
                     if aplay_proc.stdin:
                         aplay_proc.stdin.close()
                 except (BrokenPipeError, OSError, ValueError):
                     pass
+                # Stay registered across the wait: aplay is still draining its
+                # ALSA buffer here, and a barge-in landing now must reach it.
                 aplay_proc.wait()
+                _PLAYBACK.unregister(aplay_proc)
 
                 if aplay_proc.returncode != 0 and not interrupted:
                     stderr = aplay_proc.stderr.read() if aplay_proc.stderr else b""
@@ -821,14 +826,16 @@ async def _openai_say_streaming_async(
                             interrupted = True
                             break
             finally:
-                _PLAYBACK.unregister(aplay_proc)
                 try:
                     if aplay_proc.stdin:
                         aplay_proc.stdin.close()
                         await aplay_proc.stdin.wait_closed()
                 except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
                     pass
+                # Stay registered across the wait: aplay is still draining its
+                # ALSA buffer here, and a barge-in landing now must reach it.
                 await aplay_proc.wait()
+                _PLAYBACK.unregister(aplay_proc)
 
                 if aplay_proc.returncode != 0 and not interrupted:
                     stderr = (await aplay_proc.stderr.read()) if aplay_proc.stderr else b""
@@ -1204,9 +1211,10 @@ def _set_alsa_volume(volume_percent: int = DEFAULT_VOLUME_PERCENT) -> None:
     Args:
         volume_percent: Volume level 0-100 (default from GO2_TTS_VOLUME env var)
     """
-    if _PLAYBACK.ducked:
-        volume_percent = min(volume_percent, DUCK_VOLUME_PERCENT)
-    _apply_mixer_volume(volume_percent)
+    with _MIXER_LOCK:
+        if _PLAYBACK.ducked:
+            volume_percent = min(volume_percent, DUCK_VOLUME_PERCENT)
+        _apply_mixer_volume(volume_percent)
 
 
 def _apply_mixer_volume(volume_percent: int) -> None:

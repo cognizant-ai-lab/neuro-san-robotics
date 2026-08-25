@@ -110,9 +110,6 @@ class Go2TtsFallbackTests(unittest.TestCase):
         offline_say.assert_called_once()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class PlaybackCancellationTests(unittest.TestCase):
     """Cover the barge-in primitives that let speech be cut off mid-utterance."""
@@ -195,3 +192,6 @@ class PlaybackCancellationTests(unittest.TestCase):
             tts_go2.stop_speaking()
 
         self.assertEqual(applied, [])
+
+if __name__ == "__main__":
+    unittest.main()
