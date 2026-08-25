@@ -22,7 +22,9 @@ class NavPlannerToolTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await tool.async_invoke({"command": "status"}, {})
             self.assertIn("delivered directly", result)
-            publish.assert_called_once_with(thought="status", say="status")
+            publish.assert_called_once_with(
+                thought="status", say="status", source="navigation"
+            )
             self.assertEqual(
                 await tool.async_invoke({"command": "destinations"}, {}),
                 "destinations",

@@ -20,7 +20,11 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn("route_navigation_status", source)
         event_source = (ROOT / "coded_tools/unigo2/agent_events.py").read_text()
         self.assertIn('"I arrived at "', event_source)
-        self.assertIn("publish_ui_output(thought=text, say=text)", event_source)
+        # source= marks this as authoritative so a barge-in cannot silence it.
+        self.assertIn(
+            'publish_ui_output(thought=text, say=text, source="navigation")',
+            event_source,
+        )
         self.assertIn('queue_agent_event(text, source="navigation")', event_source)
 
     def test_flask_is_not_an_agent_scheduler(self):
@@ -220,12 +224,30 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertNotIn("user_input_queue", source)
         self.assertNotIn("THINKING_INTERVAL", source)
 
-    def test_microphone_is_locked_only_during_tts(self):
+    def test_microphone_stays_open_while_the_robot_speaks(self):
         source = (ROOT / "apps" / "conscious_assistant" / "templates" / "index.html").read_text()
 
+        # Muting the capture track during playback is what made barge-in
+        # impossible; the server-side self-echo filter replaces it.
         self.assertIn("function isVoiceInputLocked()", source)
-        self.assertIn("return isSpeaking;", source)
-        self.assertNotIn("return isProcessing || isSpeaking;", source)
+        self.assertNotIn("return isSpeaking;", source)
+        self.assertNotIn("setAmbientCapturePaused", source)
+        self.assertIn("track.enabled = true;", source)
+
+    def test_voice_activity_triggers_a_barge_in(self):
+        source = (ROOT / "apps" / "conscious_assistant" / "templates" / "index.html").read_text()
+
+        # Raw VAD is the fast path: it fires long before a transcript exists.
+        self.assertIn("input_audio_buffer.speech_started", source)
+        self.assertIn("socket.emit('barge_in', {})", source)
+        # Holding the mic is unambiguous, so it cancels outright.
+        self.assertIn("socket.emit('barge_in', {confirmed: true})", source)
+
+    def test_ambient_listening_starts_by_default(self):
+        source = (ROOT / "apps" / "conscious_assistant" / "templates" / "index.html").read_text()
+
+        self.assertIn("AMBIENT_AUTOSTART = true", source)
+        self.assertIn("startAmbientListening({silent: true})", source)
 
     def test_flask_owns_the_native_ui_callback_url(self):
         source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()

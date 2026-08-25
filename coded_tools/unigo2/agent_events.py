@@ -22,6 +22,14 @@ _EVENT_DISPATCHER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-
 _AWARENESS_LOCK = threading.Lock()
 _DEFAULT_AWARENESS_MAX_AGE_SECONDS = 6 * 60 * 60
 
+# Sources whose queued events may be replaced by a newer one instead of
+# queueing behind it. Room audio arrives faster than the agent can answer, so
+# working through a backlog one utterance at a time leaves the robot replying
+# to things the speaker has long since moved past.
+_COALESCED_SOURCES = frozenset({"ambient"})
+_PENDING_LOCK = threading.Lock()
+_PENDING_BY_SOURCE: dict[str, str] = {}
+
 
 def _navigation_awareness_path() -> Path:
     """Return the small cross-process state file used by the event bridge."""
@@ -68,7 +76,7 @@ def route_navigation_status(text: str) -> None:
         # Terminal motion outcomes must never disappear into an internal-only
         # thought. Deliver the authoritative sentence to both UI and speech;
         # retain the agent event only as a fallback if the UI bridge is down.
-        if not publish_ui_output(thought=text, say=text):
+        if not publish_ui_output(thought=text, say=text, source="navigation"):
             queue_agent_event(text, source="navigation")
 
 
@@ -162,13 +170,59 @@ def dispatch_agent_event(text: str, *, source: str) -> bool:
         return False
 
 
+def _dispatch_latest(source: str) -> bool:
+    """Dispatch the newest text queued for a coalescing source."""
+    with _PENDING_LOCK:
+        text = _PENDING_BY_SOURCE.pop(source, "")
+    if not text:
+        return False
+    return dispatch_agent_event(text, source=source)
+
+
 def queue_agent_event(text: str, *, source: str) -> None:
-    """Queue an agent event without blocking a real-time producer."""
-    _EVENT_DISPATCHER.submit(dispatch_agent_event, text, source=source)
+    """
+    Queue an agent event without blocking a real-time producer.
+
+    Ambient transcripts coalesce: while one is still waiting its turn, a newer
+    one replaces it rather than queueing behind it, so the agent always answers
+    the most recent thing it heard. Explicit sources keep strict FIFO -- a
+    typed or spoken user turn is never superseded by a later one.
+    """
+    text = str(text).strip()
+    if not text:
+        return
+
+    if source not in _COALESCED_SOURCES:
+        _EVENT_DISPATCHER.submit(dispatch_agent_event, text, source=source)
+        return
+
+    with _PENDING_LOCK:
+        superseded = _PENDING_BY_SOURCE.get(source)
+        _PENDING_BY_SOURCE[source] = text
+
+    if superseded is not None:
+        # A task is already queued for this source and has not claimed its text
+        # yet, so it will pick up the newer text when it runs.
+        logger.info("Superseded a queued %s event: %s", source, superseded[:60])
+        return
+
+    _EVENT_DISPATCHER.submit(_dispatch_latest, source)
 
 
-def publish_ui_output(*, thought: str = "", say: str = "", heard: str = "") -> bool:
-    """Deliver agent-authored UI output to the local Flask presentation adapter."""
+def publish_ui_output(
+    *,
+    thought: str = "",
+    say: str = "",
+    heard: str = "",
+    source: str = "",
+) -> bool:
+    """Deliver agent-authored UI output to the local Flask presentation adapter.
+
+    ``source`` marks who authored the output. Speech from a turn the user has
+    already talked over is normally dropped, so an authoritative announcement
+    that does not belong to a conversational turn -- a navigation outcome, say
+    -- must identify itself to survive a barge-in.
+    """
     thought = str(thought).strip()
     say = str(say).strip()
     heard = str(heard).strip()
@@ -180,7 +234,7 @@ def publish_ui_output(*, thought: str = "", say: str = "", heard: str = "") -> b
     try:
         _post_json(
             endpoint,
-            {"thought": thought, "say": say, "heard": heard},
+            {"thought": thought, "say": say, "heard": heard, "source": source},
             token=token,
             timeout=10.0,
         )
