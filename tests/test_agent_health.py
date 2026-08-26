@@ -28,10 +28,21 @@ class ServiceLivenessTests(unittest.TestCase):
             self.assertTrue(agent_runtime._service_is_live(8188))
 
     def test_a_refused_connection_is_not_live(self):
-        with patch.object(
-            agent_runtime, "urlopen", side_effect=URLError("Connection refused")
-        ):
+        refused = URLError(ConnectionRefusedError(111, "Connection refused"))
+        with patch.object(agent_runtime, "urlopen", side_effect=refused):
             self.assertFalse(agent_runtime._service_is_live(8188))
+
+    def test_a_slow_service_is_not_mistaken_for_a_dead_one(self):
+        # Only a refused connection means dead. Treating a busy or unusual
+        # answer as death kills a working agent, or blocks startup entirely.
+        for failure in (
+            URLError(TimeoutError("timed out")),
+            TimeoutError("timed out"),
+            OSError("connection reset"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(agent_runtime, "urlopen", side_effect=failure):
+                    self.assertTrue(agent_runtime._service_is_live(8188))
 
     def test_a_bound_but_dead_port_is_not_live(self):
         # A previous run still shutting down keeps the socket bound. Treating
@@ -63,8 +74,9 @@ class RuntimeStartupTests(unittest.TestCase):
         runtime = agent_runtime.AgentRuntime()
         process = MagicMock()
         process.poll.return_value = None
-        # Dead on the pre-flight check, serving once our own process is up.
-        with patch.object(agent_runtime, "_service_is_live", side_effect=[False, True]), \
+        # Nothing serving on the pre-flight check, so it must launch its own.
+        with patch.object(agent_runtime, "_service_is_live", return_value=False), \
+             patch.object(agent_runtime, "_port_is_open", return_value=True), \
              patch.object(agent_runtime.subprocess, "Popen", return_value=process) as popen, \
              patch.object(agent_runtime, "clear_navigation_awareness", create=True):
             runtime.start()

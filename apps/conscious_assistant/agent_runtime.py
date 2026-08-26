@@ -53,22 +53,31 @@ def _port_is_open(port: int) -> bool:
 
 def _service_is_live(port: int, *, timeout: float = 1.0) -> bool:
     """
-    Return whether something is really serving the event API on this port.
+    Return whether the event service is reachable on this port.
 
-    A bound socket is not enough. A previous run that is still shutting down
-    keeps the port open for a moment, and treating that as a running service
-    is how Flask ends up dispatching into nothing for the rest of the session.
-    Any HTTP answer counts, including 404 or 405 -- the endpoint only accepts
-    POST, so a refusal to serve GET still proves the service is up.
+    Deliberately one-sided: only a refused connection counts as dead. That is
+    the signal from the failure this guards against -- Errno 111, nothing
+    listening because a previous run had already let go of the port -- and it
+    is the one thing a merely busy service cannot produce. Anything else, a
+    slow answer or an unusual one, counts as alive, because wrongly declaring
+    a working agent dead kills it mid-turn or blocks startup outright.
+
+    Probes the root path rather than the event endpoint: a streaming endpoint
+    may legitimately not answer a bare GET.
     """
-    url = f"http://127.0.0.1:{port}/api/v1/conscious_agent/streaming_chat"
+    url = f"http://127.0.0.1:{port}/"
     try:
         with urlopen(Request(url, method="GET"), timeout=timeout):  # nosec B310 - loopback
             return True
     except HTTPError:
+        # It answered, which is all this needs to know.
         return True
-    except (URLError, OSError):
+    except ConnectionRefusedError:
         return False
+    except URLError as exc:
+        return not isinstance(exc.reason, ConnectionRefusedError)
+    except OSError:
+        return True
 
 
 class AgentRuntime:
@@ -127,14 +136,15 @@ class AgentRuntime:
         )
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
-            # Wait for it to answer, not merely to bind. Returning as soon as
-            # the port opens hands Flask a service that cannot take events yet.
-            if _service_is_live(self.port):
+            # Waiting on the socket, not on an answer. This is our own child
+            # coming up, so there is no stale process to be confused by, and a
+            # stricter probe here only risks failing a launch that succeeded.
+            if _port_is_open(self.port):
                 return
             if self.process.poll() is not None:
                 raise RuntimeError("Neuro SAN event service exited during startup")
             time.sleep(0.1)
-        raise RuntimeError("Neuro SAN event service did not start serving in time")
+        raise RuntimeError("Neuro SAN event service did not open its local port")
 
     def is_alive(self) -> bool:
         """Return whether a usable event service is reachable right now."""

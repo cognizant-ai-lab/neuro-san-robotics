@@ -689,9 +689,23 @@ def enqueue_speech(
 speech_thread = threading.Thread(target=speech_worker, daemon=True)
 speech_thread.start()
 
-# Watch the event service for the life of the process.
-agent_health_thread = threading.Thread(target=agent_health_worker, daemon=True)
-agent_health_thread.start()
+agent_health_thread = None
+
+
+def start_agent_health_monitor() -> None:
+    """Begin watching the event service.
+
+    Only ever called once the service is known to be up. Starting at import
+    races the initial launch: the watcher wakes mid-startup, sees nothing
+    answering yet, and restarts the very process that is still coming up.
+    """
+    global agent_health_thread  # pylint: disable=global-statement
+    if agent_health_thread is not None:
+        return
+    agent_health_thread = threading.Thread(target=agent_health_worker, daemon=True)
+    agent_health_thread.start()
+
+
 @socketio.on("connect", namespace="/chat")
 def on_connect():
     """Send the retained observation without creating a second control loop."""
@@ -1018,6 +1032,8 @@ if __name__ == "__main__":
 
     try:
         agent_runtime.start()
+        # Only now: the watcher must never contend with the initial launch.
+        start_agent_health_monitor()
 
         # Refresh the cert if this robot's address has moved since it was issued.
         # Idempotent, so it is a no-op on robots with a fixed address.
