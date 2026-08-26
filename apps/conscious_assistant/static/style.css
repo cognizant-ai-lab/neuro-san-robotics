@@ -1091,3 +1091,21 @@ textarea:disabled {
     box-shadow: none;
     animation: none;
 }
+
+/* Shown when the agent event service is unreachable. Without it a robot with
+   no brain behind it is indistinguishable from one choosing not to answer. */
+.agent-status-banner {
+    margin: 0 auto 12px;
+    max-width: 900px;
+    padding: 10px 16px;
+    border: 1px solid #b3261e;
+    border-radius: 8px;
+    background: rgba(179, 38, 30, 0.12);
+    color: #b3261e;
+    font-size: 0.95rem;
+    text-align: center;
+}
+
+.agent-status-banner[hidden] {
+    display: none;
+}

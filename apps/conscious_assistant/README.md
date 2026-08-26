@@ -99,6 +99,34 @@ audio the browser itself plays, and the robot speaks through an ALSA device on
 the Jetson -- acoustically present in the room, invisible to the browser. That
 is why the self-echo filter above exists.
 
+### When the agent goes missing
+
+Flask is only a bridge. With no Neuro SAN event service behind it, every
+utterance it accepts is discarded and the robot is indistinguishable from one
+that simply chose not to answer -- which is exactly how it presents in the room.
+
+Three things guard against that:
+
+- **Startup does not trust a bound port.** A previous run still shutting down
+  keeps port 8188 open for a moment; taking that as "already running" leaves
+  Flask dispatching into nothing for the rest of the session. Startup now waits
+  for the service to actually answer.
+- **A dropped event is an error, not a warning**, and raises a banner in the UI.
+- **A health check restarts it**, backing off so a service that cannot start
+  does not bury its own reason under retries.
+
+To check by hand:
+
+```bash
+ss -ltnp | grep 8188
+```
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `CONSCIOUS_AGENT_HEALTH_INTERVAL_SECONDS` | `15` | How often the event service is checked |
+| `CONSCIOUS_AGENT_AUTO_RESTART` | `1` | Restart the service when it disappears |
+| `CONSCIOUS_AGENT_RESTART_MAX_BACKOFF_CHECKS` | `8` | Ceiling on checks skipped between restart attempts |
+
 ### Tuning
 
 | Variable | Default | Effect |

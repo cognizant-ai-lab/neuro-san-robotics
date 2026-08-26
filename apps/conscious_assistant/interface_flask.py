@@ -41,6 +41,7 @@ from apps.conscious_assistant.robot_identity import robot_name
 from apps.conscious_assistant.scene_observer import SceneObserver
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 from coded_tools.unigo2.agent_events import queue_agent_event
+from coded_tools.unigo2.agent_events import set_dispatch_failure_hook
 
 
 # TLS certificate paths used by both Flask and the native runtime callback.
@@ -183,6 +184,89 @@ scene_image_path = SceneObserver(enabled=False).latest_image_path()
 os.environ.setdefault("VISION_LATEST_IMAGE_PATH", str(scene_image_path))
 os.environ.setdefault("VISION_LATEST_IMAGE_MAX_AGE_SECONDS", "0")
 agent_runtime = AgentRuntime()
+
+# --- Agent reachability ---------------------------------------------------
+#
+# Flask is only a bridge. With no event service behind it every utterance it
+# accepts is silently discarded, and the robot looks like it is ignoring people
+# rather than broken. So the state is tracked, shown, and repaired.
+AGENT_HEALTH_INTERVAL_SECONDS = float(
+    os.environ.get("CONSCIOUS_AGENT_HEALTH_INTERVAL_SECONDS", "15.0")
+)
+AGENT_AUTO_RESTART = os.environ.get(
+    "CONSCIOUS_AGENT_AUTO_RESTART",
+    "1",
+).strip().lower() in {"1", "true", "yes", "on"}
+AGENT_RESTART_MAX_BACKOFF_CHECKS = int(
+    os.environ.get("CONSCIOUS_AGENT_RESTART_MAX_BACKOFF_CHECKS", "8")
+)
+_agent_state_lock = threading.Lock()
+_agent_reachable = True
+
+
+def _set_agent_reachable(reachable: bool, *, detail: str = "") -> None:
+    """Track reachability and tell the UI, but only when it changes."""
+    global _agent_reachable  # pylint: disable=global-statement
+    with _agent_state_lock:
+        if _agent_reachable == reachable:
+            return
+        _agent_reachable = reachable
+
+    if reachable:
+        logging.info("Agent event service is reachable again")
+    else:
+        logging.error("Agent event service is unreachable: %s", detail or "no detail")
+    try:
+        socketio.emit(
+            "agent_status",
+            {"reachable": reachable, "detail": detail},
+            namespace="/chat",
+        )
+    except Exception:
+        logging.exception("Could not publish agent status")
+
+
+def _on_dispatch_failure(source: str, exc: Exception) -> None:
+    """A dropped event is the first sign the service has gone away."""
+    _set_agent_reachable(False, detail=f"{type(exc).__name__}: {exc}")
+
+
+set_dispatch_failure_hook(_on_dispatch_failure)
+
+
+def agent_health_worker():
+    """Watch the event service and bring it back when it disappears."""
+    attempts = 0
+    checks_to_skip = 0
+    while not shutdown_event.wait(AGENT_HEALTH_INTERVAL_SECONDS):
+        try:
+            if agent_runtime.is_alive():
+                attempts = 0
+                checks_to_skip = 0
+                _set_agent_reachable(True)
+                continue
+
+            _set_agent_reachable(False, detail="event service is not answering")
+            if not AGENT_AUTO_RESTART:
+                continue
+
+            # Wait out a growing number of checks between attempts. A service
+            # that cannot start would otherwise be retried every interval, and
+            # the reason would be buried under the retries.
+            if checks_to_skip > 0:
+                checks_to_skip -= 1
+                continue
+
+            attempts += 1
+            logging.warning("Restarting the agent event service (attempt %d)", attempts)
+            if agent_runtime.ensure_running():
+                attempts = 0
+                checks_to_skip = 0
+                _set_agent_reachable(True)
+            else:
+                checks_to_skip = min(2 ** attempts, AGENT_RESTART_MAX_BACKOFF_CHECKS)
+        except Exception:
+            logging.exception("Agent health check failed")
 
 
 @app.before_request
@@ -604,11 +688,25 @@ def enqueue_speech(
 # Start speech worker thread
 speech_thread = threading.Thread(target=speech_worker, daemon=True)
 speech_thread.start()
+
+# Watch the event service for the life of the process.
+agent_health_thread = threading.Thread(target=agent_health_worker, daemon=True)
+agent_health_thread.start()
 @socketio.on("connect", namespace="/chat")
 def on_connect():
     """Send the retained observation without creating a second control loop."""
     logging.info("Socket client connected: %s", request.sid)
     emit_observation_update(sid=request.sid)
+    # Status is only broadcast on change, so a client joining while the service
+    # is already down would otherwise see nothing wrong.
+    with _agent_state_lock:
+        reachable = _agent_reachable
+    socketio.emit(
+        "agent_status",
+        {"reachable": reachable, "detail": ""},
+        namespace="/chat",
+        to=request.sid,
+    )
 
 
 @app.route("/")

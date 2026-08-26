@@ -20,6 +20,11 @@
             </a>
         </header>
 
+        <div id="agent-status-banner" class="agent-status-banner" role="status" hidden>
+            <strong>{{ robot_name }} cannot hear you.</strong>
+            <span id="agent-status-detail">The agent service is not responding, so anything said is being discarded.</span>
+        </div>
+
     <div class="page-layout">
         <div class="main-container hidden" id="main-container">
             <section id="chat-history-section" aria-label="Chat History">
@@ -790,6 +795,25 @@
         socket.on('speech_complete', function() {
             console.log('Robot finished speaking');
             setSpeakingState(false);
+        });
+
+        socket.on('agent_status', function(data) {
+            // A dead agent silently swallows every utterance. Without this the
+            // robot just looks like it is ignoring the room.
+            var banner = document.getElementById('agent-status-banner');
+            var detail = document.getElementById('agent-status-detail');
+            if (!banner) {
+                return;
+            }
+            if (data && data.reachable) {
+                banner.hidden = true;
+                return;
+            }
+            if (detail && data && data.detail) {
+                detail.textContent = data.detail;
+            }
+            banner.hidden = false;
+            console.error('Agent event service unreachable:', (data && data.detail) || '');
         });
 
         socket.on('ambient_transcript', function(data) {

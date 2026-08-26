@@ -29,6 +29,10 @@ _DEFAULT_AWARENESS_MAX_AGE_SECONDS = 6 * 60 * 60
 _COALESCED_SOURCES = frozenset({"ambient"})
 _PENDING_LOCK = threading.Lock()
 _PENDING_BY_SOURCE: dict[str, str] = {}
+# Called when an event cannot be delivered. The UI layer registers this so a
+# robot that has lost its agent looks broken rather than merely uninterested:
+# without it, every utterance is dropped behind a log line nobody is watching.
+_DISPATCH_FAILURE_HOOK = None
 
 
 def _navigation_awareness_path() -> Path:
@@ -136,6 +140,23 @@ def _post_json(url: str, payload: dict[str, Any], *, token: str = "", timeout: f
         response.read()
 
 
+def set_dispatch_failure_hook(hook) -> None:
+    """Register a callback invoked with (source, exception) on a failed dispatch."""
+    global _DISPATCH_FAILURE_HOOK  # pylint: disable=global-statement
+    _DISPATCH_FAILURE_HOOK = hook
+
+
+def _report_dispatch_failure(source: str, exc: Exception) -> None:
+    """Escalate a dropped event past the log."""
+    hook = _DISPATCH_FAILURE_HOOK
+    if hook is None:
+        return
+    try:
+        hook(source, exc)
+    except Exception:  # pylint: disable=broad-except
+        logger.exception("Dispatch failure hook raised")
+
+
 def dispatch_agent_event(text: str, *, source: str) -> bool:
     """Wake the event-configured agent without waiting for its background work."""
     text = str(text).strip()
@@ -166,7 +187,15 @@ def dispatch_agent_event(text: str, *, source: str) -> bool:
         _post_json(endpoint, payload, timeout=5.0)
         return True
     except (OSError, URLError, ValueError) as exc:
-        logger.warning("Could not dispatch %s event to Neuro SAN: %s", source, exc)
+        # This is not a warning. The utterance is gone and the robot will
+        # appear to ignore whoever spoke, with nothing on screen to say why.
+        logger.error(
+            "Dropped %s event -- Neuro SAN unreachable at %s: %s",
+            source,
+            endpoint,
+            exc,
+        )
+        _report_dispatch_failure(source, exc)
         return False
 
 
