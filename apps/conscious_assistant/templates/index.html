@@ -165,12 +165,17 @@
 
         // Start recording with MediaRecorder (OpenAI Whisper)
         async function startWhisperRecording() {
-            if (ambientListening) {
-                console.log('Manual recording is unavailable while ambient listening is active');
-                return;
+            // Reaching for the mic is an explicit, unambiguous interruption --
+            // no need to wait for a transcript to confirm it. This runs even in
+            // ambient mode, where the button's only job is to stop the robot.
+            if (isSpeaking && socket.connected) {
+                socket.emit('barge_in', {confirmed: true});
             }
-            if (isVoiceInputLocked()) {
-                console.log('Cannot record while robot is processing or speaking');
+
+            if (ambientListening) {
+                // Ambient capture is already streaming this speech; a second
+                // recorder would transcribe the same words twice.
+                console.log('Ambient listening is active; mic press interrupts only');
                 return;
             }
 
@@ -408,6 +413,17 @@
 
         function handleAmbientRealtimeEvent(event) {
             var itemId = event.item_id || 'current';
+            if (event.type === 'input_audio_buffer.speech_started') {
+                // Server VAD fires the moment someone starts talking, long
+                // before any transcript exists. It cannot tell a person from
+                // the robot's own voice, so this only asks the server to duck;
+                // the transcript below decides whether to actually cut speech.
+                if (isSpeaking && socket.connected) {
+                    socket.emit('barge_in', {});
+                }
+                return;
+            }
+
             if (event.type === 'conversation.item.input_audio_transcription.delta') {
                 var partial = (ambientPartialTranscripts.get(itemId) || '') + (event.delta || '');
                 ambientPartialTranscripts.set(itemId, partial);
@@ -482,8 +498,11 @@
                 return;
             }
 
+            // The mic stays live while the robot talks -- that is what makes
+            // barge-in possible at all. The server drops transcripts that turn
+            // out to be the robot hearing itself.
             ambientStream.getAudioTracks().forEach(function(track) {
-                track.enabled = !isSpeaking;
+                track.enabled = true;
             });
             ambientPeerConnection = new RTCPeerConnection();
             ambientStream.getTracks().forEach(function(track) {
@@ -557,7 +576,8 @@
             await ambientPeerConnection.setRemoteDescription({type: 'answer', sdp: answerSdp});
         }
 
-        async function startAmbientListening() {
+        async function startAmbientListening(options) {
+            var silent = !!(options && options.silent);
             if (ambientListening || isRecording || isTranscribing) {
                 return;
             }
@@ -568,7 +588,13 @@
             } catch (err) {
                 console.error('Failed to start ambient listening:', err);
                 stopAmbientListening();
-                alert('Ambient listening could not start: ' + err.message);
+                if (silent) {
+                    // Autostart is best-effort: a browser that withholds the
+                    // mic until a gesture just leaves the button to be used.
+                    console.warn('Ambient autostart failed; use the Ambient button to start it.');
+                } else {
+                    alert('Ambient listening could not start: ' + err.message);
+                }
             }
         }
 
@@ -582,15 +608,6 @@
             teardownAmbientTransport();
             updateAmbientListeningControl();
             console.info('Ambient listening stopped');
-        }
-
-        function setAmbientCapturePaused(paused) {
-            if (!ambientListening || !ambientStream) {
-                return;
-            }
-            ambientStream.getAudioTracks().forEach(function(track) {
-                track.enabled = !paused;
-            });
         }
 
         // Spacebar hotkey for speech input (hold to talk, release to stop)
@@ -654,7 +671,10 @@
         }
 
         function isVoiceInputLocked() {
-            return isSpeaking;
+            // Voice input is never locked by robot speech: reaching for the mic
+            // while the robot talks is itself an interruption, and
+            // startWhisperRecording() cancels the utterance outright.
+            return false;
         }
 
         function refreshInputControls() {
@@ -765,13 +785,11 @@
         socket.on('speech_started', function() {
             console.log('Robot is speaking...');
             setSpeakingState(true);
-            setAmbientCapturePaused(true);
         });
 
         socket.on('speech_complete', function() {
             console.log('Robot finished speaking');
             setSpeakingState(false);
-            setAmbientCapturePaused(false);
         });
 
         socket.on('ambient_transcript', function(data) {
@@ -951,57 +969,67 @@
             }
         });
 
-        document.getElementById('floating-mic-button').addEventListener('mousedown', async function(e) {
-            e.preventDefault();
-            if (isVoiceInputLocked()) {
-                console.log('Cannot record while robot is processing or speaking');
+        // startWhisperRecording()/stopWhisperRecording() own the .recording
+        // class. These handlers must not touch it: in ambient mode the press
+        // only interrupts and no recording begins, so a class added here would
+        // never be cleared.
+        async function beginMicPress() {
+            if (isRecording || isTranscribing) {
                 return;
             }
-            if (!isRecording && !isTranscribing) {
-                const hasPermission = await ensureMicPermission();
-                if (hasPermission) {
-                    await startWhisperRecording();
-                    document.getElementById('floating-mic-button').classList.add('recording');
-                }
+            if (ambientListening) {
+                // Ambient capture already holds the mic. Go straight through so
+                // the press still interrupts, but skip ensureMicPermission() --
+                // it would open a second capture stream nothing ever reads.
+                await startWhisperRecording();
+                return;
             }
+            if (await ensureMicPermission()) {
+                await startWhisperRecording();
+            }
+        }
+
+        function endMicPress() {
+            if (isRecording) {
+                stopWhisperRecording();
+            }
+        }
+
+        document.getElementById('floating-mic-button').addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            beginMicPress();
         });
 
         document.getElementById('floating-mic-button').addEventListener('mouseup', function(e) {
             e.preventDefault();
-            if (isRecording) {
-                stopWhisperRecording();
-                document.getElementById('floating-mic-button').classList.remove('recording');
-            }
+            endMicPress();
         });
 
-        document.getElementById('floating-mic-button').addEventListener('mouseleave', function(e) {
-            if (isRecording) {
-                stopWhisperRecording();
-                document.getElementById('floating-mic-button').classList.remove('recording');
-            }
+        document.getElementById('floating-mic-button').addEventListener('mouseleave', function() {
+            endMicPress();
         });
 
-        document.getElementById('floating-mic-button').addEventListener('touchstart', async function(e) {
+        document.getElementById('floating-mic-button').addEventListener('touchstart', function(e) {
             e.preventDefault();
-            if (isVoiceInputLocked()) {
-                console.log('Cannot record while robot is processing or speaking');
-                return;
-            }
-            if (!isRecording && !isTranscribing) {
-                const hasPermission = await ensureMicPermission();
-                if (hasPermission) {
-                    await startWhisperRecording();
-                    document.getElementById('floating-mic-button').classList.add('recording');
-                }
-            }
+            beginMicPress();
         }, {passive: false});
 
         document.getElementById('floating-mic-button').addEventListener('touchend', function(e) {
             e.preventDefault();
-            if (isRecording) {
-                stopWhisperRecording();
-                document.getElementById('floating-mic-button').classList.remove('recording');
+            endMicPress();
+        });
+
+        // Ambient listening is the default conversational mode: the robot is
+        // always listening and can be talked over mid-sentence. Autostart is
+        // best-effort -- browsers that require a gesture before granting the
+        // mic fall back to the Ambient button.
+        var AMBIENT_AUTOSTART = true;
+
+        window.addEventListener('load', function() {
+            if (!AMBIENT_AUTOSTART || ambientListening) {
+                return;
             }
+            startAmbientListening({silent: true});
         });
     </script>
 </body>

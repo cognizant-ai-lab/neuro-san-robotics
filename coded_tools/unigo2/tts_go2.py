@@ -31,6 +31,13 @@ Environment Variables:
 - GO2_OPENAI_MODEL: OpenAI model (default: "gpt-4o-mini-tts")
 - GO2_OPENAI_VOLUME_GAIN: Volume amplification factor (default: "2.0" for 2x louder)
 - GO2_OPENAI_TIMEOUT_SECONDS: Max seconds to wait for an OpenAI TTS request
+- GO2_TTS_DUCK_VOLUME: Mixer percentage held while ducked for a barge-in (default: "20")
+
+Barge-in:
+Playback is interruptible. stop_speaking() terminates whatever is on the
+speaker and bumps a generation counter so an utterance still being synthesized
+is discarded instead of played late; duck_playback() lowers volume first, which
+is reversible when the interruption turns out to be a false trigger.
 """
 
 import argparse
@@ -117,6 +124,229 @@ def _env_float(name: str, default: float) -> float:
 
 OPENAI_TIMEOUT_SECONDS = _env_float("GO2_OPENAI_TIMEOUT_SECONDS", 20.0)
 
+# Volume percentage held while the robot is ducked for a possible barge-in.
+DUCK_VOLUME_PERCENT = int(os.environ.get("GO2_TTS_DUCK_VOLUME", "20"))
+
+
+# ---------------------------------------------------------------------
+# Interruptible playback (barge-in support)
+# ---------------------------------------------------------------------
+
+class SpeechInterrupted(RuntimeError):
+    """
+    Raised when playback stopped because a barge-in cancelled it.
+
+    Callers must not treat this as an engine failure: it is the expected
+    outcome of stop_speaking() and must never trigger an offline-TTS retry.
+    """
+
+
+class _PlaybackController:
+    """Track live audio subprocesses so a barge-in can stop them immediately."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._processes: List[Any] = []
+        self._generation = 0
+        self._ducked = False
+
+    @property
+    def generation(self) -> int:
+        """Return the current utterance generation; every cancel bumps it."""
+        with self._lock:
+            return self._generation
+
+    @property
+    def ducked(self) -> bool:
+        """Return whether output is currently held at the ducked volume."""
+        with self._lock:
+            return self._ducked
+
+    def is_active(self) -> bool:
+        """Return whether any registered playback process is still running."""
+        with self._lock:
+            processes = list(self._processes)
+        return any(not _process_exited(proc) for proc in processes)
+
+    def register(self, proc: Any) -> None:
+        """Track a playback process for the lifetime of its audio."""
+        with self._lock:
+            self._processes.append(proc)
+
+    def unregister(self, proc: Any) -> None:
+        """Stop tracking a playback process that finished on its own."""
+        with self._lock:
+            if proc in self._processes:
+                self._processes.remove(proc)
+
+    def cancel(self) -> bool:
+        """
+        Bump the generation and terminate everything currently playing.
+
+        The duck is deliberately left alone here; stop_speaking() clears it
+        under the mixer lock so the flag and the amixer write stay atomic.
+        """
+        with self._lock:
+            self._generation += 1
+            processes = list(self._processes)
+            self._processes.clear()
+        stopped = False
+        for proc in processes:
+            if not _process_exited(proc):
+                stopped = True
+            _terminate_process(proc)
+        return stopped
+
+    def set_ducked(self, ducked: bool) -> bool:
+        """Record the duck state and report whether it actually changed."""
+        with self._lock:
+            if self._ducked == ducked:
+                return False
+            self._ducked = ducked
+            return True
+
+
+_PLAYBACK = _PlaybackController()
+# Serializes every duck-state transition with the amixer write that carries it
+# out. Ducking, cancelling, and starting an utterance all move this state from
+# different threads, and flask-socketio dispatches each event on its own.
+_MIXER_LOCK = threading.Lock()
+
+
+def _process_exited(proc: Any) -> bool:
+    """Return whether a sync or asyncio subprocess has already finished."""
+    poll = getattr(proc, "poll", None)
+    try:
+        if callable(poll):
+            return poll() is not None
+        return proc.returncode is not None
+    except (OSError, ValueError):
+        return True
+
+
+def _terminate_process(proc: Any) -> None:
+    """Stop one playback subprocess, sync or asyncio, without raising."""
+    try:
+        if _process_exited(proc):
+            return
+        proc.terminate()
+    except (OSError, ValueError):
+        logging.debug("GO2_TTS: could not terminate playback process", exc_info=True)
+        return
+
+    waiter = getattr(proc, "wait", None)
+    if waiter is None or asyncio.iscoroutinefunction(waiter):
+        # asyncio.subprocess.Process is reaped by the coroutine that owns it.
+        return
+    try:
+        waiter(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            waiter(timeout=0.5)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            logging.debug("GO2_TTS: playback process ignored SIGKILL", exc_info=True)
+    except (OSError, ValueError):
+        logging.debug("GO2_TTS: playback process wait failed", exc_info=True)
+
+
+def stop_speaking() -> bool:
+    """
+    Cancel any in-flight TTS playback.
+
+    Returns:
+        True when audio was actually interrupted, False when nothing was
+        playing. The generation is bumped either way, so an utterance that is
+        still being synthesized is also discarded before it reaches a speaker.
+    """
+    stopped = _PLAYBACK.cancel()
+    with _MIXER_LOCK:
+        if _PLAYBACK.set_ducked(False):
+            # Leaving the mixer down would mute the next utterance too.
+            _apply_mixer_volume(DEFAULT_VOLUME_PERCENT)
+    logging.info("GO2_TTS: stop_speaking (interrupted_audio=%s)", stopped)
+    return stopped
+
+
+def playback_generation() -> int:
+    """Return the generation a caller should capture before starting playback."""
+    return _PLAYBACK.generation
+
+
+def is_speaking() -> bool:
+    """Return whether audio is playing right now."""
+    return _PLAYBACK.is_active()
+
+
+def duck_playback(ducked: bool) -> None:
+    """
+    Lower or restore output volume mid-utterance.
+
+    Ducking is the first response to a possible barge-in: it is instant and
+    reversible, so a false trigger (a cough, or the robot hearing itself) costs
+    a brief volume dip instead of a truncated sentence.
+    """
+    with _MIXER_LOCK:
+        if not _PLAYBACK.set_ducked(ducked):
+            return
+        logging.info("GO2_TTS: %s playback", "ducking" if ducked else "restoring")
+        _apply_mixer_volume(DUCK_VOLUME_PERCENT if ducked else DEFAULT_VOLUME_PERCENT)
+
+
+def _raise_if_cancelled(generation: int) -> None:
+    """Abort the current utterance when a barge-in superseded it."""
+    if _PLAYBACK.generation != generation:
+        raise SpeechInterrupted("playback cancelled by barge-in")
+
+
+def _popen_playback(cmd: List[str], **kwargs: Any) -> subprocess.Popen:
+    """Start a playback subprocess that stop_speaking() is able to terminate."""
+    proc = subprocess.Popen(cmd, **kwargs)  # nosec B603 - fixed audio commands
+    _PLAYBACK.register(proc)
+    return proc
+
+
+def _run_playback(
+    cmd: List[str],
+    *,
+    generation: int | None = None,
+    capture_output: bool = False,
+    check: bool = False,
+    input: bytes | str | None = None,  # pylint: disable=redefined-builtin
+    stdin: Any = None,
+    text: bool = False,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess:
+    """
+    Run a blocking playback command that a barge-in can interrupt.
+
+    Mirrors the subprocess.run() arguments this module uses, but registers the
+    process for cancellation and converts a cancel into SpeechInterrupted so
+    callers never mistake a barge-in for an engine failure worth retrying.
+    """
+    if generation is None:
+        generation = _PLAYBACK.generation
+    _raise_if_cancelled(generation)
+
+    pipe = subprocess.PIPE
+    proc = _popen_playback(
+        cmd,
+        stdin=pipe if input is not None else stdin,
+        stdout=pipe if capture_output else None,
+        stderr=pipe if capture_output else None,
+        text=text,
+    )
+    try:
+        stdout, stderr = proc.communicate(input=input, timeout=timeout)
+    finally:
+        _PLAYBACK.unregister(proc)
+
+    _raise_if_cancelled(generation)
+
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, stdout, stderr)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
 
 # ---------------------------------------------------------------------
 # OpenAI TTS with True Streaming
@@ -188,8 +418,13 @@ def _pcm_to_wav_bytes(pcm_data: bytes, sample_rate: int) -> bytes:
     return output.getvalue()
 
 
-def _play_onboard_wav(pcm_data: bytes, device: str) -> None:
+def _play_onboard_wav(pcm_data: bytes, device: str, generation: int | None = None) -> None:
     """Play buffered PCM through the same WAV-file path as the hardware probe."""
+    if generation is None:
+        generation = _PLAYBACK.generation
+    # The APE route renders the whole utterance before any of it is audible, so
+    # a barge-in during synthesis must drop it here rather than start playback.
+    _raise_if_cancelled(generation)
     wav_data = _pcm_to_wav_bytes(pcm_data, ONBOARD_PCM_RATE)
     temp_path = ""
     retain_wav = bool(ONBOARD_WAV_PATH)
@@ -216,10 +451,10 @@ def _play_onboard_wav(pcm_data: bytes, device: str) -> None:
             len(pcm_data),
             len(wav_data),
         )
-        result = subprocess.run(
+        result = _run_playback(
             ["aplay", "-D", device, temp_path],
+            generation=generation,
             capture_output=True,
-            check=False,
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -340,6 +575,7 @@ def _openai_say_streaming(
     client = OpenAI(timeout=OPENAI_TIMEOUT_SECONDS, max_retries=0)
     system = platform.system()
     device = alsa_device or _RESOLVED_ALSA_DEVICE
+    generation = _PLAYBACK.generation
 
     # Apply volume gain for louder output
     gain = OPENAI_VOLUME_GAIN
@@ -372,13 +608,14 @@ def _openai_say_streaming(
                 output_rate,
             )
             if _is_onboard_audio_device(device):
-                pcm_data = b"".join(
-                    _prepare_openai_pcm_chunk(chunk, gain, device)
-                    for chunk in response.iter_bytes(chunk_size=4096)
-                )
+                buffered = []
+                for chunk in response.iter_bytes(chunk_size=4096):
+                    _raise_if_cancelled(generation)
+                    buffered.append(_prepare_openai_pcm_chunk(chunk, gain, device))
+                pcm_data = b"".join(buffered)
                 if not pcm_data:
                     raise RuntimeError("OpenAI TTS returned no PCM audio")
-                _play_onboard_wav(pcm_data, device)
+                _play_onboard_wav(pcm_data, device, generation=generation)
                 logging.info("GO2_TTS: OpenAI streaming complete")
                 return
 
@@ -392,33 +629,47 @@ def _openai_say_streaming(
                 "-t", "raw",
             ]
 
-            aplay_proc = subprocess.Popen(
+            aplay_proc = _popen_playback(
                 aplay_cmd,
                 stdin=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
 
+            interrupted = False
             try:
                 for chunk in response.iter_bytes(chunk_size=4096):
+                    if _PLAYBACK.generation != generation:
+                        interrupted = True
+                        break
                     if aplay_proc.stdin:
                         # Apply volume gain to PCM audio
                         amplified_chunk = _prepare_openai_pcm_chunk(chunk, gain, device)
-                        aplay_proc.stdin.write(amplified_chunk)
+                        try:
+                            aplay_proc.stdin.write(amplified_chunk)
+                        except (BrokenPipeError, ValueError):
+                            # stop_speaking() closed the pipe underneath us.
+                            interrupted = True
+                            break
             finally:
                 try:
                     if aplay_proc.stdin:
                         aplay_proc.stdin.close()
-                except BrokenPipeError:
+                except (BrokenPipeError, OSError, ValueError):
                     pass
+                # Stay registered across the wait: aplay is still draining its
+                # ALSA buffer here, and a barge-in landing now must reach it.
                 aplay_proc.wait()
+                _PLAYBACK.unregister(aplay_proc)
 
-                if aplay_proc.returncode != 0:
+                if aplay_proc.returncode != 0 and not interrupted:
                     stderr = aplay_proc.stderr.read() if aplay_proc.stderr else b""
                     logging.error(
                         "aplay returned %d: %s",
                         aplay_proc.returncode,
                         stderr.decode(errors="ignore")
                     )
+
+            _raise_if_cancelled(generation)
 
         elif system == "Darwin":
             # On macOS, use afplay with a temp file or ffplay for streaming
@@ -435,7 +686,7 @@ def _openai_say_streaming(
                 # Convert raw PCM to playable format and play
                 # ffplay can handle raw PCM directly
                 if shutil.which("ffplay"):
-                    subprocess.run(
+                    _run_playback(
                         [
                             "ffplay",
                             "-autoexit",
@@ -445,6 +696,7 @@ def _openai_say_streaming(
                             "-ac", "1",
                             temp_path,
                         ],
+                        generation=generation,
                         check=True,
                         capture_output=True,
                     )
@@ -464,7 +716,7 @@ def _openai_say_streaming(
                         check=True,
                         capture_output=True,
                     )
-                    subprocess.run(["afplay", wav_path], check=True)
+                    _run_playback(["afplay", wav_path], generation=generation, check=True)
                     os.unlink(wav_path)
             finally:
                 os.unlink(temp_path)
@@ -496,6 +748,7 @@ async def _openai_say_streaming_async(
     client = AsyncOpenAI(timeout=OPENAI_TIMEOUT_SECONDS, max_retries=0)
     system = platform.system()
     device = alsa_device or _RESOLVED_ALSA_DEVICE
+    generation = _PLAYBACK.generation
 
     # Apply volume gain for louder output
     gain = OPENAI_VOLUME_GAIN
@@ -528,12 +781,15 @@ async def _openai_say_streaming_async(
             if _is_onboard_audio_device(device):
                 chunks = []
                 async for chunk in response.iter_bytes(chunk_size=4096):
+                    _raise_if_cancelled(generation)
                     chunks.append(_prepare_openai_pcm_chunk(chunk, gain, device))
                 pcm_data = b"".join(chunks)
                 if not pcm_data:
                     raise RuntimeError("OpenAI TTS returned no PCM audio")
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, _play_onboard_wav, pcm_data, device)
+                await loop.run_in_executor(
+                    None, _play_onboard_wav, pcm_data, device, generation
+                )
                 logging.info("GO2_TTS: OpenAI async streaming complete")
                 return
 
@@ -551,30 +807,45 @@ async def _openai_say_streaming_async(
                 stdin=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            _PLAYBACK.register(aplay_proc)
 
+            interrupted = False
             try:
                 async for chunk in response.iter_bytes(chunk_size=4096):
+                    if _PLAYBACK.generation != generation:
+                        interrupted = True
+                        break
                     if aplay_proc.stdin:
                         # Apply volume gain to PCM audio
                         amplified_chunk = _prepare_openai_pcm_chunk(chunk, gain, device)
-                        aplay_proc.stdin.write(amplified_chunk)
-                        await aplay_proc.stdin.drain()
+                        try:
+                            aplay_proc.stdin.write(amplified_chunk)
+                            await aplay_proc.stdin.drain()
+                        except (BrokenPipeError, ConnectionResetError, ValueError):
+                            # stop_speaking() closed the pipe underneath us.
+                            interrupted = True
+                            break
             finally:
                 try:
                     if aplay_proc.stdin:
                         aplay_proc.stdin.close()
                         await aplay_proc.stdin.wait_closed()
-                except BrokenPipeError:
+                except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
                     pass
+                # Stay registered across the wait: aplay is still draining its
+                # ALSA buffer here, and a barge-in landing now must reach it.
                 await aplay_proc.wait()
+                _PLAYBACK.unregister(aplay_proc)
 
-                if aplay_proc.returncode != 0:
+                if aplay_proc.returncode != 0 and not interrupted:
                     stderr = (await aplay_proc.stderr.read()) if aplay_proc.stderr else b""
                     logging.error(
                         "aplay returned %d: %s",
                         aplay_proc.returncode,
                         stderr.decode(errors="ignore")
                     )
+
+            _raise_if_cancelled(generation)
 
         elif system == "Darwin":
             import tempfile
@@ -601,7 +872,11 @@ async def _openai_say_streaming_async(
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL,
                     )
-                    await proc.wait()
+                    _PLAYBACK.register(proc)
+                    try:
+                        await proc.wait()
+                    finally:
+                        _PLAYBACK.unregister(proc)
                 else:
                     wav_path = temp_path + ".wav"
                     proc = await asyncio.create_subprocess_exec(
@@ -616,9 +891,15 @@ async def _openai_say_streaming_async(
                         stderr=asyncio.subprocess.DEVNULL,
                     )
                     await proc.wait()
+                    _raise_if_cancelled(generation)
                     proc = await asyncio.create_subprocess_exec("afplay", wav_path)
-                    await proc.wait()
+                    _PLAYBACK.register(proc)
+                    try:
+                        await proc.wait()
+                    finally:
+                        _PLAYBACK.unregister(proc)
                     os.unlink(wav_path)
+                _raise_if_cancelled(generation)
             finally:
                 os.unlink(temp_path)
 
@@ -757,9 +1038,11 @@ def say_cached(
     volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
     _set_alsa_volume(volume_percent)
 
+    generation = _PLAYBACK.generation
     with open(TTS_LOCK_FILE, "w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
+            _raise_if_cancelled(generation)
             _play_audio_bytes(audio_data, alsa_device)
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
@@ -921,11 +1204,21 @@ def _set_alsa_volume(volume_percent: int = DEFAULT_VOLUME_PERCENT) -> None:
     Set ALSA mixer volume before playback to ensure consistent volume.
 
     This helps prevent volume drift that can occur on some systems where
-    other processes may adjust mixer levels between playbacks.
+    other processes may adjust mixer levels between playbacks. A duck that is
+    already active wins, so starting a new utterance mid-barge-in cannot undo
+    it by resetting the mixer to full volume.
 
     Args:
         volume_percent: Volume level 0-100 (default from GO2_TTS_VOLUME env var)
     """
+    with _MIXER_LOCK:
+        if _PLAYBACK.ducked:
+            volume_percent = min(volume_percent, DUCK_VOLUME_PERCENT)
+        _apply_mixer_volume(volume_percent)
+
+
+def _apply_mixer_volume(volume_percent: int) -> None:
+    """Push a volume level to the ALSA mixer, ignoring the duck state."""
     if not _has("amixer"):
         logging.debug("amixer not found, skipping volume set")
         return
@@ -1018,7 +1311,7 @@ def _linux_say_via_piper(
             f"Piper failed (rc={piper_proc.returncode}): {stderr.decode(errors='ignore')}"
         )
 
-    subprocess.run(
+    _run_playback(
         aplay_cmd,
         input=stdout,
         check=True,
@@ -1055,9 +1348,9 @@ def _linux_say_via_espeak(
 
     logging.warning("GO2_TTS: Falling back to espeak-ng")
 
-    p1 = subprocess.Popen(espeak_cmd, stdout=subprocess.PIPE)
+    p1 = subprocess.Popen(espeak_cmd, stdout=subprocess.PIPE)  # nosec B603
     try:
-        subprocess.run(aplay_cmd, stdin=p1.stdout, check=True)
+        _run_playback(aplay_cmd, stdin=p1.stdout, check=True)
     finally:
         if p1.stdout:
             p1.stdout.close()
@@ -1080,7 +1373,7 @@ def _mac_say_via_subprocess(
         cmd.extend(["-v", MAC_VOICE])
     cmd.extend(["-r", str(rate)])
     logging.info("GO2_TTS: macOS say command starting (rate=%d)", rate)
-    subprocess.run(cmd, input=text, text=True, check=True)
+    _run_playback(cmd, input=text, text=True, check=True)
     logging.info("GO2_TTS: macOS say command completed")
 
 
@@ -1158,7 +1451,7 @@ def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None
         "-t", "raw",
     ]
 
-    subprocess.run(aplay_cmd, input=audio_data, check=True)
+    _run_playback(aplay_cmd, input=audio_data, check=True)
 
 
 # ---------------------------------------------------------------------
@@ -1185,6 +1478,8 @@ def _say_single_chunk(
         try:
             _linux_say_via_piper(text, volume=volume, alsa_device=alsa_device)
             return
+        except SpeechInterrupted:
+            raise
         except Exception:
             logging.exception("Piper failed, falling back to espeak-ng")
             _linux_say_via_espeak(
@@ -1243,9 +1538,11 @@ def say_streaming(
     volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
     _set_alsa_volume(volume_percent)
 
+    generation = _PLAYBACK.generation
     with open(TTS_LOCK_FILE, "w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
+            _raise_if_cancelled(generation)
             # Use OpenAI streaming if available (true streaming, no chunking needed)
             if _should_use_openai():
                 logging.info("TTS: Using OpenAI streaming")
@@ -1258,6 +1555,8 @@ def say_streaming(
                         alsa_device=alsa_device,
                     )
                     return
+                except SpeechInterrupted:
+                    raise
                 except Exception as exc:
                     if not _should_runtime_fallback_to_offline_tts():
                         raise
@@ -1281,6 +1580,7 @@ def say_streaming(
             else:
                 # Fallback: sequential playback for other systems
                 for i, chunk in enumerate(chunks):
+                    _raise_if_cancelled(generation)
                     if on_chunk_start:
                         on_chunk_start(chunk, i, len(chunks))
                     _say_single_chunk(
@@ -1333,10 +1633,18 @@ def _say_streaming_piper(
     converter_thread.start()
 
     # Play audio as it becomes available
+    generation = _PLAYBACK.generation
+    interrupted = False
     while True:
         item = audio_queue.get()
         if item is None:
             break
+
+        if _PLAYBACK.generation != generation:
+            # Keep draining so the converter thread never blocks on a full
+            # queue, but stop putting anything else on the speaker.
+            interrupted = True
+            continue
 
         chunk_idx, chunk_text, audio_data = item
         logging.debug("Playing chunk %d/%d", chunk_idx + 1, total_chunks)
@@ -1351,11 +1659,17 @@ def _say_streaming_piper(
         # Play the audio
         try:
             _play_audio_bytes(audio_data, alsa_device)
+        except SpeechInterrupted:
+            interrupted = True
+            continue
         except Exception:
             logging.exception("Failed to play chunk %d", chunk_idx)
 
     # Wait for converter to finish
     converter_thread.join(timeout=5.0)
+
+    if interrupted:
+        raise SpeechInterrupted("chunked playback cancelled by barge-in")
 
     # Re-raise any conversion errors
     if conversion_error:
@@ -1410,9 +1724,13 @@ def say(
             logging.warning("TTS: Empty text after sanitization, skipping")
             return
 
+        # Captured before the lock: an utterance cancelled while it waited its
+        # turn behind another process must be dropped, not spoken late.
+        generation = _PLAYBACK.generation
         with open(TTS_LOCK_FILE, "w", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             try:
+                _raise_if_cancelled(generation)
                 # Use OpenAI if available
                 if _should_use_openai():
                     try:
@@ -1421,6 +1739,8 @@ def say(
                             volume=volume,
                             alsa_device=alsa_device,
                         )
+                    except SpeechInterrupted:
+                        raise
                     except Exception as exc:
                         if not _should_runtime_fallback_to_offline_tts():
                             raise
@@ -1478,6 +1798,8 @@ async def say_async(
                 volume=volume,
                 alsa_device=alsa_device,
             )
+        except SpeechInterrupted:
+            raise
         except Exception as exc:
             if not _should_runtime_fallback_to_offline_tts():
                 raise

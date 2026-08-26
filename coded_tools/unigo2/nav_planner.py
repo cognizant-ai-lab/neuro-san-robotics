@@ -151,6 +151,7 @@ class NavPlannerTool(CodedTool):
                     publish_ui_output,
                     thought=status,
                     say=status,
+                    source="navigation",
                 )
                 if delivered:
                     return (
