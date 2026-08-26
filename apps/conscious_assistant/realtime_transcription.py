@@ -1,6 +1,20 @@
-"""Server-side credentials for browser WebRTC transcription sessions."""
+"""Server-side credentials for browser WebRTC transcription sessions.
+
+Capture tuning is environment-driven because the right values depend on the
+microphone, not the robot:
+
+- CONSCIOUS_MIC_NOISE_REDUCTION: "near_field" (default) for a worn or handheld
+  mic, "far_field" for one picking up the whole room. Getting this wrong is
+  costly -- far_field on a close-talk mic lifts distant sound, which is exactly
+  the robot's own speaker and motors.
+- CONSCIOUS_VAD_THRESHOLD: how loud speech must be to register (0.0-1.0).
+  Raise it when robot noise keeps opening an utterance.
+- CONSCIOUS_VAD_PREFIX_PADDING_MS: audio kept from before speech was detected.
+- CONSCIOUS_VAD_SILENCE_MS: silence needed to close an utterance.
+"""
 
 import json
+import os
 import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -22,13 +36,30 @@ def transcription_prompt() -> str:
     )
 
 
+def _env_value(name: str, default, cast):
+    """Read one capture setting from the environment, ignoring junk."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def noise_reduction_mode() -> str:
+    """Return the capture profile matching this robot's microphone."""
+    mode = (os.environ.get("CONSCIOUS_MIC_NOISE_REDUCTION") or "").strip().lower()
+    return mode if mode in {"near_field", "far_field"} else "near_field"
+
+
 def transcription_session_config(model: str) -> dict:
-    """Return a transcription-only Realtime session tuned for room audio."""
+    """Return a transcription-only Realtime session tuned for this robot's mic."""
     return {
         "type": "transcription",
         "audio": {
             "input": {
-                "noise_reduction": {"type": "far_field"},
+                "noise_reduction": {"type": noise_reduction_mode()},
                 "transcription": {
                     "model": model,
                     "language": "en",
@@ -36,9 +67,13 @@ def transcription_session_config(model: str) -> dict:
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.45,
-                    "prefix_padding_ms": 400,
-                    "silence_duration_ms": 700,
+                    "threshold": _env_value("CONSCIOUS_VAD_THRESHOLD", 0.45, float),
+                    "prefix_padding_ms": _env_value(
+                        "CONSCIOUS_VAD_PREFIX_PADDING_MS", 400, int
+                    ),
+                    "silence_duration_ms": _env_value(
+                        "CONSCIOUS_VAD_SILENCE_MS", 700, int
+                    ),
                 },
             }
         },

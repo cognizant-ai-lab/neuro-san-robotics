@@ -76,6 +76,29 @@ the *browser* plays, and the robot's speech comes out of an ALSA device on the
 Jetson, entirely outside the browser's audio graph. The server-side self-echo
 filter is what makes an open microphone safe.
 
+### Microphone capture
+
+How the room is captured depends on the microphone, not the robot, so it is set
+by environment.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `CONSCIOUS_MIC_NOISE_REDUCTION` | `near_field` | `near_field` for a worn or handheld mic, `far_field` for one covering the whole room |
+| `CONSCIOUS_VAD_THRESHOLD` | `0.45` | How loud speech must be to open an utterance (0.0-1.0) |
+| `CONSCIOUS_VAD_PREFIX_PADDING_MS` | `400` | Audio kept from before speech was detected |
+| `CONSCIOUS_VAD_SILENCE_MS` | `700` | Silence needed to close an utterance |
+
+Getting the profile wrong is expensive: `far_field` on a worn mic lifts distant
+sound, which is exactly the robot's own speaker and motors, so the recogniser
+spends its effort on noise and mishears the person wearing it. If robot noise
+still opens utterances on its own, raise `CONSCIOUS_VAD_THRESHOLD` before
+reaching for anything else.
+
+Note that the browser's own `echoCancellation` cannot help here. It only cancels
+audio the browser itself plays, and the robot speaks through an ALSA device on
+the Jetson -- acoustically present in the room, invisible to the browser. That
+is why the self-echo filter above exists.
+
 ### Tuning
 
 | Variable | Default | Effect |

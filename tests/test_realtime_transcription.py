@@ -1,3 +1,4 @@
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -11,15 +12,59 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RealtimeTranscriptionTests(unittest.TestCase):
-    def test_session_is_transcription_only_and_tuned_for_room_audio(self):
-        config = realtime_transcription.transcription_session_config("test-model")
+    def test_session_is_transcription_only_and_defaults_to_a_worn_mic(self):
+        with patch.dict(os.environ, {}, clear=False):
+            for name in (
+                "CONSCIOUS_MIC_NOISE_REDUCTION",
+                "CONSCIOUS_VAD_THRESHOLD",
+                "CONSCIOUS_VAD_PREFIX_PADDING_MS",
+                "CONSCIOUS_VAD_SILENCE_MS",
+            ):
+                os.environ.pop(name, None)
+            config = realtime_transcription.transcription_session_config("test-model")
 
         self.assertEqual(config["type"], "transcription")
         audio_input = config["audio"]["input"]
         self.assertEqual(audio_input["transcription"]["model"], "test-model")
         self.assertEqual(audio_input["transcription"]["language"], "en")
-        self.assertEqual(audio_input["noise_reduction"]["type"], "far_field")
+        # far_field on a worn mic lifts distant sound -- the robot's own
+        # speaker and motors -- so a close-talk profile is the safer default.
+        self.assertEqual(audio_input["noise_reduction"]["type"], "near_field")
         self.assertEqual(audio_input["turn_detection"]["type"], "server_vad")
+
+    def test_a_room_mic_can_ask_for_the_far_field_profile(self):
+        with patch.dict(os.environ, {"CONSCIOUS_MIC_NOISE_REDUCTION": "far_field"}):
+            config = realtime_transcription.transcription_session_config("test-model")
+
+        self.assertEqual(
+            config["audio"]["input"]["noise_reduction"]["type"], "far_field"
+        )
+
+    def test_capture_thresholds_come_from_the_environment(self):
+        with patch.dict(os.environ, {
+            "CONSCIOUS_VAD_THRESHOLD": "0.7",
+            "CONSCIOUS_VAD_PREFIX_PADDING_MS": "250",
+            "CONSCIOUS_VAD_SILENCE_MS": "500",
+        }):
+            turn = realtime_transcription.transcription_session_config(
+                "test-model"
+            )["audio"]["input"]["turn_detection"]
+
+        self.assertEqual(turn["threshold"], 0.7)
+        self.assertEqual(turn["prefix_padding_ms"], 250)
+        self.assertEqual(turn["silence_duration_ms"], 500)
+
+    def test_unusable_capture_settings_fall_back_to_defaults(self):
+        with patch.dict(os.environ, {
+            "CONSCIOUS_MIC_NOISE_REDUCTION": "nonsense",
+            "CONSCIOUS_VAD_THRESHOLD": "loud",
+        }):
+            audio_input = realtime_transcription.transcription_session_config(
+                "test-model"
+            )["audio"]["input"]
+
+        self.assertEqual(audio_input["noise_reduction"]["type"], "near_field")
+        self.assertEqual(audio_input["turn_detection"]["threshold"], 0.45)
 
     def test_client_secret_request_sends_transcription_session_as_json(self):
         response = MagicMock()
