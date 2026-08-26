@@ -2,6 +2,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from coded_tools.unigo2 import go2_macros
+from coded_tools.unigo2 import robot_macros
+from coded_tools.unigo2.go2_macros import Go2Macros
 
 
 class FakeSportClient:
@@ -310,3 +312,81 @@ class Go2MacrosInitializationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TurnInPlaceTests(unittest.TestCase):
+    """Rotating the robot, as distinct from tilting it."""
+
+    def _macros(self):
+        go2 = Go2Macros.__new__(Go2Macros)
+        go2.cli = None
+        go2._log = lambda *args, **kwargs: None
+        return go2
+
+    def test_turning_left_commands_positive_yaw(self):
+        go2 = self._macros()
+        with patch.object(Go2Macros, "_timed_move") as timed_move:
+            go2.turn_left(90.0)
+
+        self.assertGreater(timed_move.call_args.kwargs["vyaw"], 0.0)
+
+    def test_turning_right_commands_negative_yaw(self):
+        go2 = self._macros()
+        with patch.object(Go2Macros, "_timed_move") as timed_move:
+            go2.turn_right(90.0)
+
+        self.assertLess(timed_move.call_args.kwargs["vyaw"], 0.0)
+
+    def test_a_negative_angle_cannot_flip_the_requested_side(self):
+        go2 = self._macros()
+        with patch.object(Go2Macros, "_timed_move") as timed_move:
+            go2.turn_right(-90.0)
+
+        self.assertLess(timed_move.call_args.kwargs["vyaw"], 0.0)
+
+    def test_a_bigger_angle_turns_for_longer(self):
+        go2 = self._macros()
+        with patch.object(Go2Macros, "_timed_move") as timed_move:
+            go2.turn_left(45.0)
+            short = timed_move.call_args.kwargs["duration_s"]
+            go2.turn_left(180.0)
+            long = timed_move.call_args.kwargs["duration_s"]
+
+        self.assertGreater(long, short)
+
+
+class TurnActionRoutingTests(unittest.TestCase):
+    """The agent reaches for robot_macros on "turn right"; it must land."""
+
+    def _run(self, action, args=None):
+        go2 = MagicMock()
+        go2.available = True
+        return go2, robot_macros._execute_single_action(go2, action, args or {})
+
+    def test_turn_right_rotates_the_robot(self):
+        go2, result = self._run("turn_right")
+
+        go2.turn_right.assert_called_once()
+        self.assertIn("completed successfully", result)
+
+    def test_turn_left_rotates_the_robot(self):
+        go2, _ = self._run("turn_left")
+
+        go2.turn_left.assert_called_once()
+
+    def test_a_requested_angle_is_passed_through(self):
+        go2, _ = self._run("turn_right", {"angle_deg": 45})
+
+        go2.turn_right.assert_called_once_with(45.0)
+
+    def test_turning_around_is_half_a_circle(self):
+        go2, _ = self._run("turn_around")
+
+        go2.turn_left.assert_called_once_with(180.0)
+
+    def test_looking_right_does_not_rotate_the_robot(self):
+        # look_right tilts on the Euler axes; it is not an answer to "turn".
+        go2, _ = self._run("look_right")
+
+        go2.look_right.assert_called_once()
+        go2.turn_right.assert_not_called()

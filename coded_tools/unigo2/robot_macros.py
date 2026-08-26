@@ -70,6 +70,17 @@ def _execute_single_action(go2: Go2Macros, action: str, args: Dict[str, Any]) ->
         logging.info("===== GO2 looking right...")
 
     # Locomotion
+    elif action in ("turn_left", "rotate_left"):
+        angle = float(args.get("angle_deg", args.get("angle", 90.0)))
+        go2.turn_left(angle)
+        logging.info("===== GO2 turning left %s degrees...", angle)
+    elif action in ("turn_right", "rotate_right"):
+        angle = float(args.get("angle_deg", args.get("angle", 90.0)))
+        go2.turn_right(angle)
+        logging.info("===== GO2 turning right %s degrees...", angle)
+    elif action in ("turn_around", "about_face"):
+        go2.turn_left(180.0)
+        logging.info("===== GO2 turning around...")
     elif action == "move":
         vx = args.get("vx", 0.0)
         vy = args.get("vy", 0.0)
@@ -252,11 +263,21 @@ class RobotMacros(CodedTool):
             "static_walk", "trot_run", "free_walk", "free_bound", "free_jump",
             "free_avoid", "classic_walk", "walk_upright", "cross_step",
             "switch_joystick", "auto_recovery_set", "auto_recovery_get",
-            "switch_avoid_mode", "shutdown"
+            "switch_avoid_mode", "shutdown",
+            # Rotating the body. look_left/look_right only tilt on the Euler
+            # axes and leave the robot facing the same way, so without these
+            # there was no way to answer "turn right" at all.
+            "turn_left", "turn_right", "rotate_left", "rotate_right",
+            "turn_around", "about_face",
         }
 
         if action_lower not in known_actions:
-            return f"Unknown action: {action}"
+            # Name the alternatives. A bare rejection reads as a completed call,
+            # so the agent reports success and the robot never moves.
+            return (
+                f"Unknown action: {action}. Valid actions are: "
+                f"{', '.join(sorted(known_actions))}"
+            )
 
         return await asyncio.to_thread(self._execute, action_lower, dict(args))
 

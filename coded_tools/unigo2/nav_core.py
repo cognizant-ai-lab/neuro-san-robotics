@@ -2674,6 +2674,27 @@ class NavCore:
         "NAV_STALL_ESCAPE_COMMAND_PERIOD",
         0.10,
     )
+    # Depth readings averaged before turning on a measured wall angle. One
+    # frame's line fit is noisy -- readings inside a single stall have spread
+    # nearly 20 degrees -- so a pivot chosen from one of them is still a guess.
+    STALL_WALL_ALIGN_SAMPLES: int = int(_env_float("NAV_STALL_WALL_ALIGN_SAMPLES", 5))
+    # Reject the estimate when those readings disagree by more than this; a
+    # wall that cannot be measured consistently is not one to turn against.
+    STALL_WALL_ALIGN_MAX_SPREAD_RAD: float = _env_float(
+        "NAV_STALL_WALL_ALIGN_MAX_SPREAD_RAD",
+        math.radians(25.0),
+    )
+    # Below this the robot is already near enough to parallel that alignment is
+    # not what is blocking it.
+    STALL_WALL_ALIGN_MIN_ANGLE_RAD: float = _env_float(
+        "NAV_STALL_WALL_ALIGN_MIN_ANGLE_RAD",
+        math.radians(8.0),
+    )
+    # Turn a little past parallel so the shoulder clears rather than grazing.
+    STALL_WALL_ALIGN_MARGIN_RAD: float = _env_float(
+        "NAV_STALL_WALL_ALIGN_MARGIN_RAD",
+        math.radians(10.0),
+    )
     METRIC_LOCALIZATION_INTERVAL_S: float = _env_float(
         "NAV_METRIC_LOCALIZATION_INTERVAL",
         5.0,
@@ -3606,33 +3627,117 @@ class NavCore:
         ]
         return random.choice(candidates)
 
+    def _measure_wall_alignment(self) -> Optional[float]:
+        """
+        Return how far the robot is turned into a wall, in radians.
+
+        The obstacle grid already carries a wall line fit, but a single frame's
+        estimate is noisy, so several are taken and the median returned. None
+        means no wall was measured consistently enough to turn against, and the
+        caller should fall back to searching for an opening.
+
+        Sign matches the steering correction: applying yaw of this sign rotates
+        the robot towards parallel with the wall.
+        """
+        # The wall fit lives on the local planner, which already computes it
+        # every cycle to steer by. Missing either collaborator is not an error
+        # here: the caller falls back to searching for an opening.
+        planner = getattr(self, "_local_planner", None)
+        depth = getattr(self, "_depth_processor", None)
+        if planner is None or depth is None:
+            return None
+
+        readings: List[float] = []
+        period = max(0.05, self.STALL_ESCAPE_COMMAND_PERIOD_S)
+        for _ in range(max(1, self.STALL_WALL_ALIGN_SAMPLES)):
+            try:
+                grid = self._fresh_obstacle_grid(depth.get_obstacle_grid())
+                if grid is not None:
+                    geometry = planner._estimate_wall_geometry(grid)
+                    if geometry is not None:
+                        readings.append(float(geometry[0]))
+            except Exception:
+                logger.debug("NavCore: wall angle reading failed", exc_info=True)
+            time.sleep(period)
+
+        if len(readings) < max(2, (self.STALL_WALL_ALIGN_SAMPLES + 1) // 2):
+            return None
+
+        spread = max(readings) - min(readings)
+        if spread > self.STALL_WALL_ALIGN_MAX_SPREAD_RAD:
+            logger.warning(
+                "NavCore: wall angle unreliable across %d readings (spread %.0fdeg)",
+                len(readings),
+                math.degrees(spread),
+            )
+            return None
+
+        return float(np.median(readings))
+
+    def _plan_stall_turn(
+        self,
+        grid: ObstacleGrid,
+        min_angle: float,
+        max_angle: float,
+    ) -> Tuple[float, float, str]:
+        """
+        Decide which way to pivot out of a stall, and by how much.
+
+        Prefers the measured wall angle: nosed into a wall at a known angle,
+        the way out is to turn by that angle rather than to guess and re-check.
+        Falls back to the exploratory scan when no wall can be measured.
+        """
+        wall_angle = self._measure_wall_alignment()
+        if wall_angle is not None and abs(wall_angle) >= self.STALL_WALL_ALIGN_MIN_ANGLE_RAD:
+            direction = 1.0 if wall_angle > 0.0 else -1.0
+            target = min(
+                abs(wall_angle) + self.STALL_WALL_ALIGN_MARGIN_RAD,
+                max_angle,
+            )
+            logger.warning(
+                "NavCore: wall measured %.0fdeg off parallel; turning %.0fdeg %s to align",
+                math.degrees(wall_angle),
+                math.degrees(target),
+                "left" if direction > 0.0 else "right",
+            )
+            return direction, target, "wall alignment"
+
+        direction = self._choose_stall_scan_direction(grid)
+        return direction, random.uniform(min_angle, max_angle), "opening scan"
+
     def _execute_stall_turn_scan(
         self,
         goal: NavGoal,
         grid: Optional[ObstacleGrid],
     ) -> Optional[Tuple[RobotPose, str]]:
-        """Pivot to inspect an opening, alternating direction after a failed recovery."""
+        """Pivot to align with a measured wall, or to inspect an opening."""
         if grid is None:
             return None
         self._ensure_go2()
         if not self._go2 or not getattr(self._go2, "available", False):
             return None
 
-        direction = self._choose_stall_scan_direction(grid)
+        min_angle = max(0.0, self.STALL_SCAN_MIN_ANGLE_RAD)
+        max_angle = max(min_angle, self.STALL_SCAN_MAX_ANGLE_RAD)
+        direction, target_angle, basis = self._plan_stall_turn(
+            grid, min_angle, max_angle
+        )
         self._last_stall_scan_direction = direction
         side_name = "left" if direction > 0.0 else "right"
         yaw_rate = max(0.10, abs(self.STALL_SCAN_YAW_RATE_RPS)) * direction
-        min_angle = max(0.0, self.STALL_SCAN_MIN_ANGLE_RAD)
-        max_angle = max(min_angle, self.STALL_SCAN_MAX_ANGLE_RAD)
-        target_angle = random.uniform(min_angle, max_angle)
+        period = max(0.05, self.STALL_ESCAPE_COMMAND_PERIOD_S)
+        # An alignment turn has a known target, so it must not be cut short by
+        # the early exit that an exploratory scan relies on.
+        early_exit_after = min_angle if basis == "opening scan" else target_angle
         period = max(0.05, self.STALL_ESCAPE_COMMAND_PERIOD_S)
         turned = 0.0
         command = VelocityCommand(vx=0.0, vy=0.0, vyaw=yaw_rate)
 
         logger.warning(
-            "NavCore: scanning up to %.0fdeg %s for an open path toward '%s'",
+            "NavCore: turning up to %.0fdeg %s by %s toward '%s'",
             math.degrees(target_angle),
             side_name,
+            basis,
             self._goal_display_name(goal),
         )
         try:
@@ -3647,7 +3752,7 @@ class NavCore:
                     )
                     return None
                 if (
-                    turned >= min_angle
+                    turned >= early_exit_after
                     and latest.path_obstacle_m >= self.AVOIDANCE_DISTANCE_M
                 ):
                     logger.warning(

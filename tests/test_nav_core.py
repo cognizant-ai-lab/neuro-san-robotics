@@ -4763,3 +4763,92 @@ class TestDepthProcessorLifecycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WallAlignmentRecoveryTests(unittest.TestCase):
+    """Turning out of a stall on a measured wall angle rather than a guess."""
+
+    def _nav(self, readings, *, samples=5):
+        """A NavCore stub whose wall fit yields `readings` in order."""
+        nav = NavCore.__new__(NavCore)
+        nav.STALL_WALL_ALIGN_SAMPLES = samples
+        nav.STALL_ESCAPE_COMMAND_PERIOD_S = 0.0
+        planner = MagicMock()
+        planner._estimate_wall_geometry.side_effect = [
+            None if r is None else (r, 0.5, "single_wall") for r in readings
+        ]
+        nav._local_planner = planner
+        nav._depth_processor = MagicMock()
+        nav._fresh_obstacle_grid = lambda grid: grid
+        return nav
+
+    def test_the_median_wall_angle_is_used(self):
+        # Spread taken from a real stall: readings wandered across a few degrees.
+        nav = self._nav([math.radians(d) for d in (-31, -34, -37, -33, -36)])
+
+        measured = nav._measure_wall_alignment()
+
+        self.assertAlmostEqual(math.degrees(measured), -34.0, places=0)
+
+    def test_disagreeing_readings_are_refused(self):
+        # A wall that cannot be measured consistently is not one to turn against.
+        nav = self._nav([math.radians(d) for d in (-5, 40, -30, 25, -50)])
+
+        self.assertIsNone(nav._measure_wall_alignment())
+
+    def test_too_few_readings_are_refused(self):
+        nav = self._nav([None, None, None, None, math.radians(-30)])
+
+        self.assertIsNone(nav._measure_wall_alignment())
+
+    def test_a_missing_planner_falls_back_rather_than_raising(self):
+        nav = NavCore.__new__(NavCore)
+        nav.STALL_WALL_ALIGN_SAMPLES = 3
+        nav.STALL_ESCAPE_COMMAND_PERIOD_S = 0.0
+
+        self.assertIsNone(nav._measure_wall_alignment())
+
+    def test_a_measured_wall_decides_the_turn(self):
+        nav = self._nav([math.radians(-35)] * 5)
+        nav._choose_stall_scan_direction = MagicMock()
+
+        direction, angle, basis = nav._plan_stall_turn(
+            MagicMock(), math.radians(20.0), math.radians(50.0)
+        )
+
+        self.assertEqual(basis, "wall alignment")
+        # Nosed in at -35deg, the way out is to turn that way, not to guess.
+        self.assertEqual(direction, -1.0)
+        self.assertGreaterEqual(math.degrees(angle), 35.0)
+        nav._choose_stall_scan_direction.assert_not_called()
+
+    def test_the_turn_is_capped_at_the_scan_maximum(self):
+        nav = self._nav([math.radians(-80)] * 5)
+        nav._choose_stall_scan_direction = MagicMock()
+
+        _direction, angle, _basis = nav._plan_stall_turn(
+            MagicMock(), math.radians(20.0), math.radians(50.0)
+        )
+
+        self.assertAlmostEqual(math.degrees(angle), 50.0, places=0)
+
+    def test_an_unmeasurable_wall_falls_back_to_scanning(self):
+        nav = self._nav([None] * 5)
+        nav._choose_stall_scan_direction = MagicMock(return_value=1.0)
+
+        _direction, _angle, basis = nav._plan_stall_turn(
+            MagicMock(), math.radians(20.0), math.radians(50.0)
+        )
+
+        self.assertEqual(basis, "opening scan")
+        nav._choose_stall_scan_direction.assert_called_once()
+
+    def test_already_parallel_does_not_trigger_an_alignment_turn(self):
+        nav = self._nav([math.radians(2)] * 5)
+        nav._choose_stall_scan_direction = MagicMock(return_value=1.0)
+
+        _direction, _angle, basis = nav._plan_stall_turn(
+            MagicMock(), math.radians(20.0), math.radians(50.0)
+        )
+
+        self.assertEqual(basis, "opening scan")

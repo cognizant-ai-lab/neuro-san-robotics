@@ -437,6 +437,33 @@ class Go2Macros:
     # ----------------------------
     # LOCOMOTION
     # ----------------------------
+    TURN_YAW_RATE_RPS = 0.6
+
+    def turn(self, angle_deg: float = 90.0):
+        """
+        Rotate the whole robot in place.
+
+        Distinct from look_left/look_right, which tilt the body on its Euler
+        axes and leave the robot facing the same way. Positive turns left.
+        """
+        rate = abs(self.TURN_YAW_RATE_RPS)
+        duration = abs(math.radians(angle_deg)) / rate
+        self._timed_move(
+            vx=0.0,
+            vy=0.0,
+            vyaw=rate if angle_deg >= 0.0 else -rate,
+            duration_s=duration,
+        )
+        self._log(f"Turned {angle_deg:.0f} degrees")
+
+    def turn_left(self, angle_deg: float = 90.0):
+        """Rotate in place to the left."""
+        self.turn(abs(angle_deg))
+
+    def turn_right(self, angle_deg: float = 90.0):
+        """Rotate in place to the right."""
+        self.turn(-abs(angle_deg))
+
     def move(self, vx=0.0, vy=0.0, vyaw=0.0):
         """Continuous movement command. Call stop_move() to stop."""
         command_active = abs(vx) > 1e-3 or abs(vy) > 1e-3 or abs(vyaw) > 1e-3
