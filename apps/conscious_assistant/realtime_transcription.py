@@ -3,10 +3,11 @@
 Capture tuning is environment-driven because the right values depend on the
 microphone, not the robot:
 
-- CONSCIOUS_MIC_NOISE_REDUCTION: "near_field" (default) for a worn or handheld
-  mic, "far_field" for one picking up the whole room. Getting this wrong is
-  costly -- far_field on a close-talk mic lifts distant sound, which is exactly
-  the robot's own speaker and motors.
+- CONSCIOUS_MIC_NOISE_REDUCTION: "far_field" (default) for a mic covering the
+  room, "near_field" for one worn at the mouth, or "off" to send the audio
+  through untouched. near_field on a mic that is not right at the speaker's
+  mouth treats their voice as distant noise and suppresses it, which reads as
+  the robot being hard of hearing however far the VAD threshold is lowered.
 - CONSCIOUS_VAD_THRESHOLD: how loud speech must be to register (0.0-1.0).
   Raise it when robot noise keeps opening an utterance.
 - CONSCIOUS_VAD_PREFIX_PADDING_MS: audio kept from before speech was detected.
@@ -50,33 +51,35 @@ def _env_value(name: str, default, cast):
 def noise_reduction_mode() -> str:
     """Return the capture profile matching this robot's microphone."""
     mode = (os.environ.get("CONSCIOUS_MIC_NOISE_REDUCTION") or "").strip().lower()
-    return mode if mode in {"near_field", "far_field"} else "near_field"
+    return mode if mode in {"near_field", "far_field", "off"} else "far_field"
 
 
 def transcription_session_config(model: str) -> dict:
     """Return a transcription-only Realtime session tuned for this robot's mic."""
+    mode = noise_reduction_mode()
+    audio_input = {
+        # Omitted entirely for "off": there is no profile that means untouched,
+        # and either profile shapes the audio before the VAD ever sees it.
+        "transcription": {
+            "model": model,
+            "language": "en",
+            "prompt": transcription_prompt(),
+        },
+        "turn_detection": {
+            "type": "server_vad",
+            "threshold": _env_value("CONSCIOUS_VAD_THRESHOLD", 0.45, float),
+            "prefix_padding_ms": _env_value(
+                "CONSCIOUS_VAD_PREFIX_PADDING_MS", 400, int
+            ),
+            "silence_duration_ms": _env_value("CONSCIOUS_VAD_SILENCE_MS", 700, int),
+        },
+    }
+    if mode != "off":
+        audio_input["noise_reduction"] = {"type": mode}
+
     return {
         "type": "transcription",
-        "audio": {
-            "input": {
-                "noise_reduction": {"type": noise_reduction_mode()},
-                "transcription": {
-                    "model": model,
-                    "language": "en",
-                    "prompt": transcription_prompt(),
-                },
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": _env_value("CONSCIOUS_VAD_THRESHOLD", 0.45, float),
-                    "prefix_padding_ms": _env_value(
-                        "CONSCIOUS_VAD_PREFIX_PADDING_MS", 400, int
-                    ),
-                    "silence_duration_ms": _env_value(
-                        "CONSCIOUS_VAD_SILENCE_MS", 700, int
-                    ),
-                },
-            }
-        },
+        "audio": {"input": audio_input},
     }
 
 

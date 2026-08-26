@@ -317,10 +317,11 @@ if __name__ == "__main__":
 class TurnInPlaceTests(unittest.TestCase):
     """Rotating the robot, as distinct from tilting it."""
 
-    def _macros(self):
+    def _macros(self, locomotion_ready=True):
         go2 = Go2Macros.__new__(Go2Macros)
         go2.cli = None
         go2._log = lambda *args, **kwargs: None
+        go2.ensure_locomotion_ready = lambda: locomotion_ready
         return go2
 
     def test_turning_left_commands_positive_yaw(self):
@@ -353,6 +354,25 @@ class TurnInPlaceTests(unittest.TestCase):
             long = timed_move.call_args.kwargs["duration_s"]
 
         self.assertGreater(long, short)
+
+    def test_turning_prepares_locomotion_first(self):
+        # _timed_move talks straight to the SDK, so an unprepared robot accepts
+        # the command and stands still.
+        go2 = self._macros()
+        prepared = []
+        go2.ensure_locomotion_ready = lambda: prepared.append(True) or True
+        with patch.object(Go2Macros, "_timed_move"):
+            go2.turn_left(90.0)
+
+        self.assertEqual(len(prepared), 1)
+
+    def test_turning_reports_when_locomotion_cannot_be_prepared(self):
+        go2 = self._macros(locomotion_ready=False)
+        with patch.object(Go2Macros, "_timed_move") as timed_move:
+            with self.assertRaises(RuntimeError):
+                go2.turn_left(90.0)
+
+        timed_move.assert_not_called()
 
 
 class TurnActionRoutingTests(unittest.TestCase):

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RealtimeTranscriptionTests(unittest.TestCase):
-    def test_session_is_transcription_only_and_defaults_to_a_worn_mic(self):
+    def test_session_is_transcription_only_and_defaults_to_a_room_mic(self):
         with patch.dict(os.environ, {}, clear=False):
             for name in (
                 "CONSCIOUS_MIC_NOISE_REDUCTION",
@@ -27,18 +27,29 @@ class RealtimeTranscriptionTests(unittest.TestCase):
         audio_input = config["audio"]["input"]
         self.assertEqual(audio_input["transcription"]["model"], "test-model")
         self.assertEqual(audio_input["transcription"]["language"], "en")
-        # far_field on a worn mic lifts distant sound -- the robot's own
-        # speaker and motors -- so a close-talk profile is the safer default.
-        self.assertEqual(audio_input["noise_reduction"]["type"], "near_field")
+        # near_field on a mic that is not at the speaker's mouth treats their
+        # voice as distant noise, which no VAD threshold can compensate for.
+        self.assertEqual(audio_input["noise_reduction"]["type"], "far_field")
         self.assertEqual(audio_input["turn_detection"]["type"], "server_vad")
 
-    def test_a_room_mic_can_ask_for_the_far_field_profile(self):
-        with patch.dict(os.environ, {"CONSCIOUS_MIC_NOISE_REDUCTION": "far_field"}):
+    def test_a_worn_mic_can_ask_for_the_near_field_profile(self):
+        with patch.dict(os.environ, {"CONSCIOUS_MIC_NOISE_REDUCTION": "near_field"}):
             config = realtime_transcription.transcription_session_config("test-model")
 
         self.assertEqual(
-            config["audio"]["input"]["noise_reduction"]["type"], "far_field"
+            config["audio"]["input"]["noise_reduction"]["type"], "near_field"
         )
+
+    def test_noise_reduction_can_be_turned_off_entirely(self):
+        # Neither profile means "leave it alone", and both shape the audio
+        # before the VAD ever sees it, so the field has to be absent.
+        with patch.dict(os.environ, {"CONSCIOUS_MIC_NOISE_REDUCTION": "off"}):
+            audio_input = realtime_transcription.transcription_session_config(
+                "test-model"
+            )["audio"]["input"]
+
+        self.assertNotIn("noise_reduction", audio_input)
+        self.assertEqual(audio_input["turn_detection"]["type"], "server_vad")
 
     def test_capture_thresholds_come_from_the_environment(self):
         with patch.dict(os.environ, {
@@ -63,7 +74,7 @@ class RealtimeTranscriptionTests(unittest.TestCase):
                 "test-model"
             )["audio"]["input"]
 
-        self.assertEqual(audio_input["noise_reduction"]["type"], "near_field")
+        self.assertEqual(audio_input["noise_reduction"]["type"], "far_field")
         self.assertEqual(audio_input["turn_detection"]["threshold"], 0.45)
 
     def test_client_secret_request_sends_transcription_session_as_json(self):

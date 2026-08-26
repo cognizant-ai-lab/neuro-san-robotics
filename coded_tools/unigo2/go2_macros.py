@@ -446,6 +446,12 @@ class Go2Macros:
         Distinct from look_left/look_right, which tilt the body on its Euler
         axes and leave the robot facing the same way. Positive turns left.
         """
+        # _timed_move sends Move straight to the SDK without preparing
+        # locomotion, so a robot that is sitting or idle accepts every command
+        # and does not move. step_forward primes it for the same reason.
+        if not self.ensure_locomotion_ready():
+            raise RuntimeError("Robot locomotion could not be prepared")
+
         rate = abs(self.TURN_YAW_RATE_RPS)
         duration = abs(math.radians(angle_deg)) / rate
         self._timed_move(

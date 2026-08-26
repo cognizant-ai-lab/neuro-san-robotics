@@ -83,16 +83,19 @@ by environment.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `CONSCIOUS_MIC_NOISE_REDUCTION` | `near_field` | `near_field` for a worn or handheld mic, `far_field` for one covering the whole room |
+| `CONSCIOUS_MIC_NOISE_REDUCTION` | `far_field` | `far_field` for a mic covering the room, `near_field` for one worn at the mouth, `off` to leave the audio untouched |
 | `CONSCIOUS_VAD_THRESHOLD` | `0.45` | How loud speech must be to open an utterance (0.0-1.0) |
 | `CONSCIOUS_VAD_PREFIX_PADDING_MS` | `400` | Audio kept from before speech was detected |
 | `CONSCIOUS_VAD_SILENCE_MS` | `700` | Silence needed to close an utterance |
 
-Getting the profile wrong is expensive: `far_field` on a worn mic lifts distant
-sound, which is exactly the robot's own speaker and motors, so the recogniser
-spends its effort on noise and mishears the person wearing it. If robot noise
-still opens utterances on its own, raise `CONSCIOUS_VAD_THRESHOLD` before
-reaching for anything else.
+Both profiles shape the audio **before** the voice-activity detector sees it, so
+the wrong one cannot be compensated for by tuning `CONSCIOUS_VAD_THRESHOLD` --
+lowering the threshold will not recover a voice that has already been
+suppressed. If speech has to be shouted, suspect the profile first and try
+`off`. If robot noise keeps opening utterances on its own, raise the threshold.
+
+`near_field` only suits a mic worn at the mouth. On anything further away it
+treats the speaker's own voice as distant noise.
 
 Note that the browser's own `echoCancellation` cannot help here. It only cancels
 audio the browser itself plays, and the robot speaks through an ALSA device on
