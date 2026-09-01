@@ -457,6 +457,74 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertAlmostEqual(cmd.vx, 0.0)
         self.assertGreater(cmd.vyaw, 0.0)
 
+    def test_significant_route_recapture_ignores_wider_open_sector(self):
+        planner = LocalPlanner(
+            max_linear_speed=0.30,
+            max_yaw_rate=0.08,
+            avoidance_distance=0.75,
+        )
+        grid = self._corridor_grid(slope=0.0, center_offset=0.18)
+        grid.path_obstacle_m = 2.50
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(-12.0),
+            goal_distance=1.0,
+            pivot_heading=math.radians(-2.0),
+            route_heading_authoritative=True,
+        )
+
+        self.assertGreater(cmd.vx, 0.0)
+        self.assertAlmostEqual(cmd.vyaw, -planner.max_yaw_rate)
+
+    def test_route_recapture_reverses_stale_steering_immediately(self):
+        planner = LocalPlanner(max_yaw_rate=0.08)
+        planner._steering_sign = 1
+
+        corrected = planner.stabilize_translating_steering(
+            VelocityCommand(vx=0.28, vy=0.0, vyaw=-0.08),
+            allow_immediate_reversal=True,
+        )
+
+        self.assertAlmostEqual(corrected.vyaw, -0.08)
+        self.assertEqual(planner._steering_sign, -1)
+
+    def test_route_recapture_is_not_reversed_by_noncritical_wall_alignment(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            lateral = -0.78 + 0.12 * forward
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.28, vy=0.0, vyaw=-0.08),
+            grid,
+            correction_limit=0.02,
+            route_heading_authoritative=True,
+        )
+
+        self.assertLessEqual(corrected.vyaw, -0.06)
+
+    def test_route_recapture_still_turns_away_from_wall_inside_target_clearance(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            lateral = -0.42
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.28, vy=0.0, vyaw=-0.08),
+            grid,
+            correction_limit=0.02,
+            route_heading_authoritative=True,
+        )
+
+        self.assertGreater(corrected.vyaw, 0.0)
+
     def test_open_space_centering_cannot_initiate_pivot_away_from_route(self):
         planner = LocalPlanner(max_yaw_rate=0.08, pivot_yaw_rate=0.5)
 
@@ -1357,6 +1425,89 @@ class TestGlobalPlanner(unittest.TestCase):
         self.assertIsNotNone(waypoint)
         self.assertEqual(waypoint.name, "__metric_001__")
 
+    def test_metric_corner_advances_after_entering_outgoing_corridor(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(6.31, 12.82, math.radians(95.0)),
+            "C",
+            [
+                (6.31, 12.82),
+                (6.25, 13.55),
+                (5.57, 13.55),
+                (4.89, 13.55),
+                (4.0, 13.55),
+            ],
+        )
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(5.49, 13.60, math.radians(93.0)),
+            tolerance_m=0.45,
+        )
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "__metric_003__")
+        self.assertAlmostEqual(
+            abs(planner.current_segment_heading()),
+            math.pi,
+        )
+
+    def test_metric_corner_rejects_straight_overshoot_outside_outgoing_corridor(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(6.31, 12.82, math.radians(95.0)),
+            "C",
+            [
+                (6.31, 12.82),
+                (6.25, 13.55),
+                (5.57, 13.55),
+                (4.0, 13.55),
+            ],
+        )
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(6.80, 14.20, math.radians(95.0)),
+            tolerance_m=0.45,
+        )
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "__metric_001__")
+
+    def test_metric_corner_rejects_pose_on_wrong_side_of_outgoing_segment(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(6.31, 12.82, math.radians(95.0)),
+            "C",
+            [
+                (6.31, 12.82),
+                (6.25, 13.55),
+                (5.57, 13.55),
+                (4.0, 13.55),
+            ],
+        )
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(6.80, 13.60, math.radians(95.0)),
+            tolerance_m=0.45,
+        )
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "__metric_001__")
+
+    def test_current_segment_reports_signed_cross_track_error(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)],
+        )
+
+        self.assertAlmostEqual(
+            planner.current_segment_cross_track_error(
+                RobotPose(0.5, 0.40, 0.0)
+            ),
+            0.40,
+        )
+
     def test_replan_does_not_reinstate_completed_waypoint(self):
         topo = _create_test_map()
         planner = GlobalPlanner(topo)
@@ -2143,6 +2294,9 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.SEMANTIC_ARRIVAL_TOLERANCE_M, 0.65)
         self.assertAlmostEqual(NavCore.OBSTACLE_GRID_MAX_AGE_S, 0.50)
         self.assertAlmostEqual(NavCore.OBSTACLE_GRID_LOSS_GRACE_S, 3.0)
+        self.assertAlmostEqual(NavCore.METRIC_ROUTE_RECAPTURE_CROSS_TRACK_M, 0.35)
+        self.assertAlmostEqual(NavCore.METRIC_CORNER_REGRESSION_DISTANCE_M, 0.25)
+        self.assertAlmostEqual(NavCore.METRIC_CORNER_REGRESSION_CONFIRM_S, 0.30)
         self.assertAlmostEqual(NavCore.STALL_ESCAPE_SPEED_MPS, 0.15)
         self.assertAlmostEqual(NavCore.STALL_ESCAPE_DISTANCE_M, 0.15)
         self.assertAlmostEqual(NavCore.STALL_ESCAPE_CLEARANCE_M, 0.40)
@@ -4062,6 +4216,58 @@ class TestNavCoreStatus(unittest.TestCase):
         nav._global_planner.plan_path.assert_called_once()
         nav._local_planner.reset_navigation_state.assert_called_once()
         nav._reset_progress_tracker.assert_called_once()
+
+    def test_metric_corner_regression_replans_after_small_overshoot(self):
+        nav = NavCore.__new__(NavCore)
+        nav.METRIC_ROUTE_REGRESSION_DISTANCE_M = 0.65
+        nav.METRIC_ROUTE_REGRESSION_CONFIRM_S = 1.0
+        nav.METRIC_CORNER_REGRESSION_DISTANCE_M = 0.25
+        nav.METRIC_CORNER_REGRESSION_CONFIRM_S = 0.0
+        nav.EXPECTED_CORNER_MIN_TURN_RAD = math.radians(45.0)
+        nav._route_progress_waypoint_name = None
+        nav._route_progress_best_distance = float("inf")
+        nav._route_regression_since = None
+        nav._go2 = MagicMock(available=True)
+        nav._ensure_go2 = MagicMock()
+        nav._global_planner = MagicMock()
+        nav._global_planner.active_waypoint_is_corner.return_value = True
+        nav._global_planner.plan_path.return_value = [
+            MapNode(name="start", x=0.0, y=0.0, tags=["metric_transit"]),
+            MapNode(name="Charging station", x=2.0, y=0.0),
+        ]
+        nav._local_planner = MagicMock()
+        nav._reset_progress_tracker = MagicMock()
+        waypoint = MapNode(
+            name="__metric_010__",
+            x=1.0,
+            y=0.0,
+            tags=["metric_transit"],
+        )
+        goal = NavGoal(
+            goal_type="semantic",
+            x=2.0,
+            y=0.0,
+            label="Charging station",
+        )
+
+        self.assertFalse(
+            nav._recover_regressing_metric_route(
+                goal, RobotPose(), waypoint, 0.75
+            )
+        )
+        self.assertFalse(
+            nav._recover_regressing_metric_route(
+                goal, RobotPose(), waypoint, 1.01
+            )
+        )
+        self.assertTrue(
+            nav._recover_regressing_metric_route(
+                goal, RobotPose(), waypoint, 1.01
+            )
+        )
+
+        nav._go2.stop_move.assert_called_once()
+        nav._global_planner.plan_path.assert_called_once()
 
     @patch("coded_tools.unigo2.nav_core._get_go2_macros")
     def test_raw_obstacle_cannot_trigger_clear_path_locomotion_reinit(self, mock_go2):

@@ -885,6 +885,29 @@ class GlobalPlanner:
             )
             advanced = self.advance_current_waypoint(on_advance=on_advance)
             return advanced[1] if advanced is not None else None
+        if pass_tolerance is not None and self._entered_outgoing_corner_corridor(
+            current_pose,
+            lateral_tolerance_m=pass_tolerance,
+        ):
+            logger.info(
+                "GlobalPlanner: accepted corner waypoint '%s' after entering "
+                "its outgoing route corridor",
+                wp.name,
+            )
+            advanced = self.advance_current_waypoint(on_advance=on_advance)
+            if advanced is None:
+                return None
+            # The robot may already have crossed the first short outgoing
+            # sample as part of the corner cut. Re-evaluate once so the local
+            # planner receives a waypoint far enough ahead to begin the turn,
+            # instead of issuing one more forward command toward a point that
+            # is already beside or behind it.
+            return self.get_next_waypoint(
+                current_pose,
+                tolerance_m,
+                on_advance,
+                final_arrival_sensor_confirmed=final_arrival_sensor_confirmed,
+            )
 
         return wp
 
@@ -989,6 +1012,94 @@ class GlobalPlanner:
         along = relative_x * unit_x + relative_y * unit_y
         lateral = abs(relative_x * unit_y - relative_y * unit_x)
         return along >= edge_length and lateral <= lateral_tolerance_m
+
+    def _entered_outgoing_corner_corridor(
+        self,
+        pose: RobotPose,
+        lateral_tolerance_m: float,
+    ) -> bool:
+        """Recognize a safely cut corner already lying on its outgoing route.
+
+        A robot can cross the incoming arrival plane outside the corner's tight
+        radius while already being centered on the outgoing segment. Keeping
+        the old segment active then sends it straight past the turn. Accept the
+        corner only on the turn's outgoing side and within that segment's
+        corridor; a straight overshoot or an offset on the wrong side still
+        fails this gate and is replanned.
+        """
+        upcoming = self.upcoming_turn()
+        segment = self.current_segment()
+        if upcoming is None or segment is None:
+            return False
+        corner, following, turn = upcoming
+        if (
+            "metric_transit" not in corner.tags
+            or abs(turn) <= self.STRAIGHT_METRIC_PASS_MAX_TURN_RAD
+        ):
+            return False
+
+        start, target = segment
+        incoming_x = target.x - start.x
+        incoming_y = target.y - start.y
+        incoming_length = math.hypot(incoming_x, incoming_y)
+        outgoing_x = following.x - corner.x
+        outgoing_y = following.y - corner.y
+        outgoing_length = math.hypot(outgoing_x, outgoing_y)
+        if incoming_length <= 1e-6 or outgoing_length <= 1e-6:
+            return False
+
+        incoming_unit_x = incoming_x / incoming_length
+        incoming_unit_y = incoming_y / incoming_length
+        incoming_relative_x = pose.x - start.x
+        incoming_relative_y = pose.y - start.y
+        incoming_along = (
+            incoming_relative_x * incoming_unit_x
+            + incoming_relative_y * incoming_unit_y
+        )
+        if incoming_along < incoming_length:
+            return False
+
+        outgoing_unit_x = outgoing_x / outgoing_length
+        outgoing_unit_y = outgoing_y / outgoing_length
+        outgoing_relative_x = pose.x - corner.x
+        outgoing_relative_y = pose.y - corner.y
+        outgoing_along = (
+            outgoing_relative_x * outgoing_unit_x
+            + outgoing_relative_y * outgoing_unit_y
+        )
+        outgoing_lateral = abs(
+            outgoing_relative_x * outgoing_unit_y
+            - outgoing_relative_y * outgoing_unit_x
+        )
+        return (
+            0.0 <= outgoing_along <= outgoing_length + lateral_tolerance_m
+            and outgoing_lateral <= lateral_tolerance_m
+        )
+
+    def current_segment_cross_track_error(self, pose: RobotPose) -> Optional[float]:
+        """Return signed lateral displacement from the active route segment."""
+        segment = self.current_segment()
+        if segment is None:
+            return None
+        start, target = segment
+        edge_x = target.x - start.x
+        edge_y = target.y - start.y
+        edge_length = math.hypot(edge_x, edge_y)
+        if edge_length <= 1e-6:
+            return None
+        unit_x, unit_y = edge_x / edge_length, edge_y / edge_length
+        relative_x = pose.x - start.x
+        relative_y = pose.y - start.y
+        return unit_x * relative_y - unit_y * relative_x
+
+    def active_waypoint_is_corner(self, minimum_turn_rad: float) -> bool:
+        """Return whether the active metric waypoint begins a mapped turn."""
+        upcoming = self.upcoming_turn()
+        return bool(
+            upcoming is not None
+            and "metric_transit" in upcoming[0].tags
+            and abs(upcoming[2]) >= abs(minimum_turn_rad)
+        )
 
     def current_segment(self) -> Optional[Tuple[MapNode, MapNode]]:
         """Return the active directed map edge."""
@@ -1297,7 +1408,12 @@ class LocalPlanner:
         self._pending_steering_cycles = 0
         self._wall_alignment_override_active = False
 
-    def stabilize_translating_steering(self, cmd: VelocityCommand) -> VelocityCommand:
+    def stabilize_translating_steering(
+        self,
+        cmd: VelocityCommand,
+        *,
+        allow_immediate_reversal: bool = False,
+    ) -> VelocityCommand:
         """Require a persistent request before reversing translating steering."""
         if cmd.vx <= 0.05 or abs(cmd.vyaw) < self.STEERING_DEADBAND_RPS:
             if abs(cmd.vyaw) < self.STEERING_DEADBAND_RPS:
@@ -1306,6 +1422,11 @@ class LocalPlanner:
             return cmd
 
         requested_sign = 1 if cmd.vyaw > 0.0 else -1
+        if allow_immediate_reversal:
+            self._steering_sign = requested_sign
+            self._pending_steering_sign = 0
+            self._pending_steering_cycles = 0
+            return cmd
         if self._steering_sign == 0 or requested_sign == self._steering_sign:
             self._steering_sign = requested_sign
             self._pending_steering_sign = 0
@@ -1454,6 +1575,7 @@ class LocalPlanner:
         *,
         slow_for_arrival: bool = True,
         pivot_heading: Optional[float] = None,
+        route_heading_authoritative: bool = False,
     ) -> VelocityCommand:
         """Compute velocity toward the goal while avoiding obstacles.
 
@@ -1463,16 +1585,22 @@ class LocalPlanner:
             goal_distance: Distance to goal in meters.
             slow_for_arrival: Brake inside 0.5m for a stopping destination. False
                 for intermediate route points that should be passed through.
+            route_heading_authoritative: Bypass local open-space centering while
+                recapturing a significantly drifted but unobstructed map route.
 
         Returns:
             VelocityCommand with speed modulated by obstacle proximity and goal distance.
         """
         path_nearest = obstacle_grid.path_obstacle_m
         mapped_heading = goal_direction if pivot_heading is None else pivot_heading
-        route_direction = self._centered_route_heading(
-            obstacle_grid,
-            goal_direction,
-        )
+        if route_heading_authoritative and path_nearest > self.avoidance_distance:
+            self._route_center_heading = None
+            route_direction = goal_direction
+        else:
+            route_direction = self._centered_route_heading(
+                obstacle_grid,
+                goal_direction,
+            )
 
         if path_nearest > self.avoidance_distance:
             return self._compute_direct_velocity(
@@ -1682,8 +1810,13 @@ class LocalPlanner:
         *,
         correction_limit: Optional[float] = None,
         align_only: bool = False,
+        route_heading_authoritative: bool = False,
     ) -> VelocityCommand:
-        """Add bounded steering from visible corridor or one-sided wall geometry."""
+        """Add bounded steering from visible corridor or one-sided wall geometry.
+
+        A significantly drifted clear route keeps its map correction unless a
+        fitted wall is actually inside the target safety clearance.
+        """
         if cmd.vx <= 0.05:
             self._wall_alignment_override_active = False
             return cmd
@@ -1711,6 +1844,7 @@ class LocalPlanner:
                     not align_only
                     and clearance <= self.EARLY_WALL_ALIGNMENT_CLEARANCE_M
                     and (converging or too_close)
+                    and (not route_heading_authoritative or too_close)
                 ):
                     # Route cross-track error can be wrong when localization has
                     # drifted. A repeatedly fitted wall that is visibly converging
@@ -2822,6 +2956,18 @@ class NavCore:
         "NAV_METRIC_ROUTE_REGRESSION_CONFIRM_S",
         1.0,
     )
+    METRIC_ROUTE_RECAPTURE_CROSS_TRACK_M: float = _env_float(
+        "NAV_METRIC_ROUTE_RECAPTURE_CROSS_TRACK",
+        0.35,
+    )
+    METRIC_CORNER_REGRESSION_DISTANCE_M: float = _env_float(
+        "NAV_METRIC_CORNER_REGRESSION_DISTANCE",
+        0.25,
+    )
+    METRIC_CORNER_REGRESSION_CONFIRM_S: float = _env_float(
+        "NAV_METRIC_CORNER_REGRESSION_CONFIRM_S",
+        0.30,
+    )
     REMOTE_HEADING_REALIGN_MIN_TURN_RAD: float = _env_float(
         "NAV_REMOTE_HEADING_REALIGN_MIN_TURN_RAD",
         math.radians(20.0),
@@ -2894,6 +3040,7 @@ class NavCore:
         self._arrival_map_consistency_readings = 0
         self._last_stall_scan_direction: Optional[float] = None
         self._pivot_clearance_escape_active = False
+        self._metric_route_recapture_active = False
         self._close_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
             min_readings=self.CLOSE_OBSTACLE_CONFIRM_READINGS,
@@ -3062,6 +3209,7 @@ class NavCore:
         self._obstacle_grid_unavailable_notified = False
         self._last_stall_scan_direction = None
         self._pivot_clearance_escape_active = False
+        self._metric_route_recapture_active = False
         self._route_progress_waypoint_name = None
         self._route_progress_best_distance = float("inf")
         self._route_regression_since = None
@@ -5145,8 +5293,21 @@ class NavCore:
             self._route_regression_since = None
             return False
 
+        corner = self._global_planner.active_waypoint_is_corner(
+            self.EXPECTED_CORNER_MIN_TURN_RAD,
+        ) is True
+        regression_distance = (
+            self.METRIC_CORNER_REGRESSION_DISTANCE_M
+            if corner
+            else self.METRIC_ROUTE_REGRESSION_DISTANCE_M
+        )
+        regression_confirm_s = (
+            self.METRIC_CORNER_REGRESSION_CONFIRM_S
+            if corner
+            else self.METRIC_ROUTE_REGRESSION_CONFIRM_S
+        )
         regression = waypoint_distance - self._route_progress_best_distance
-        if regression < self.METRIC_ROUTE_REGRESSION_DISTANCE_M:
+        if regression < regression_distance:
             self._route_regression_since = None
             return False
 
@@ -5161,7 +5322,7 @@ class NavCore:
                 waypoint_distance,
             )
             return False
-        if now - self._route_regression_since < self.METRIC_ROUTE_REGRESSION_CONFIRM_S:
+        if now - self._route_regression_since < regression_confirm_s:
             return False
 
         self._ensure_go2()
@@ -5371,14 +5532,39 @@ class NavCore:
                         math.cos(guidance_heading - pose.yaw),
                     )
 
+            cross_track_error = (
+                self._global_planner.current_segment_cross_track_error(pose)
+                if metric_route
+                else None
+            )
+            route_heading_authoritative = bool(
+                metric_route
+                and isinstance(cross_track_error, (int, float))
+                and math.isfinite(cross_track_error)
+                and abs(cross_track_error)
+                >= self.METRIC_ROUTE_RECAPTURE_CROSS_TRACK_M
+                and grid.path_obstacle_m > self.AVOIDANCE_DISTANCE_M
+            )
+            if route_heading_authoritative and not self._metric_route_recapture_active:
+                logger.warning(
+                    "NavCore: recapturing clear metric route from %+.2fm "
+                    "cross-track error",
+                    cross_track_error,
+                )
+            self._metric_route_recapture_active = route_heading_authoritative
+
             cmd = self._local_planner.compute_velocity(
                 grid,
                 goal_dir,
                 goal_dist,
                 slow_for_arrival=slow_for_arrival,
                 pivot_heading=pivot_heading,
+                route_heading_authoritative=route_heading_authoritative,
             )
-            stabilized = self._local_planner.stabilize_translating_steering(cmd)
+            stabilized = self._local_planner.stabilize_translating_steering(
+                cmd,
+                allow_immediate_reversal=route_heading_authoritative,
+            )
             if isinstance(stabilized, VelocityCommand):
                 cmd = stabilized
             if goal.goal_type == "semantic":
@@ -5389,6 +5575,7 @@ class NavCore:
                     grid,
                     correction_limit=0.02 if metric_route else None,
                     align_only=metric_route and slow_for_arrival,
+                    route_heading_authoritative=route_heading_authoritative,
                 )
                 if isinstance(corrected, VelocityCommand):
                     cmd = corrected
@@ -5417,6 +5604,7 @@ class NavCore:
                 cmd = replace(cmd, vx=self.LOCOMOTION_VERIFICATION_SPEED_MPS)
 
         elif state == NavState.AVOIDING:
+            self._metric_route_recapture_active = False
             if grid:
                 cmd = self._local_planner.compute_avoidance(grid)
             else:
@@ -5427,8 +5615,10 @@ class NavCore:
                     self._state = NavState.NAVIGATING
 
         elif state == NavState.STUCK:
+            self._metric_route_recapture_active = False
             cmd = VelocityCommand(0.0, 0.0, 0.0)
         else:
+            self._metric_route_recapture_active = False
             cmd = VelocityCommand(0.0, 0.0, 0.0)
 
         # 4. Safety filter

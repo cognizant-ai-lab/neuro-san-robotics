@@ -245,6 +245,9 @@ specific robot really needs a temporary override.
 | `NAV_METRIC_BLOCKED_REPLAN_DELAY` | `1.0` | Persistent-obstacle delay before a live-obstacle route is calculated. |
 | `NAV_METRIC_REPLAN_COOLDOWN` | `3.0` | Minimum interval between proactive route replacements. |
 | `NAV_METRIC_LOCALIZATION_INTERVAL` | `2.0` | Interval for conservative RealSense-to-floor-plan pose correction. |
+| `NAV_METRIC_ROUTE_RECAPTURE_CROSS_TRACK` | `0.35` | Makes clear mapped-route steering authoritative after 0.35 m of lateral drift. |
+| `NAV_METRIC_CORNER_REGRESSION_DISTANCE` | `0.25` | Replans a missed sharp corner after its distance grows by 0.25 m. |
+| `NAV_METRIC_CORNER_REGRESSION_CONFIRM_S` | `0.30` | Persistence required before a missed-corner replan. |
 
 The production map references a 10cm occupancy grid generated from the office floor
 plan. Named map nodes remain the destination interface, while clearance-aware A*
