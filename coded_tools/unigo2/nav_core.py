@@ -558,6 +558,7 @@ class GlobalPlanner:
     FINAL_METRIC_HEADING_TOLERANCE_RAD = math.radians(25.0)
     STRAIGHT_METRIC_PASS_TOLERANCE_M = 0.75
     STRAIGHT_METRIC_PASS_MAX_TURN_RAD = math.radians(20.0)
+    STRAIGHT_METRIC_WIDE_PASS_MAX_HEADING_ERROR_RAD = math.radians(15.0)
 
     def __init__(self, topo_map: TopologicalMap):
         """Initialize the global planner with a topological map reference."""
@@ -878,6 +879,10 @@ class GlobalPlanner:
         if pass_tolerance is not None and self._passed_waypoint_plane(
             current_pose,
             lateral_tolerance_m=pass_tolerance,
+        ) and self._wide_metric_pass_heading_is_consistent(
+            current_pose,
+            wp,
+            pass_tolerance,
         ):
             logger.info(
                 "GlobalPlanner: accepted waypoint '%s' after passing its arrival plane",
@@ -950,6 +955,42 @@ class GlobalPlanner:
         if turn <= self.STRAIGHT_METRIC_PASS_MAX_TURN_RAD:
             return max(tolerance, self.STRAIGHT_METRIC_PASS_TOLERANCE_M)
         return tolerance
+
+    def _wide_metric_pass_heading_is_consistent(
+        self,
+        pose: RobotPose,
+        waypoint: MapNode,
+        effective_tolerance_m: float,
+    ) -> bool:
+        """Use the widened straight-point gate only while following the segment.
+
+        The ordinary waypoint radius remains available from any heading.  The
+        extra corridor-width allowance exists only to bridge sparse odometry
+        samples on an otherwise aligned straight run; accepting it while the
+        robot is angled away silently advances a route that is already being
+        lost.
+        """
+        configured_tolerance = waypoint.pass_through_tolerance_m
+        if (
+            configured_tolerance is None
+            or effective_tolerance_m <= configured_tolerance + 1e-6
+            or "metric_transit" not in waypoint.tags
+        ):
+            return True
+
+        segment_heading = self.current_segment_heading()
+        if segment_heading is None:
+            return False
+        heading_error = abs(
+            math.atan2(
+                math.sin(pose.yaw - segment_heading),
+                math.cos(pose.yaw - segment_heading),
+            )
+        )
+        return (
+            heading_error
+            <= self.STRAIGHT_METRIC_WIDE_PASS_MAX_HEADING_ERROR_RAD
+        )
 
     def _metric_final_arrival_is_consistent(self, pose: RobotPose) -> bool:
         """Require the final route corridor and entrance gate, not radius alone."""
@@ -1304,6 +1345,10 @@ class LocalPlanner:
     CORRIDOR_MIN_WIDTH_M = 0.55
     CORRIDOR_MAX_WIDTH_M = 2.50
     SINGLE_WALL_TARGET_CLEARANCE_M = _env_float("NAV_WALL_CLEARANCE", 0.55)
+    SINGLE_WALL_HARD_CLEARANCE_M = _env_float(
+        "NAV_WALL_HARD_CLEARANCE",
+        0.45,
+    )
     EARLY_WALL_ALIGNMENT_CLEARANCE_M = _env_float(
         "NAV_EARLY_WALL_ALIGNMENT_CLEARANCE",
         0.70,
@@ -1839,12 +1884,13 @@ class LocalPlanner:
                 converging = (
                     side * heading <= -self.EARLY_WALL_CONVERGENCE_RAD
                 )
-                too_close = clearance < self.SINGLE_WALL_TARGET_CLEARANCE_M
+                inside_target = clearance < self.SINGLE_WALL_TARGET_CLEARANCE_M
+                hard_too_close = clearance < self.SINGLE_WALL_HARD_CLEARANCE_M
                 if (
                     not align_only
                     and clearance <= self.EARLY_WALL_ALIGNMENT_CLEARANCE_M
-                    and (converging or too_close)
-                    and (not route_heading_authoritative or too_close)
+                    and (converging or inside_target)
+                    and (not route_heading_authoritative or hard_too_close)
                 ):
                     # Route cross-track error can be wrong when localization has
                     # drifted. A repeatedly fitted wall that is visibly converging
@@ -1857,7 +1903,7 @@ class LocalPlanner:
                             self.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
                         )
                     )
-                    if too_close:
+                    if hard_too_close:
                         desired_yaw += float(
                             np.clip(0.50 * lateral_error, -0.04, 0.04)
                         )
@@ -2790,6 +2836,10 @@ class NavCore:
         "NAV_PIVOT_GRID_INFLATION_M",
         0.15,
     )
+    PIVOT_CLEARANCE_ESCAPE_MAX_ANGLE_RAD: float = _env_float(
+        "NAV_PIVOT_CLEARANCE_ESCAPE_MAX_ANGLE_RAD",
+        math.radians(25.0),
+    )
     FORWARD_HAZARD_CONE_RAD: float = _env_float(
         "NAV_FORWARD_HAZARD_CONE_RAD",
         math.radians(20.0),
@@ -3040,6 +3090,8 @@ class NavCore:
         self._arrival_map_consistency_readings = 0
         self._last_stall_scan_direction: Optional[float] = None
         self._pivot_clearance_escape_active = False
+        self._pivot_clearance_escape_direction = 0
+        self._pivot_clearance_escape_start_yaw: Optional[float] = None
         self._metric_route_recapture_active = False
         self._close_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
@@ -3208,7 +3260,7 @@ class NavCore:
         self._obstacle_grid_unavailable_since = None
         self._obstacle_grid_unavailable_notified = False
         self._last_stall_scan_direction = None
-        self._pivot_clearance_escape_active = False
+        self._reset_pivot_clearance_escape()
         self._metric_route_recapture_active = False
         self._route_progress_waypoint_name = None
         self._route_progress_best_distance = float("inf")
@@ -5648,15 +5700,58 @@ class NavCore:
                 safety_dist = nearest
                 safety_bearing = nearest_bearing
         pivot_escape_allowed = False
+        pivot_recovery_required = False
         if pivot_only:
-            cmd, pivot_escape_allowed = self._prepare_close_pivot(
+            (
+                cmd,
+                pivot_escape_allowed,
+                pivot_recovery_required,
+            ) = self._prepare_close_pivot(
                 cmd,
                 raw_grid if raw_grid is not None else grid,
                 safety_dist,
                 safety_bearing,
+                pose.yaw,
             )
-        else:
-            self._pivot_clearance_escape_active = False
+        elif self._pivot_clearance_escape_active:
+            # The route planner stopped requesting a pivot before the bounded
+            # clearance escape completed.  Do not translate on the stale route
+            # from this new heading; reposition and replan first.
+            self._reset_pivot_clearance_escape()
+            self._local_planner.reset_navigation_state()
+            cmd = VelocityCommand()
+            pivot_recovery_required = True
+
+        if pivot_recovery_required:
+            self._ensure_go2()
+            if self._go2 and getattr(self._go2, "available", False):
+                try:
+                    self._go2.stop_move()
+                except Exception:
+                    logger.debug(
+                        "NavCore: stop failed before bounded pivot recovery",
+                        exc_info=True,
+                    )
+            logger.warning(
+                "NavCore: bounded close-pivot escape completed; changing "
+                "position and replanning instead of continuing a long turn"
+            )
+            recovery_grid = raw_grid if raw_grid is not None else grid
+            if self._recover_from_stall(
+                goal,
+                pose,
+                recovery_grid,
+                allow_locomotion_recovery=False,
+            ):
+                return
+            self._abort_active_navigation(
+                goal,
+                "bounded close-pivot recovery failed",
+                f"I stopped before reaching {self._goal_display_name(goal)} "
+                "because I could not find a safe position from which to reroute.",
+                state=NavState.E_STOP,
+            )
+            return
         seconds_since_progress = (
             now - self._last_progress_time
             if pivot_only
@@ -5913,17 +6008,86 @@ class NavCore:
         grid: Optional[ObstacleGrid],
         clearance_m: float,
         obstacle_bearing: float,
-    ) -> Tuple[VelocityCommand, bool]:
-        """Turn close geometry out of the pivot sweep instead of abandoning the route."""
+        current_yaw: float,
+    ) -> Tuple[VelocityCommand, bool, bool]:
+        """Make one bounded clearance turn, then request repositioning/replanning."""
+        escape_active = getattr(self, "_pivot_clearance_escape_active", False)
         if (
             grid is None
             or not math.isfinite(clearance_m)
-            or clearance_m > self.PIVOT_HARD_STOP_DISTANCE_M
             or clearance_m <= self.PIVOT_EMERGENCY_STOP_DISTANCE_M
             or abs(cmd.vyaw) <= 1e-3
+            or not math.isfinite(current_yaw)
         ):
-            self._pivot_clearance_escape_active = False
-            return cmd, False
+            self._reset_pivot_clearance_escape()
+            return cmd, False, False
+
+        if escape_active:
+            start_yaw = getattr(
+                self,
+                "_pivot_clearance_escape_start_yaw",
+                current_yaw,
+            )
+            if start_yaw is None:
+                start_yaw = current_yaw
+            turned = abs(
+                math.atan2(
+                    math.sin(current_yaw - start_yaw),
+                    math.cos(current_yaw - start_yaw),
+                )
+            )
+            if (
+                clearance_m > self.PIVOT_HARD_STOP_DISTANCE_M
+                or turned >= self.PIVOT_CLEARANCE_ESCAPE_MAX_ANGLE_RAD
+            ):
+                logger.warning(
+                    "NavCore: ending close-pivot escape after %.0fdeg; "
+                    "clearance=%s",
+                    math.degrees(turned),
+                    (
+                        f"{clearance_m:.2f}m"
+                        if math.isfinite(clearance_m)
+                        else "unknown"
+                    ),
+                )
+                self._reset_pivot_clearance_escape()
+                self._local_planner.reset_navigation_state()
+                return VelocityCommand(), False, True
+
+            desired_direction = getattr(
+                self,
+                "_pivot_clearance_escape_direction",
+                0,
+            )
+            if desired_direction not in {-1, 1}:
+                self._reset_pivot_clearance_escape()
+                self._local_planner.reset_navigation_state()
+                return VelocityCommand(), False, True
+            escape_clearance = self._local_planner.pivot_side_clearance(
+                grid,
+                desired_direction,
+            )
+            if escape_clearance < self.PIVOT_HARD_STOP_DISTANCE_M:
+                logger.warning(
+                    "NavCore: ending close-pivot escape because its selected "
+                    "side narrowed to %.2fm",
+                    escape_clearance,
+                )
+                self._reset_pivot_clearance_escape()
+                self._local_planner.reset_navigation_state()
+                return VelocityCommand(), False, True
+            self._local_planner.force_pivot_direction(desired_direction)
+            return (
+                replace(
+                    cmd,
+                    vyaw=math.copysign(abs(cmd.vyaw), desired_direction),
+                ),
+                True,
+                False,
+            )
+
+        if clearance_m > self.PIVOT_HARD_STOP_DISTANCE_M:
+            return cmd, False, False
 
         current_direction = 1.0 if cmd.vyaw > 0.0 else -1.0
         if (
@@ -5945,31 +6109,38 @@ class NavCore:
             desired_direction,
         )
         if escape_clearance < self.PIVOT_HARD_STOP_DISTANCE_M:
-            self._pivot_clearance_escape_active = False
-            return cmd, False
+            self._reset_pivot_clearance_escape()
+            return cmd, False, False
 
         redirected = desired_direction != current_direction
-        if redirected:
-            self._local_planner.force_pivot_direction(desired_direction)
-            cmd = replace(
-                cmd,
-                vyaw=math.copysign(abs(cmd.vyaw), desired_direction),
-            )
-        if redirected or not self._pivot_clearance_escape_active:
-            logger.warning(
-                "NavCore: %s pivot %s from close geometry at %.2fm; "
-                "selected-side clearance=%s",
-                "redirecting" if redirected else "continuing",
-                "left" if desired_direction > 0.0 else "right",
-                clearance_m,
-                (
-                    f"{escape_clearance:.2f}m"
-                    if math.isfinite(escape_clearance)
-                    else "clear"
-                ),
-            )
+        self._local_planner.force_pivot_direction(desired_direction)
+        cmd = replace(
+            cmd,
+            vyaw=math.copysign(abs(cmd.vyaw), desired_direction),
+        )
+        logger.warning(
+            "NavCore: %s pivot %s from close geometry at %.2fm; "
+            "selected-side clearance=%s and escape is capped at %.0fdeg",
+            "redirecting" if redirected else "continuing",
+            "left" if desired_direction > 0.0 else "right",
+            clearance_m,
+            (
+                f"{escape_clearance:.2f}m"
+                if math.isfinite(escape_clearance)
+                else "clear"
+            ),
+            math.degrees(self.PIVOT_CLEARANCE_ESCAPE_MAX_ANGLE_RAD),
+        )
         self._pivot_clearance_escape_active = True
-        return cmd, True
+        self._pivot_clearance_escape_direction = int(desired_direction)
+        self._pivot_clearance_escape_start_yaw = current_yaw
+        return cmd, True, False
+
+    def _reset_pivot_clearance_escape(self) -> None:
+        """Forget a temporary safety-selected pivot direction."""
+        self._pivot_clearance_escape_active = False
+        self._pivot_clearance_escape_direction = 0
+        self._pivot_clearance_escape_start_yaw = None
 
     def _robust_pivot_clearance(
         self,

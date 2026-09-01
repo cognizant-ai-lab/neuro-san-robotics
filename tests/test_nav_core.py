@@ -525,6 +525,27 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertGreater(corrected.vyaw, 0.0)
 
+    def test_route_recapture_is_not_reversed_by_borderline_wall_clearance(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            lateral = 0.54
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.28, vy=0.0, vyaw=0.08),
+            grid,
+            correction_limit=0.02,
+            route_heading_authoritative=True,
+        )
+
+        # The failing run repeatedly turned a +0.08 route-recapture command
+        # into -0.02 to -0.06 at 0.52-0.55m from a parallel side wall.
+        self.assertGreater(corrected.vyaw, 0.0)
+        self.assertGreaterEqual(corrected.vyaw, 0.06)
+
     def test_open_space_centering_cannot_initiate_pivot_away_from_route(self):
         planner = LocalPlanner(max_yaw_rate=0.08, pivot_yaw_rate=0.5)
 
@@ -1408,6 +1429,22 @@ class TestGlobalPlanner(unittest.TestCase):
 
         self.assertIsNotNone(waypoint)
         self.assertEqual(waypoint.name, "__metric_002__")
+
+    def test_straight_metric_wide_pass_rejects_heading_away_from_route(self):
+        planner = GlobalPlanner(_create_test_map())
+        planner.install_metric_path_points(
+            RobotPose(0.0, 0.0, 0.0),
+            "C",
+            [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (4.0, 0.0)],
+        )
+
+        waypoint = planner.get_next_waypoint(
+            RobotPose(1.10, 0.62, math.radians(20.0)),
+            tolerance_m=0.45,
+        )
+
+        self.assertIsNotNone(waypoint)
+        self.assertEqual(waypoint.name, "__metric_001__")
 
     def test_metric_corner_keeps_tight_pass_tolerance(self):
         planner = GlobalPlanner(_create_test_map())
@@ -4327,23 +4364,117 @@ class TestNavCoreStatus(unittest.TestCase):
         nav = NavCore.__new__(NavCore)
         nav.PIVOT_HARD_STOP_DISTANCE_M = 0.40
         nav.PIVOT_EMERGENCY_STOP_DISTANCE_M = 0.10
+        nav.PIVOT_CLEARANCE_ESCAPE_MAX_ANGLE_RAD = math.radians(25.0)
         nav._local_planner = LocalPlanner(pivot_yaw_rate=0.5)
         nav._pivot_clearance_escape_active = False
+        nav._pivot_clearance_escape_direction = 0
+        nav._pivot_clearance_escape_start_yaw = None
         grid = _grid_with_obstacle_at_bearing(
             distance_m=0.18,
             bearing_rad=math.radians(-20.0),
         )
 
-        redirected, allowed = nav._prepare_close_pivot(
+        redirected, allowed, recovery_required = nav._prepare_close_pivot(
             VelocityCommand(vyaw=-0.5),
             grid,
             clearance_m=0.18,
             obstacle_bearing=math.radians(-20.0),
+            current_yaw=math.radians(-74.0),
         )
 
         self.assertTrue(allowed)
+        self.assertFalse(recovery_required)
         self.assertGreater(redirected.vyaw, 0.0)
         self.assertEqual(nav._local_planner._pivot_direction, 1)
+
+    def test_close_pivot_escape_cannot_become_a_long_rotation(self):
+        nav = NavCore.__new__(NavCore)
+        nav.PIVOT_HARD_STOP_DISTANCE_M = 0.40
+        nav.PIVOT_EMERGENCY_STOP_DISTANCE_M = 0.10
+        nav.PIVOT_CLEARANCE_ESCAPE_MAX_ANGLE_RAD = math.radians(25.0)
+        nav._local_planner = LocalPlanner(pivot_yaw_rate=0.5)
+        nav._pivot_clearance_escape_active = False
+        nav._pivot_clearance_escape_direction = 0
+        nav._pivot_clearance_escape_start_yaw = None
+        grid = _grid_with_obstacle_at_bearing(
+            distance_m=0.18,
+            bearing_rad=math.radians(20.0),
+        )
+
+        first, allowed, recovery_required = nav._prepare_close_pivot(
+            VelocityCommand(vyaw=0.5),
+            grid,
+            clearance_m=0.39,
+            obstacle_bearing=math.radians(20.0),
+            current_yaw=math.radians(-74.0),
+        )
+        held, held_allowed, held_recovery = nav._prepare_close_pivot(
+            VelocityCommand(vyaw=0.5),
+            grid,
+            clearance_m=0.39,
+            # Sensor-side classification changed, but the escape must not.
+            obstacle_bearing=math.radians(-20.0),
+            current_yaw=math.radians(-84.0),
+        )
+        stopped, stopped_allowed, stopped_recovery = nav._prepare_close_pivot(
+            VelocityCommand(vyaw=0.5),
+            grid,
+            clearance_m=0.39,
+            obstacle_bearing=math.radians(-20.0),
+            current_yaw=math.radians(-101.0),
+        )
+
+        self.assertLess(first.vyaw, 0.0)
+        self.assertTrue(allowed)
+        self.assertFalse(recovery_required)
+        self.assertLess(held.vyaw, 0.0)
+        self.assertTrue(held_allowed)
+        self.assertFalse(held_recovery)
+        self.assertEqual(stopped, VelocityCommand())
+        self.assertFalse(stopped_allowed)
+        self.assertTrue(stopped_recovery)
+        self.assertFalse(nav._pivot_clearance_escape_active)
+        self.assertEqual(nav._local_planner._pivot_direction, 0)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_replans_before_translating_after_pivot_escape(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            nav._depth_processor = MagicMock()
+            nav._depth_processor.get_obstacle_grid.return_value = _empty_grid()
+            nav._local_planner = MagicMock()
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(
+                vx=0.20,
+            )
+            nav._recover_from_stall = MagicMock(return_value=True)
+            nav._pivot_clearance_escape_active = True
+            nav._pivot_clearance_escape_direction = -1
+            nav._pivot_clearance_escape_start_yaw = 0.0
+            goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            fake_go2.move.assert_not_called()
+            fake_go2.stop_move.assert_called()
+            nav._recover_from_stall.assert_called_once()
+            self.assertFalse(
+                nav._recover_from_stall.call_args.kwargs[
+                    "allow_locomotion_recovery"
+                ]
+            )
+            nav.shutdown()
+        finally:
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
 
     def test_measured_translation_verifies_recovery_and_resets_watchdog(self):
         nav = NavCore.__new__(NavCore)
