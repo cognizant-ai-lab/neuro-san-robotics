@@ -36,7 +36,7 @@ from flask_socketio import SocketIO
 
 from apps.conscious_assistant.agent_runtime import AgentRuntime
 from scripts import setup_tls_certs as tls_certs
-from apps.conscious_assistant.realtime_transcription import create_realtime_client_secret
+from apps.conscious_assistant.realtime_transcription import request_realtime_session
 from apps.conscious_assistant.robot_identity import robot_name
 from apps.conscious_assistant.scene_observer import SceneObserver
 from coded_tools.unigo2.agent_events import dispatch_agent_event
@@ -692,16 +692,19 @@ def transcribe_audio():
 
             return jsonify({"text": transcript.text})
 
-        except Exception as e:
-            print(f"OpenAI API error: {e}")
-            return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
+        except Exception:
+            # Keep the traceback on the robot's own log. The browser is a
+            # public surface on the robot's network, so it only learns that
+            # the call failed, never which host, path or key was involved.
+            logging.exception("Whisper transcription request failed")
+            return jsonify({"error": "Transcription failed"}), 500
 
     finally:
         if temp_file and os.path.exists(temp_file.name):
             try:
                 os.unlink(temp_file.name)
-            except Exception as e:
-                print(f"Failed to delete temp file: {e}")
+            except OSError:
+                logging.exception("Failed to delete transcription temp file")
 
 
 @app.route("/api/realtime/transcription-token", methods=["POST"])
@@ -718,28 +721,28 @@ def realtime_transcription_token():
         "gpt-4o-transcribe",
     )
     try:
-        status, content_type, response_body, request_id = create_realtime_client_secret(
-            openai_api_key,
-            model,
-        )
+        session = request_realtime_session(openai_api_key, model)
     except OSError:
         logging.exception("Could not reach realtime transcription service")
         return jsonify({"error": "Realtime transcription service is unavailable"}), 502
-    if status >= 400:
+
+    # Only transport metadata is logged. session.payload carries the ephemeral
+    # credential on success, so it goes to the browser and nowhere else; use
+    # the request id below to look a failure up in OpenAI's own logs.
+    if session.failed:
         logging.error(
-            "Realtime transcription token creation failed (%d, request_id=%s): %s",
-            status,
-            request_id or "unavailable",
-            response_body.decode("utf-8", errors="replace")[:1000],
+            "Realtime transcription session request failed (status=%d, request_id=%s)",
+            session.status,
+            session.request_id or "unavailable",
         )
-        return jsonify({"error": "Could not start realtime transcription"}), status
+        return jsonify({"error": "Could not start realtime transcription"}), session.status
 
     logging.info(
-        "Realtime transcription token created (request_id=%s)",
-        request_id or "unavailable",
+        "Realtime transcription session created (request_id=%s)",
+        session.request_id or "unavailable",
     )
-    return response_body, status, {
-        "Content-Type": content_type or "application/json",
+    return session.payload, session.status, {
+        "Content-Type": session.content_type or "application/json",
         "Cache-Control": "no-store",
     }
 

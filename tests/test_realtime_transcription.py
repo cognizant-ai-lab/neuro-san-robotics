@@ -1,8 +1,10 @@
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+from apps.conscious_assistant import interface_flask
 from apps.conscious_assistant import realtime_transcription
 from coded_tools.unigo2 import agent_events
 
@@ -21,7 +23,7 @@ class RealtimeTranscriptionTests(unittest.TestCase):
         self.assertEqual(audio_input["noise_reduction"]["type"], "far_field")
         self.assertEqual(audio_input["turn_detection"]["type"], "server_vad")
 
-    def test_client_secret_request_sends_transcription_session_as_json(self):
+    def test_session_request_sends_transcription_session_as_json(self):
         response = MagicMock()
         response.status = 201
         response.headers.get_content_type.return_value = "application/json"
@@ -31,15 +33,16 @@ class RealtimeTranscriptionTests(unittest.TestCase):
         context.__enter__.return_value = response
 
         with patch.object(realtime_transcription, "urlopen", return_value=context) as open_url:
-            result = realtime_transcription.create_realtime_client_secret(
+            result = realtime_transcription.request_realtime_session(
                 "secret-key",
                 "test-model",
             )
 
-        self.assertEqual(
-            result,
-            (201, "application/json", b'{"value":"ephemeral-key"}', "req_test"),
-        )
+        self.assertEqual(result.status, 201)
+        self.assertEqual(result.content_type, "application/json")
+        self.assertEqual(result.payload, b'{"value":"ephemeral-key"}')
+        self.assertEqual(result.request_id, "req_test")
+        self.assertFalse(result.failed)
         upstream_request = open_url.call_args.args[0]
         self.assertEqual(upstream_request.get_header("Authorization"), "Bearer secret-key")
         self.assertEqual(upstream_request.get_header("Content-type"), "application/json")
@@ -47,19 +50,23 @@ class RealtimeTranscriptionTests(unittest.TestCase):
         self.assertIn(b'"model": "test-model"', upstream_request.data)
         self.assertNotIn(b"secret-key", upstream_request.data)
 
-    def test_client_secret_retries_a_gateway_timeout_once(self):
-        timeout = (504, "text/plain", b"error code: 504", "req_timeout")
-        success = (200, "application/json", b'{"value":"key"}', "req_success")
+    def test_session_request_retries_a_gateway_timeout_once(self):
+        timeout = realtime_transcription.RealtimeSessionResponse(
+            504, "text/plain", b"error code: 504", "req_timeout",
+        )
+        success = realtime_transcription.RealtimeSessionResponse(
+            200, "application/json", b'{"value":"key"}', "req_success",
+        )
 
         with (
             patch.object(
                 realtime_transcription,
-                "_send_client_secret_request",
+                "_post_session_request",
                 side_effect=[timeout, success],
             ) as send,
             patch.object(realtime_transcription.time, "sleep") as sleep,
         ):
-            result = realtime_transcription.create_realtime_client_secret(
+            result = realtime_transcription.request_realtime_session(
                 "secret-key",
                 "test-model",
             )
@@ -67,6 +74,60 @@ class RealtimeTranscriptionTests(unittest.TestCase):
         self.assertEqual(result, success)
         self.assertEqual(send.call_count, 2)
         sleep.assert_called_once_with(0.5)
+
+    def test_failed_and_transient_classify_upstream_statuses(self):
+        def response(status):
+            return realtime_transcription.RealtimeSessionResponse(
+                status, "application/json", b"{}", "req_test",
+            )
+
+        self.assertFalse(response(200).failed)
+        self.assertTrue(response(401).failed)
+        self.assertFalse(response(401).transient)
+        self.assertTrue(response(503).transient)
+
+    def test_token_route_keeps_an_upstream_error_body_out_of_the_log_and_response(self):
+        """A failure may report status and request id, never the upstream body."""
+        failure = realtime_transcription.RealtimeSessionResponse(
+            401,
+            "application/json",
+            b'{"error":{"message":"Incorrect API key sk-live-do-not-log"}}',
+            "req_denied",
+        )
+
+        with patch.object(interface_flask, "request_realtime_session", return_value=failure):
+            with self.assertLogs(level="ERROR") as captured:
+                with interface_flask.app.test_client() as client:
+                    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-live-do-not-log"}):
+                        response = client.post("/api/realtime/transcription-token")
+
+        logged = "\n".join(captured.output)
+        self.assertNotIn("sk-live-do-not-log", logged)
+        self.assertNotIn("Incorrect API key", logged)
+        self.assertIn("req_denied", logged)
+        self.assertIn("401", logged)
+
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn(b"sk-live-do-not-log", response.data)
+        self.assertEqual(response.get_json(), {"error": "Could not start realtime transcription"})
+
+    def test_token_route_forwards_the_credential_to_the_browser_only(self):
+        """The happy path must still hand the browser its ephemeral key verbatim."""
+        success = realtime_transcription.RealtimeSessionResponse(
+            200, "application/json", b'{"value":"ek_browser_token"}', "req_ok",
+        )
+
+        with patch.object(interface_flask, "request_realtime_session", return_value=success):
+            with self.assertLogs(level="INFO") as captured:
+                with interface_flask.app.test_client() as client:
+                    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-live-do-not-log"}):
+                        response = client.post("/api/realtime/transcription-token")
+
+        self.assertNotIn("ek_browser_token", "\n".join(captured.output))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b'{"value":"ek_browser_token"}')
+        self.assertEqual(response.headers["Content-Type"], "application/json")
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
 
     def test_agent_output_carries_promoted_ambient_speech(self):
         with patch.object(agent_events, "_post_json") as post:
