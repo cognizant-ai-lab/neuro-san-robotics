@@ -136,10 +136,6 @@ class DepthProcessorConfig:
     # Robot half-width plus lateral clearance.  The old 0.12m center ray was
     # narrower than the Go2 itself and could miss a slanted wall until contact.
     path_corridor_half_width: float = 0.27
-    # The Go2's right legs need a little more room than the nominal symmetric
-    # footprint.  Keep this robot-relative so it protects the same physical
-    # side while travelling in either direction.
-    right_side_clearance_margin: float = 0.05
     path_obstacle_min_points: int = 6
 
     # Depth camera parameters
@@ -207,10 +203,6 @@ class DepthProcessor:
             camera_mount_height=_env_float("NAV_CAMERA_MOUNT_HEIGHT", 0.30),
             robot_half_width=_env_float("NAV_ROBOT_HALF_WIDTH", 0.15),
             path_corridor_half_width=_env_float("NAV_PATH_CORRIDOR_HALF_WIDTH", 0.27),
-            right_side_clearance_margin=_env_float(
-                "NAV_RIGHT_SIDE_CLEARANCE_MARGIN",
-                0.05,
-            ),
             path_obstacle_min_points=_env_int("NAV_PATH_OBSTACLE_MIN_POINTS", 6),
             process_width=_env_int("NAV_DEPTH_PROCESS_WIDTH", 640),
             process_height=_env_int("NAV_DEPTH_PROCESS_HEIGHT", 480),
@@ -608,21 +600,7 @@ class DepthProcessor:
             nearest_dist = float(distances[min_idx])
             nearest_bearing = float(math.atan2(obs_y[min_idx], obs_x[min_idx]))
 
-            # Robot-frame +y is left and -y is right.  Extend only the right
-            # edge of the protected path so the vulnerable right legs do not
-            # brush furniture; the left edge and narrow-route behavior remain
-            # unchanged.
-            in_path = (
-                (obs_x > 0.0)
-                & (obs_y <= cfg.path_corridor_half_width)
-                & (
-                    obs_y
-                    >= -(
-                        cfg.path_corridor_half_width
-                        + cfg.right_side_clearance_margin
-                    )
-                )
-            )
+            in_path = (obs_x > 0.0) & (np.abs(obs_y) <= cfg.path_corridor_half_width)
             if np.any(in_path):
                 path_x = obs_x[in_path]
                 path_y = obs_y[in_path]
