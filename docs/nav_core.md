@@ -190,6 +190,7 @@ Commands the robot to navigate.
 | `move_until_obstacle` | `distance`: stop distance in meters | "Move forward until something is 0.75 meters ahead" |
 | `turn` | `target`: left/right/around, `distance`: degrees | "Turn left 90 degrees" |
 | `stop` | — | "Stop moving" |
+| `resume` / `continue` | — | Replan and continue an interrupted mapped route from the measured pose |
 | `status` | — | State, position, heading, goal, and obstacle summary |
 | `destinations` | — | List of mapped locations |
 | `obstacles` | — | Current obstacle-sensor summary |
@@ -243,7 +244,10 @@ Every velocity command passes through the SafetyMonitor before reaching the moto
 | No progress for 10 seconds | Stop, report stuck |
 | All occupied (surrounded) | Stop |
 
-To resume after e-stop: `nav.resume()` or send a new navigation command.
+To resume after an e-stop or terminal stall, call `nav.resume()`. For a suspended
+mapped route, this keeps the latest measured pose, replans to the interrupted
+destination, and restarts navigation. The agent-facing equivalent is
+`nav_planner` command `resume` (or `continue`).
 
 ---
 

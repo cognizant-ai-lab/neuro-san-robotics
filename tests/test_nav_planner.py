@@ -68,6 +68,23 @@ class NavPlannerToolTests(unittest.IsolatedAsyncioTestCase):
         nav.stop.assert_called_once()
         self.assertIn("Current mapped location: unverified", result)
 
+    async def test_continue_resumes_interrupted_navigation_instead_of_stepping(self):
+        nav = MagicMock()
+        nav.resume.return_value = True
+        nav.get_status_summary.return_value = (
+            "Navigation state: navigating. Destination: charging_station."
+        )
+        tool = NavPlannerTool()
+
+        with (
+            patch("coded_tools.unigo2.nav_core.NavCore.get_instance", return_value=nav),
+            patch("coded_tools.unigo2.nav_core.NavCore.set_status_callback"),
+        ):
+            result = await tool.async_invoke({"command": "continue"}, {})
+
+        nav.resume.assert_called_once_with()
+        self.assertIn("Resumed the interrupted navigation route", result)
+
 
 if __name__ == "__main__":
     unittest.main()

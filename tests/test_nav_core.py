@@ -439,6 +439,24 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertFalse(planner._should_pivot(math.radians(5.0), 2.0))
         self.assertLess(planner._pivot_yaw_rate(math.radians(-40.0)), 0.0)
 
+    def test_half_turn_chooses_open_side_instead_of_normalized_angle_sign(self):
+        planner = LocalPlanner(pivot_yaw_rate=0.5)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.0, 20):
+            lateral = -0.30
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=-math.pi,
+            goal_distance=1.0,
+        )
+
+        self.assertAlmostEqual(cmd.vx, 0.0)
+        self.assertGreater(cmd.vyaw, 0.0)
+
     def test_open_space_centering_cannot_initiate_pivot_away_from_route(self):
         planner = LocalPlanner(max_yaw_rate=0.08, pivot_yaw_rate=0.5)
 
@@ -866,6 +884,39 @@ class TestSafetyMonitor(unittest.TestCase):
         self.assertIsNone(event)
         self.assertAlmostEqual(filtered.vx, 0.0)
         self.assertAlmostEqual(filtered.vyaw, 0.5)
+
+    def test_allows_close_pivot_explicitly_directed_away_from_geometry(self):
+        safety = SafetyMonitor(
+            safety_distance=0.4,
+            pivot_hard_stop_distance=0.4,
+            pivot_emergency_stop_distance=0.10,
+        )
+
+        filtered, event = safety.filter_command(
+            VelocityCommand(vyaw=0.5),
+            nearest_obstacle_m=0.18,
+            nearest_obstacle_bearing=math.radians(-20.0),
+            pivot_escape_allowed=True,
+        )
+
+        self.assertIsNone(event)
+        self.assertAlmostEqual(filtered.vyaw, 0.5)
+
+    def test_extremely_close_geometry_still_blocks_pivot_escape(self):
+        safety = SafetyMonitor(
+            safety_distance=0.4,
+            pivot_hard_stop_distance=0.4,
+            pivot_emergency_stop_distance=0.10,
+        )
+
+        filtered, event = safety.filter_command(
+            VelocityCommand(vyaw=0.5),
+            nearest_obstacle_m=0.08,
+            pivot_escape_allowed=True,
+        )
+
+        self.assertEqual(event, "e_stop:obstacle_too_close")
+        self.assertAlmostEqual(filtered.vyaw, 0.0)
 
     def test_allows_translation_past_close_side_obstacle(self):
         safety = SafetyMonitor(safety_distance=0.4, pivot_hard_stop_distance=0.2)
@@ -2082,6 +2133,7 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.SAFETY_DISTANCE_M, 0.20)
         self.assertAlmostEqual(NavCore.AVOIDANCE_DISTANCE_M, 0.75)
         self.assertAlmostEqual(NavCore.PIVOT_HARD_STOP_DISTANCE_M, 0.40)
+        self.assertAlmostEqual(NavCore.PIVOT_EMERGENCY_STOP_DISTANCE_M, 0.10)
         self.assertAlmostEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_S, 0.7)
         self.assertEqual(NavCore.CLOSE_OBSTACLE_CONFIRM_READINGS, 6)
         self.assertAlmostEqual(NavCore.PATH_OBSTACLE_CONFIRM_S, 0.3)
@@ -2106,6 +2158,64 @@ class TestNavCoreStatus(unittest.TestCase):
             NavCore.STALL_SCAN_MAX_ANGLE_RAD,
             math.radians(50.0),
         )
+
+    def test_terminal_semantic_failure_preserves_destination_for_resume(self):
+        nav = NavCore.__new__(NavCore)
+        nav._state = NavState.NAVIGATING
+        nav._goal = None
+        nav._suspended_goal = None
+        nav._last_stop_reason = None
+        nav._state_lock = threading.Lock()
+        nav._go2 = MagicMock(available=True)
+        nav._ensure_go2 = MagicMock()
+        nav._clear_planner_and_obstacle_state = MagicMock()
+        nav._notify_status_change = MagicMock()
+        nav._stop_depth_when_idle = MagicMock()
+        goal = NavGoal(
+            goal_type="semantic",
+            x=2.85,
+            y=13.57,
+            label="charging_station",
+        )
+
+        nav._abort_active_navigation(
+            goal,
+            "E-STOP: path obstacle at 0.18m",
+            "I stopped before reaching the charging station.",
+            state=NavState.E_STOP,
+        )
+
+        self.assertEqual(nav.state, NavState.E_STOP)
+        self.assertIsNone(nav._goal)
+        self.assertEqual(nav._suspended_goal.label, "charging_station")
+
+    def test_resume_replans_suspended_route_from_latest_measured_pose(self):
+        nav = NavCore.__new__(NavCore)
+        nav._state = NavState.E_STOP
+        nav._goal = None
+        nav._suspended_goal = NavGoal(
+            goal_type="semantic",
+            x=2.85,
+            y=13.57,
+            label="charging_station",
+        )
+        nav._last_stop_reason = "E-STOP"
+        nav._state_lock = threading.Lock()
+        nav._odometry = MagicMock()
+        nav._odometry.get_pose.return_value = RobotPose(
+            7.10,
+            6.20,
+            math.radians(90.0),
+        )
+        nav.navigate_to = MagicMock(return_value=True)
+        nav._notify_status_change = MagicMock()
+
+        resumed = nav.resume()
+
+        self.assertTrue(resumed)
+        nav.navigate_to.assert_called_once_with("charging_station")
+        self.assertIsNone(nav._suspended_goal)
+        nav._notify_status_change.assert_called_once()
 
     def test_stale_obstacle_grid_is_rejected(self):
         core = NavCore.__new__(NavCore)
@@ -2940,6 +3050,43 @@ class TestNavCoreStatus(unittest.TestCase):
             nav.shutdown()
         finally:
             NavCore.set_status_callback(None)
+            NavCore._instance = None
+            os.environ.pop("NAV_SIMULATION_MODE", None)
+
+    @patch("coded_tools.unigo2.nav_core._get_go2_macros")
+    def test_nav_cycle_redirects_pivot_away_from_close_corner(self, mock_go2):
+        fake_go2 = MagicMock(available=True)
+        mock_go2.return_value = fake_go2
+
+        NavCore._instance = None
+        os.environ["NAV_SIMULATION_MODE"] = "1"
+        try:
+            nav = NavCore.get_instance()
+            nav._go2 = fake_go2
+            close_right = _grid_with_obstacle_at_bearing(
+                distance_m=0.18,
+                bearing_rad=math.radians(-20.0),
+            )
+            fake_depth = MagicMock()
+            fake_depth.get_obstacle_grid.return_value = close_right
+            nav._depth_processor = fake_depth
+            nav._robust_pivot_clearance = MagicMock(
+                return_value=(0.18, math.radians(-20.0))
+            )
+            goal = NavGoal(goal_type="relative", x=-2.0, y=0.0)
+            with nav._state_lock:
+                nav._state = NavState.NAVIGATING
+                nav._goal = goal
+                nav._reset_progress_tracker()
+
+            nav._nav_cycle(NavState.NAVIGATING, goal)
+
+            self.assertEqual(nav.state, NavState.NAVIGATING)
+            move = fake_go2.move.call_args.kwargs
+            self.assertAlmostEqual(move["vx"], 0.0)
+            self.assertGreater(move["vyaw"], 0.0)
+        finally:
+            NavCore._instance.shutdown()
             NavCore._instance = None
             os.environ.pop("NAV_SIMULATION_MODE", None)
 
@@ -3969,6 +4116,28 @@ class TestNavCoreStatus(unittest.TestCase):
 
         self.assertGreater(clearance, 0.40)
         self.assertLess(abs(bearing), math.radians(20.0))
+
+    def test_close_pivot_is_redirected_away_from_observed_corner(self):
+        nav = NavCore.__new__(NavCore)
+        nav.PIVOT_HARD_STOP_DISTANCE_M = 0.40
+        nav.PIVOT_EMERGENCY_STOP_DISTANCE_M = 0.10
+        nav._local_planner = LocalPlanner(pivot_yaw_rate=0.5)
+        nav._pivot_clearance_escape_active = False
+        grid = _grid_with_obstacle_at_bearing(
+            distance_m=0.18,
+            bearing_rad=math.radians(-20.0),
+        )
+
+        redirected, allowed = nav._prepare_close_pivot(
+            VelocityCommand(vyaw=-0.5),
+            grid,
+            clearance_m=0.18,
+            obstacle_bearing=math.radians(-20.0),
+        )
+
+        self.assertTrue(allowed)
+        self.assertGreater(redirected.vyaw, 0.0)
+        self.assertEqual(nav._local_planner._pivot_direction, 1)
 
     def test_measured_translation_verifies_recovery_and_resets_watchdog(self):
         nav = NavCore.__new__(NavCore)

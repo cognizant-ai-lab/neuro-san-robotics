@@ -223,7 +223,8 @@ specific robot really needs a temporary override.
 | `NAV_ODOMETRY_YAW_RATE_RATIO` | `1.00` | Fallback yaw scale used while SDK odometry is stale or unconfirmed. |
 | `NAV_SAFETY_DISTANCE` | `0.20` | Confirmed safety stop threshold inside the swept path corridor. |
 | `NAV_AVOIDANCE_DISTANCE` | `0.75` | Slowdown and local steering begin for supported path obstacles closer than 0.75 m. |
-| `NAV_PIVOT_HARD_STOP_DISTANCE` | `0.00` | Lets close path obstacles use the confirmation window before aborting. |
+| `NAV_PIVOT_HARD_STOP_DISTANCE` | `0.40` | Redirects a pivot away from supported geometry inside this range; blocks when no clear turning side exists. |
+| `NAV_PIVOT_EMERGENCY_STOP_DISTANCE` | `0.10` | Always blocks a pivot at this clearance, even when the commanded turn points away. |
 | `NAV_CLOSE_OBSTACLE_CONFIRM_S` | `0.7` | Close path obstacles must persist for at least 0.7 seconds before aborting. |
 | `NAV_CLOSE_OBSTACLE_CONFIRM_READINGS` | `6` | Close path obstacles must also persist for at least 6 nav-loop readings. |
 | `NAV_CENTER_ONLY_CLOSE_CONFIRM_S` | `0.2` | A close center-depth reading absent from the obstacle grid must persist this long before it can abort navigation; the robot holds meanwhile. |

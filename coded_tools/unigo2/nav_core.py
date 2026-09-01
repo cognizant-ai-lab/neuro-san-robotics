@@ -1248,6 +1248,10 @@ class LocalPlanner:
         12,
     )
     STEERING_DEADBAND_RPS = _env_float("NAV_STEERING_DEADBAND_RPS", 0.015)
+    PIVOT_DIRECTION_TIE_RAD = math.radians(25.0)
+    PIVOT_SIDE_MIN_BEARING_RAD = math.radians(12.0)
+    PIVOT_SIDE_MAX_BEARING_RAD = math.radians(75.0)
+    PIVOT_SIDE_PREFERENCE_MARGIN_M = 0.05
 
     def __init__(
         self,
@@ -1372,7 +1376,55 @@ class LocalPlanner:
                 return True
         return False
 
-    def _should_pivot(self, heading_error: float, goal_distance: float) -> bool:
+    def pivot_side_clearance(
+        self,
+        obstacle_grid: Optional[ObstacleGrid],
+        direction: float,
+    ) -> float:
+        """Return supported clearance in the side swept by a pivot direction."""
+        if obstacle_grid is None:
+            return float("inf")
+        points = occupied_xy_points(obstacle_grid)
+        if points.size == 0:
+            return float("inf")
+        distances = np.hypot(points[:, 0], points[:, 1])
+        signed_bearings = np.arctan2(points[:, 1], points[:, 0]) * direction
+        selected = distances[
+            (signed_bearings >= self.PIVOT_SIDE_MIN_BEARING_RAD)
+            & (signed_bearings <= self.PIVOT_SIDE_MAX_BEARING_RAD)
+        ]
+        if selected.size == 0:
+            return float("inf")
+        return float(np.percentile(selected, 10.0))
+
+    def preferred_pivot_direction(
+        self,
+        obstacle_grid: Optional[ObstacleGrid],
+        fallback: float,
+    ) -> float:
+        """Choose the side with more visible turning clearance."""
+        fallback = 1.0 if fallback >= 0.0 else -1.0
+        left = self.pivot_side_clearance(obstacle_grid, 1.0)
+        right = self.pivot_side_clearance(obstacle_grid, -1.0)
+        if math.isinf(left) and math.isinf(right):
+            return fallback
+        if left >= right + self.PIVOT_SIDE_PREFERENCE_MARGIN_M:
+            return 1.0
+        if right >= left + self.PIVOT_SIDE_PREFERENCE_MARGIN_M:
+            return -1.0
+        return fallback
+
+    def force_pivot_direction(self, direction: float) -> None:
+        """Keep an active pivot moving in a safety-selected direction."""
+        self._pivoting = True
+        self._pivot_direction = 1 if direction >= 0.0 else -1
+
+    def _should_pivot(
+        self,
+        heading_error: float,
+        goal_distance: float,
+        obstacle_grid: Optional[ObstacleGrid] = None,
+    ) -> bool:
         """Use hysteresis so ordinary route corrections cannot oscillate in place."""
         if goal_distance <= 0.5:
             self._pivoting = False
@@ -1385,7 +1437,13 @@ class LocalPlanner:
                 self._pivot_direction = 0
         elif error >= self.PIVOT_ENTER_HEADING_ERROR_RAD:
             self._pivoting = True
-            self._pivot_direction = 1 if heading_error > 0.0 else -1
+            requested = 1.0 if heading_error > 0.0 else -1.0
+            if math.pi - error <= self.PIVOT_DIRECTION_TIE_RAD:
+                requested = self.preferred_pivot_direction(
+                    obstacle_grid,
+                    requested,
+                )
+            self._pivot_direction = 1 if requested > 0.0 else -1
         return self._pivoting
 
     def compute_velocity(
@@ -1423,6 +1481,7 @@ class LocalPlanner:
                 path_nearest,
                 slow_for_arrival=slow_for_arrival,
                 pivot_heading=mapped_heading,
+                obstacle_grid=obstacle_grid,
             )
 
         histogram = self._build_histogram(obstacle_grid)
@@ -1450,7 +1509,7 @@ class LocalPlanner:
         # Open-space centering is a small translating correction, not a reason
         # to turn away from the mapped route.  Only the actual waypoint bearing
         # may initiate or drive an in-place route pivot.
-        if self._should_pivot(mapped_heading, goal_distance):
+        if self._should_pivot(mapped_heading, goal_distance, obstacle_grid):
             vyaw = self._pivot_yaw_rate(mapped_heading)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
@@ -1584,10 +1643,11 @@ class LocalPlanner:
         *,
         slow_for_arrival: bool = True,
         pivot_heading: Optional[float] = None,
+        obstacle_grid: Optional[ObstacleGrid] = None,
     ) -> VelocityCommand:
         """Drive the mapped path directly when the path corridor is clear."""
         mapped_heading = goal_direction if pivot_heading is None else pivot_heading
-        if self._should_pivot(mapped_heading, goal_distance):
+        if self._should_pivot(mapped_heading, goal_distance, obstacle_grid):
             vyaw = self._pivot_yaw_rate(mapped_heading)
             self._prev_heading = float(vyaw)
             return VelocityCommand(vx=0.0, vy=0.0, vyaw=float(vyaw))
@@ -1954,6 +2014,7 @@ class SafetyMonitor:
         avoidance_distance: float = 0.8,
         stuck_timeout: float = 10.0,
         pivot_hard_stop_distance: float = 0.2,
+        pivot_emergency_stop_distance: float = 0.10,
         forward_hazard_cone_rad: float = math.radians(20.0),
     ):
         """Configure safety thresholds.
@@ -1963,12 +2024,15 @@ class SafetyMonitor:
             avoidance_distance: Scale speed down between safety and this (meters).
             stuck_timeout: Trigger stuck event after this many seconds without progress.
             pivot_hard_stop_distance: Minimum distance allowed for in-place turning.
+            pivot_emergency_stop_distance: Distance that blocks even a pivot
+                deliberately turning away from close geometry.
             forward_hazard_cone_rad: Bearing cone treated as forward path blockage.
         """
         self.safety_distance = safety_distance
         self.avoidance_distance = avoidance_distance
         self.stuck_timeout = stuck_timeout
         self.pivot_hard_stop_distance = pivot_hard_stop_distance
+        self.pivot_emergency_stop_distance = pivot_emergency_stop_distance
         self.forward_hazard_cone_rad = forward_hazard_cone_rad
 
     def filter_command(
@@ -1978,6 +2042,7 @@ class SafetyMonitor:
         nearest_obstacle_bearing: float = 0.0,
         ground_plane_valid: bool = True,
         seconds_since_progress: float = 0.0,
+        pivot_escape_allowed: bool = False,
     ) -> Tuple[VelocityCommand, Optional[str]]:
         """Filter a velocity command through safety checks (priority-ordered).
 
@@ -1991,7 +2056,10 @@ class SafetyMonitor:
 
         # Priority 1: E-STOP. Close objects outside the forward cone are handled
         # by VFH steering unless they are inside the hard-stop distance.
-        pivot_sweep_blocked = pivot_only and hard_stop
+        pivot_sweep_blocked = pivot_only and (
+            nearest_obstacle_m <= self.pivot_emergency_stop_distance
+            or (hard_stop and not pivot_escape_allowed)
+        )
         forward_motion_blocked = (
             nearest_obstacle_m <= self.safety_distance
             and (hard_stop or forward_hazard)
@@ -2576,6 +2644,10 @@ class NavCore:
     # In-place turns sweep the Go2's body and legs through a much wider area
     # than straight motion.  Reserve enough visible clearance before pivoting.
     PIVOT_HARD_STOP_DISTANCE_M: float = _env_float("NAV_PIVOT_HARD_STOP_DISTANCE", 0.40)
+    PIVOT_EMERGENCY_STOP_DISTANCE_M: float = _env_float(
+        "NAV_PIVOT_EMERGENCY_STOP_DISTANCE",
+        0.10,
+    )
     PIVOT_CLEARANCE_PERCENTILE: float = _env_float(
         "NAV_PIVOT_CLEARANCE_PERCENTILE",
         10.0,
@@ -2779,6 +2851,7 @@ class NavCore:
         """Initialize all sub-components: depth processor, planners, safety, odometry."""
         self._state = NavState.IDLE
         self._goal: Optional[NavGoal] = None
+        self._suspended_goal: Optional[NavGoal] = None
         self._last_stop_reason: Optional[str] = None
         self._current_location_name: Optional[str] = None
         self._on_status_change = type(self)._global_status_callback
@@ -2800,6 +2873,7 @@ class NavCore:
             avoidance_distance=self.AVOIDANCE_DISTANCE_M,
             stuck_timeout=self.STUCK_TIMEOUT_S,
             pivot_hard_stop_distance=self.PIVOT_HARD_STOP_DISTANCE_M,
+            pivot_emergency_stop_distance=self.PIVOT_EMERGENCY_STOP_DISTANCE_M,
             forward_hazard_cone_rad=self.FORWARD_HAZARD_CONE_RAD,
         )
         self._odometry = _create_odometry_provider()
@@ -2819,6 +2893,7 @@ class NavCore:
         self._locomotion_recovery_error: Optional[str] = None
         self._arrival_map_consistency_readings = 0
         self._last_stall_scan_direction: Optional[float] = None
+        self._pivot_clearance_escape_active = False
         self._close_obstacle_confirmation = ObstacleConfirmationTracker(
             min_seconds=self.CLOSE_OBSTACLE_CONFIRM_S,
             min_readings=self.CLOSE_OBSTACLE_CONFIRM_READINGS,
@@ -2986,6 +3061,7 @@ class NavCore:
         self._obstacle_grid_unavailable_since = None
         self._obstacle_grid_unavailable_notified = False
         self._last_stall_scan_direction = None
+        self._pivot_clearance_escape_active = False
         self._route_progress_waypoint_name = None
         self._route_progress_best_distance = float("inf")
         self._route_regression_since = None
@@ -3289,6 +3365,11 @@ class NavCore:
         with self._state_lock:
             self._state = state
             self._goal = None
+            self._suspended_goal = (
+                replace(goal)
+                if goal.goal_type == "semantic" and bool(goal.label)
+                else None
+            )
             self._last_stop_reason = reason
             self._clear_planner_and_obstacle_state()
 
@@ -3980,6 +4061,7 @@ class NavCore:
         with self._state_lock:
             self._state = NavState.IDLE
             self._goal = None
+            self._suspended_goal = None
             self._last_stop_reason = None
             if arrived_node is not None:
                 self._current_location_name = arrived_node.name
@@ -4090,6 +4172,7 @@ class NavCore:
             with self._state_lock:
                 self._state = NavState.IDLE
                 self._goal = None
+                self._suspended_goal = None
                 self._last_stop_reason = f"Already at {goal_label}"
                 self._current_location_name = goal_node.name
                 self._clear_planner_and_obstacle_state()
@@ -4164,6 +4247,7 @@ class NavCore:
                 y=path[-1].y,
                 label=destination,
             )
+            self._suspended_goal = None
             self._state = NavState.NAVIGATING
             self._last_stop_reason = None
             self._current_location_name = None
@@ -4203,6 +4287,7 @@ class NavCore:
         with self._state_lock:
             self._state = NavState.IDLE
             self._goal = None
+            self._suspended_goal = None
             self._last_stop_reason = None
             self._current_location_name = node.name
             self._clear_planner_and_obstacle_state()
@@ -4242,6 +4327,7 @@ class NavCore:
                 y=goal_y,
                 yaw=target_yaw if abs(angle) > 0.01 else None,
             )
+            self._suspended_goal = None
             self._state = NavState.NAVIGATING
             self._last_stop_reason = None
             self._current_location_name = None
@@ -4399,6 +4485,7 @@ class NavCore:
                 y=pose.y,
                 yaw=pose.yaw + angle_rad,
             )
+            self._suspended_goal = None
             self._state = NavState.NAVIGATING
             self._last_stop_reason = None
             self._reset_progress_tracker()
@@ -4411,6 +4498,7 @@ class NavCore:
         with self._state_lock:
             self._state = NavState.IDLE
             self._goal = None
+            self._suspended_goal = None
             self._last_stop_reason = None
             self._clear_planner_and_obstacle_state()
         self._ensure_go2()
@@ -4420,14 +4508,45 @@ class NavCore:
             self._stop_depth_when_idle()
         logger.info("NavCore: navigation stopped")
 
-    def resume(self):
-        """Clear E-STOP state and return to IDLE. Does not restart previous goal."""
+    def resume(self) -> bool:
+        """Replan a suspended semantic route from the latest measured pose."""
         with self._state_lock:
-            if self._state == NavState.E_STOP:
+            previous_state = self._state
+            suspended = (
+                replace(self._suspended_goal)
+                if self._suspended_goal is not None
+                else None
+            )
+            if previous_state not in {NavState.E_STOP, NavState.STUCK}:
+                return False
+            if suspended is None or suspended.goal_type != "semantic" or not suspended.label:
                 self._state = NavState.IDLE
                 self._last_stop_reason = None
                 self._clear_planner_and_obstacle_state()
-                logger.info("NavCore: resumed from E-STOP")
+                logger.info("NavCore: cleared terminal navigation state with no route to resume")
+                return False
+
+        pose = self._odometry.get_pose()
+        logger.info(
+            "NavCore: resuming '%s' from measured pose (%.2f, %.2f, %.0fdeg)",
+            self._goal_display_name(suspended),
+            pose.x,
+            pose.y,
+            math.degrees(pose.yaw),
+        )
+        if not self.navigate_to(suspended.label):
+            with self._state_lock:
+                if self._suspended_goal is not None and self._state == NavState.IDLE:
+                    self._state = previous_state
+            return False
+
+        with self._state_lock:
+            self._suspended_goal = None
+        self._notify_status_change(
+            f"I rechecked my position and resumed toward "
+            f"{self._goal_display_name(suspended)}."
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Status queries
@@ -4448,6 +4567,7 @@ class NavCore:
         with self._state_lock:
             state = self._state
             goal = self._goal
+            suspended_goal = self._suspended_goal
             last_stop_reason = self._last_stop_reason
             current_location_name = getattr(self, "_current_location_name", None)
 
@@ -4469,6 +4589,8 @@ class NavCore:
                 parts.append(f"Destination: {goal.label}")
             dist = math.hypot(goal.x - pose.x, goal.y - pose.y)
             parts.append(f"Distance to goal: {dist:.1f}m")
+        elif suspended_goal and suspended_goal.label:
+            parts.append(f"Paused destination: {suspended_goal.label}")
 
         if last_stop_reason:
             parts.append(last_stop_reason)
@@ -5335,6 +5457,16 @@ class NavCore:
             if math.isfinite(nearest) and nearest < safety_dist:
                 safety_dist = nearest
                 safety_bearing = nearest_bearing
+        pivot_escape_allowed = False
+        if pivot_only:
+            cmd, pivot_escape_allowed = self._prepare_close_pivot(
+                cmd,
+                raw_grid if raw_grid is not None else grid,
+                safety_dist,
+                safety_bearing,
+            )
+        else:
+            self._pivot_clearance_escape_active = False
         seconds_since_progress = (
             now - self._last_progress_time
             if pivot_only
@@ -5371,6 +5503,7 @@ class NavCore:
             nearest_obstacle_m=safety_dist,
             nearest_obstacle_bearing=safety_bearing,
             seconds_since_progress=seconds_since_progress,
+            pivot_escape_allowed=pivot_escape_allowed,
         )
 
         if event:
@@ -5583,6 +5716,70 @@ class NavCore:
         if center_dist < path_dist:
             return center_dist, 0.0
         return path_dist, path_bearing
+
+    def _prepare_close_pivot(
+        self,
+        cmd: VelocityCommand,
+        grid: Optional[ObstacleGrid],
+        clearance_m: float,
+        obstacle_bearing: float,
+    ) -> Tuple[VelocityCommand, bool]:
+        """Turn close geometry out of the pivot sweep instead of abandoning the route."""
+        if (
+            grid is None
+            or not math.isfinite(clearance_m)
+            or clearance_m > self.PIVOT_HARD_STOP_DISTANCE_M
+            or clearance_m <= self.PIVOT_EMERGENCY_STOP_DISTANCE_M
+            or abs(cmd.vyaw) <= 1e-3
+        ):
+            self._pivot_clearance_escape_active = False
+            return cmd, False
+
+        current_direction = 1.0 if cmd.vyaw > 0.0 else -1.0
+        if (
+            isinstance(obstacle_bearing, (int, float))
+            and math.isfinite(obstacle_bearing)
+            and abs(obstacle_bearing) >= math.radians(5.0)
+        ):
+            # Positive bearing and yaw are both left.  Their signs must oppose
+            # for the observed geometry to move away from the camera center.
+            desired_direction = -math.copysign(1.0, obstacle_bearing)
+        else:
+            desired_direction = self._local_planner.preferred_pivot_direction(
+                grid,
+                current_direction,
+            )
+
+        escape_clearance = self._local_planner.pivot_side_clearance(
+            grid,
+            desired_direction,
+        )
+        if escape_clearance < self.PIVOT_HARD_STOP_DISTANCE_M:
+            self._pivot_clearance_escape_active = False
+            return cmd, False
+
+        redirected = desired_direction != current_direction
+        if redirected:
+            self._local_planner.force_pivot_direction(desired_direction)
+            cmd = replace(
+                cmd,
+                vyaw=math.copysign(abs(cmd.vyaw), desired_direction),
+            )
+        if redirected or not self._pivot_clearance_escape_active:
+            logger.warning(
+                "NavCore: %s pivot %s from close geometry at %.2fm; "
+                "selected-side clearance=%s",
+                "redirecting" if redirected else "continuing",
+                "left" if desired_direction > 0.0 else "right",
+                clearance_m,
+                (
+                    f"{escape_clearance:.2f}m"
+                    if math.isfinite(escape_clearance)
+                    else "clear"
+                ),
+            )
+        self._pivot_clearance_escape_active = True
+        return cmd, True
 
     def _robust_pivot_clearance(
         self,

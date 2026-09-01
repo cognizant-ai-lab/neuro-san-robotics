@@ -41,6 +41,7 @@ class NavPlannerTool(CodedTool):
     - move_until_obstacle: Move forward until an obstacle is near
     - turn: Rotate by a specified angle in degrees
     - stop: Cancel current navigation
+    - resume: Recheck safety and continue a route stopped by E-STOP or stall
     - status: Get navigation state summary
     - destinations: List known map destinations
     - obstacles: Describe current obstacle sensing
@@ -69,7 +70,7 @@ class NavPlannerTool(CodedTool):
         if not command:
             return (
                 "Please specify a navigation command: navigate_to, set_location, "
-                "move_forward, turn, stop, or status."
+                "move_forward, turn, stop, resume, or status."
             )
 
         nav = NavCore.get_instance()
@@ -142,6 +143,13 @@ class NavPlannerTool(CodedTool):
             # robot is still at Risto's desk after an uncompleted kitchen run).
             return f"Navigation stopped. {nav.get_status_summary()}"
 
+        elif command in {"resume", "continue"}:
+            resumed = nav.resume()
+            status = nav.get_status_summary()
+            if resumed:
+                return f"Resumed the interrupted navigation route. {status}"
+            return f"No interrupted navigation route could be resumed. {status}"
+
         elif command == "status":
             status = nav.get_status_summary()
             if bool(args.get("announce", True)):
@@ -168,6 +176,6 @@ class NavPlannerTool(CodedTool):
 
         return (
             f"Unknown navigation command: '{command}'. Use: navigate_to, "
-            "set_location, move_forward, move_until_obstacle, turn, stop, "
+            "set_location, move_forward, move_until_obstacle, turn, stop, resume, "
             "status, destinations, or obstacles."
         )

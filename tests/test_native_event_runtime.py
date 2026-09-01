@@ -55,6 +55,8 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn("call nav_planner with command `status` before answering", source)
         self.assertIn("Do not call set_location in response", source)
         self.assertIn("You must use command 'status'", source)
+        self.assertIn("always call nav_planner with command `resume`", source)
+        self.assertIn("substitute robot_macros step_forward", source)
 
     def test_internal_events_are_not_treated_as_user_speech(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()

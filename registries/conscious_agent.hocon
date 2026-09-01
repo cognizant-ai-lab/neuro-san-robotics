@@ -90,7 +90,11 @@ Available navigation commands: navigate_to (go to a named place), set_location (
 move_forward (go forward with depth safety),
 move_until_obstacle (walk forward until the front depth sensor reaches the requested stop distance),
 turn (rotate left/right), stop (cancel navigation), status (current navigation state),
+resume (recheck safety and continue the interrupted mapped route),
 destinations (known mapped places), and obstacles (current obstacle information).
+When the user says to continue or resume after navigation stopped itself or after they used
+the remote control to clear the path, always call nav_planner with command `resume`. Never
+substitute robot_macros step_forward for resuming a mapped route.
 
 Navigation runs asynchronously and sends `navigation:` events when """${robot_name}""" reaches a waypoint,
 encounters or clears an obstacle, arrives, or cannot continue. Treat those events as authoritative
@@ -176,7 +180,7 @@ directly to the UI and speaker, so end the event turn after it returns and do no
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "Navigation command: 'navigate_to', 'set_location', 'move_forward', 'move_until_obstacle', 'turn', 'stop', 'status', 'destinations', 'obstacles'. Use 'status' for all current-location, arrival, progress, and navigation-state questions."
+                            "description": "Navigation command: 'navigate_to', 'set_location', 'move_forward', 'move_until_obstacle', 'turn', 'stop', 'resume', 'status', 'destinations', 'obstacles'. Use 'resume' whenever the user asks to continue an interrupted mapped route; never use robot_macros step_forward for that. Use 'status' for all current-location, arrival, progress, and navigation-state questions."
                         },
                         "target": {
                             "type": "string",

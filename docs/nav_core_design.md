@@ -635,7 +635,8 @@ class MapEdge:
 | STUCK | NAVIGATING | After recovery_stand() + successful replan |
 | STUCK | IDLE | Navigation cancelled |
 | Any | E_STOP | Confirmed path obstacle within 0.20m safety distance |
-| E_STOP | IDLE | Explicit `resume()` call |
+| E_STOP | NAVIGATING | Explicit `resume()` replans a suspended mapped route from the measured pose |
+| E_STOP | IDLE | Explicit `resume()` when no mapped route is suspended |
 | Any | IDLE | `stop()` called |
 
 ---
@@ -714,7 +715,7 @@ Add to `registries/conscious_agent.hocon`:
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Navigation command: 'navigate_to', 'move_forward', 'turn', 'stop', 'status'"
+                    "description": "Navigation command: 'navigate_to', 'move_forward', 'turn', 'stop', 'resume', 'status'"
                 },
                 "target": {
                     "type": "string",
@@ -739,7 +740,8 @@ Add to the conscious_agent instructions:
 ```
 If the user asks you to go somewhere, move to a location, or navigate, use your nav_planner tool.
 Available navigation commands: navigate_to (go to a named place), move_forward (go straight),
-turn (rotate), stop (cancel navigation), status, destinations, and obstacles.
+turn (rotate), stop (cancel navigation), resume (continue an interrupted mapped route),
+status, destinations, and obstacles.
 When navigating, waypoint, obstacle, arrival, and failure events are delivered automatically.
 ```
 
