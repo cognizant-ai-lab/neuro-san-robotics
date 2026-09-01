@@ -611,19 +611,36 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertAlmostEqual(heading, goal_heading)
 
-    def test_route_heading_reserves_extra_space_for_robot_right_side(self):
+    def test_right_margin_does_not_bias_an_open_mapped_lane_left(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
         grid = _empty_grid()
         for forward in np.linspace(0.30, 1.40, 23):
             row = grid.origin_row - round(forward / grid.resolution)
-            # This is outside the old symmetric 0.42m swept corridor but
-            # inside the new 0.50m robot-right envelope.
+            # A safety margin must not widen route-centering's lookahead lane:
+            # this furniture is outside the symmetric swept corridor and does
+            # not justify a persistent leftward arc.
             col = grid.origin_col + round(0.47 / grid.resolution)
             grid.grid[row, col] = 1.0
 
         heading = planner._centered_route_heading(grid, goal_direction=0.0)
 
-        self.assertGreater(heading, 0.0)
+        self.assertAlmostEqual(heading, 0.0)
+
+    def test_safe_right_wall_does_not_replace_mapped_right_turn(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid(rows=240, cols=240, resolution=0.01)
+        for forward in np.linspace(0.25, 1.80, 64):
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col + round(0.61 / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.28, vy=0.0, vyaw=-0.08),
+            grid,
+            correction_limit=0.02,
+        )
+
+        self.assertLessEqual(corrected.vyaw, -0.06)
 
     def test_right_wall_margin_steers_left_before_leg_contact(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
@@ -647,7 +664,7 @@ class TestLocalPlanner(unittest.TestCase):
         grid = _empty_grid()
         for forward in np.linspace(0.25, 1.80, 32):
             row = grid.origin_row - round(forward / grid.resolution)
-            col = grid.origin_col + round(0.60 / grid.resolution)
+            col = grid.origin_col + round(0.55 / grid.resolution)
             grid.grid[row, col] = 1.0
 
         corrected = planner.apply_corridor_course_correction(

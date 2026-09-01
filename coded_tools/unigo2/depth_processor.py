@@ -139,7 +139,7 @@ class DepthProcessorConfig:
     # The Go2's right legs need a little more room than the nominal symmetric
     # footprint.  Keep this robot-relative so it protects the same physical
     # side while travelling in either direction.
-    right_side_clearance_margin: float = 0.08
+    right_side_clearance_margin: float = 0.05
     path_obstacle_min_points: int = 6
 
     # Depth camera parameters
@@ -209,7 +209,7 @@ class DepthProcessor:
             path_corridor_half_width=_env_float("NAV_PATH_CORRIDOR_HALF_WIDTH", 0.27),
             right_side_clearance_margin=_env_float(
                 "NAV_RIGHT_SIDE_CLEARANCE_MARGIN",
-                0.08,
+                0.05,
             ),
             path_obstacle_min_points=_env_int("NAV_PATH_OBSTACLE_MIN_POINTS", 6),
             process_width=_env_int("NAV_DEPTH_PROCESS_WIDTH", 640),

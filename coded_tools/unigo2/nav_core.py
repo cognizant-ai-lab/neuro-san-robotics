@@ -1372,7 +1372,7 @@ class LocalPlanner:
     # trips without moving map obstacles or globally widening every route.
     RIGHT_SIDE_CLEARANCE_MARGIN_M = _env_float(
         "NAV_RIGHT_SIDE_CLEARANCE_MARGIN",
-        0.08,
+        0.05,
     )
     ROUTE_CENTER_MAX_HEADING_RAD = _env_float(
         "NAV_ROUTE_CENTER_MAX_HEADING_RAD",
@@ -1809,14 +1809,7 @@ class LocalPlanner:
         blocking = forward[
             (forward >= 0.10)
             & (forward <= self.ROUTE_CENTER_LOOKAHEAD_M)
-            & (lateral <= self.ROUTE_CENTER_HALF_WIDTH_M)
-            & (
-                lateral
-                >= -(
-                    self.ROUTE_CENTER_HALF_WIDTH_M
-                    + self.RIGHT_SIDE_CLEARANCE_MARGIN_M
-                )
-            )
+            & (np.abs(lateral) <= self.ROUTE_CENTER_HALF_WIDTH_M)
         ]
         if blocking.size < self.ROUTE_CENTER_MIN_BLOCKING_POINTS:
             return self.ROUTE_CENTER_LOOKAHEAD_M
@@ -1899,18 +1892,30 @@ class LocalPlanner:
                 side_margin = (
                     self.RIGHT_SIDE_CLEARANCE_MARGIN_M if side < 0.0 else 0.0
                 )
-                target_clearance = self.SINGLE_WALL_TARGET_CLEARANCE_M + side_margin
+                preferred_clearance = (
+                    self.SINGLE_WALL_TARGET_CLEARANCE_M + side_margin
+                )
                 hard_clearance = self.SINGLE_WALL_HARD_CLEARANCE_M + side_margin
                 converging = (
                     side * heading <= -self.EARLY_WALL_CONVERGENCE_RAD
                 )
-                inside_target = clearance < target_clearance
-                hard_too_close = clearance < hard_clearance
-                protect_right_side_on_final_approach = side < 0.0 and inside_target
+                # The added right-side margin is a preferred clearance used by
+                # bounded steering.  It must not widen the threshold that can
+                # replace mapped route steering; that would turn a safely
+                # distant wall into a false high-priority override and produce
+                # a long arc away from the route.
+                inside_override_clearance = (
+                    clearance < self.SINGLE_WALL_TARGET_CLEARANCE_M
+                )
+                inside_preferred_clearance = clearance < preferred_clearance
+                hard_too_close = clearance <= hard_clearance
+                protect_right_side_on_final_approach = (
+                    side < 0.0 and inside_preferred_clearance
+                )
                 if (
                     not align_only
                     and clearance <= self.EARLY_WALL_ALIGNMENT_CLEARANCE_M
-                    and (converging or inside_target)
+                    and (converging or inside_override_clearance)
                     and (not route_heading_authoritative or hard_too_close)
                 ):
                     # Route cross-track error can be wrong when localization has
@@ -1933,7 +1938,7 @@ class LocalPlanner:
                             desired_yaw = (
                                 away_sign * self.EARLY_WALL_MIN_AWAY_YAW_RPS
                             )
-                    elif side < 0.0 and inside_target:
+                    elif side < 0.0 and inside_preferred_clearance:
                         # Start opening right-side clearance while there is
                         # still room for a small translating correction.
                         desired_yaw += float(
@@ -2031,10 +2036,7 @@ class LocalPlanner:
                     math.sin(left_heading) + math.sin(right_heading),
                     math.cos(left_heading) + math.cos(right_heading),
                 )
-                center_offset = (
-                    0.5 * (left_at_reference + right_at_reference)
-                    + self.RIGHT_SIDE_CLEARANCE_MARGIN_M
-                )
+                center_offset = 0.5 * (left_at_reference + right_at_reference)
                 return wall_heading, center_offset, "corridor"
 
         # A single visible wall is still useful. Prefer the side with the
@@ -2117,10 +2119,7 @@ class LocalPlanner:
             math.sin(left_heading) + math.sin(right_heading),
             math.cos(left_heading) + math.cos(right_heading),
         )
-        center_offset = (
-            0.5 * (left_at_reference + right_at_reference)
-            + self.RIGHT_SIDE_CLEARANCE_MARGIN_M
-        )
+        center_offset = 0.5 * (left_at_reference + right_at_reference)
         return wall_heading, center_offset
 
     def _fit_corridor_wall(
