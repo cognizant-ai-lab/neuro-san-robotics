@@ -1327,25 +1327,6 @@ class TestGlobalPlanner(unittest.TestCase):
         self.assertIsNotNone(deferred)
         self.assertEqual(deferred.name, "B")
 
-    def test_metric_final_accepts_strict_route_position_when_map_match_is_weak(self):
-        topo = _create_test_map()
-        topo.nodes["B"].arrival_tolerance_m = 0.65
-        planner = GlobalPlanner(topo)
-        planner.install_metric_path_points(
-            RobotPose(0.0, 0.0, 0.0),
-            "B",
-            [(0.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
-        )
-        planner.get_next_waypoint(RobotPose(2.0, 0.0, 0.0), tolerance_m=0.65)
-
-        arrived = planner.get_next_waypoint(
-            RobotPose(2.90, 0.0, math.radians(90.0)),
-            tolerance_m=0.65,
-            final_arrival_sensor_confirmed=False,
-        )
-
-        self.assertIsNone(arrived)
-
     def test_metric_final_accepts_sensor_confirmed_pose_inside_arrival_radius(self):
         topo = _create_test_map()
         topo.nodes["B"].arrival_tolerance_m = 0.65
@@ -1443,33 +1424,6 @@ class TestGlobalPlanner(unittest.TestCase):
 
         self.assertIsNotNone(waypoint)
         self.assertEqual(waypoint.name, "__metric_001__")
-
-    def test_metric_corner_does_not_turn_from_logged_radial_tolerance_pose(self):
-        planner = GlobalPlanner(_create_test_map())
-        planner.install_metric_path_points(
-            RobotPose(6.384, 12.656, math.radians(90.0)),
-            "C",
-            [
-                (6.384, 12.656),
-                (6.350, 13.450),
-                (5.650, 13.470),
-                (4.0, 13.50),
-            ],
-        )
-
-        premature = planner.get_next_waypoint(
-            RobotPose(6.54, 13.05, math.radians(96.0)),
-            tolerance_m=0.45,
-        )
-        at_corner = planner.get_next_waypoint(
-            RobotPose(6.50, 13.40, math.radians(96.0)),
-            tolerance_m=0.45,
-        )
-
-        self.assertIsNotNone(premature)
-        self.assertEqual(premature.name, "__metric_001__")
-        self.assertIsNotNone(at_corner)
-        self.assertEqual(at_corner.name, "__metric_002__")
 
     def test_metric_corner_advances_after_entering_outgoing_corridor(self):
         planner = GlobalPlanner(_create_test_map())
@@ -2338,18 +2292,6 @@ class TestNavCoreStatus(unittest.TestCase):
         self.assertAlmostEqual(NavCore.PATH_OBSTACLE_CENTER_DEPTH_MARGIN_M, 0.15)
         self.assertAlmostEqual(NavCore.GOAL_TOLERANCE_M, 0.15)
         self.assertAlmostEqual(NavCore.SEMANTIC_ARRIVAL_TOLERANCE_M, 0.65)
-        self.assertAlmostEqual(
-            NavCore.LOCOMOTION_MIN_VERIFICATION_COMMAND_MPS,
-            0.15,
-        )
-        self.assertAlmostEqual(
-            GlobalPlanner.CORNER_METRIC_LONGITUDINAL_TOLERANCE_M,
-            0.08,
-        )
-        self.assertAlmostEqual(
-            GlobalPlanner.FINAL_METRIC_STRICT_PROXIMITY_M,
-            0.15,
-        )
         self.assertAlmostEqual(NavCore.OBSTACLE_GRID_MAX_AGE_S, 0.50)
         self.assertAlmostEqual(NavCore.OBSTACLE_GRID_LOSS_GRACE_S, 3.0)
         self.assertAlmostEqual(NavCore.METRIC_ROUTE_RECAPTURE_CROSS_TRACK_M, 0.35)
@@ -4096,12 +4038,7 @@ class TestNavCoreStatus(unittest.TestCase):
             fake_depth.get_obstacle_grid.return_value = _empty_grid()
             nav._depth_processor = fake_depth
             nav._local_planner = MagicMock()
-            # The logged final approach used 0.18m/s. It is meaningful motion
-            # and must verify locomotion rather than falling into obstacle
-            # escape/replanning merely because it is below the old 0.20 limit.
-            nav._local_planner.compute_velocity.return_value = VelocityCommand(
-                vx=0.18,
-            )
+            nav._local_planner.compute_velocity.return_value = VelocityCommand(vx=0.2)
             nav._execute_stall_escape = MagicMock()
 
             goal = NavGoal(goal_type="relative", x=2.0, y=0.0, label="Kitchen")

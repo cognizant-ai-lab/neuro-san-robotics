@@ -248,7 +248,6 @@ specific robot really needs a temporary override.
 | `NAV_METRIC_ROUTE_RECAPTURE_CROSS_TRACK` | `0.35` | Makes clear mapped-route steering authoritative after 0.35 m of lateral drift. |
 | `NAV_METRIC_CORNER_REGRESSION_DISTANCE` | `0.25` | Replans a missed sharp corner after its distance grows by 0.25 m. |
 | `NAV_METRIC_CORNER_REGRESSION_CONFIRM_S` | `0.30` | Persistence required before a missed-corner replan. |
-| `NAV_LOCOMOTION_MIN_VERIFICATION_COMMAND` | `0.15` | Minimum commanded translation used to detect an unresponsive locomotion service, including the 0.18 m/s final approach. |
 
 The production map references a 10cm occupancy grid generated from the office floor
 plan. Named map nodes remain the destination interface, while clearance-aware A*

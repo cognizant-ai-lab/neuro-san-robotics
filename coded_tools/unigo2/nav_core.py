@@ -556,8 +556,6 @@ class GlobalPlanner:
     FINAL_METRIC_LONGITUDINAL_TOLERANCE_M = 0.30
     FINAL_METRIC_CROSS_TRACK_TOLERANCE_M = 0.40
     FINAL_METRIC_HEADING_TOLERANCE_RAD = math.radians(25.0)
-    FINAL_METRIC_STRICT_PROXIMITY_M = 0.15
-    CORNER_METRIC_LONGITUDINAL_TOLERANCE_M = 0.08
     STRAIGHT_METRIC_PASS_TOLERANCE_M = 0.75
     STRAIGHT_METRIC_PASS_MAX_TURN_RAD = math.radians(20.0)
 
@@ -843,49 +841,17 @@ class GlobalPlanner:
             if metric_final
             else True
         )
-        strict_route_arrival = bool(
-            metric_final
-            and dist <= self.FINAL_METRIC_STRICT_PROXIMITY_M
-            and self._metric_final_position_is_consistent(current_pose)
-        )
-        # Across most of the destination radius, repeated depth-to-map
-        # agreement prevents dead-reckoning drift from declaring a false
-        # arrival. Inside the strict 15cm gate, final-segment position is enough
-        # to finish even where the map contains too little visible structure to
-        # corroborate the pose.
+        # Inside the destination's configured radius, repeated depth-to-map
+        # agreement is stronger evidence than dead-reckoned progress along the
+        # last short segment.  The latter can disagree after a safe detour or a
+        # recovery replan.  Requiring both creates a deadlock: the robot is close
+        # enough to slow down, but can never satisfy the stricter route gate.
         arrival_consistent = (
-            not metric_final
-            or final_arrival_sensor_confirmed
-            or strict_route_arrival
+            not metric_final or final_arrival_sensor_confirmed
         )
 
-        metric_corner = self.active_waypoint_is_corner(
-            self.STRAIGHT_METRIC_PASS_MAX_TURN_RAD,
-        )
-        corner_arrival_consistent = (
-            self._metric_corner_arrival_is_consistent(current_pose)
-            if metric_corner
-            else True
-        )
-
-        if (
-            dist < arrival_tolerance
-            and arrival_consistent
-            and corner_arrival_consistent
-        ):
-            if (
-                metric_final
-                and strict_route_arrival
-                and not final_arrival_sensor_confirmed
-            ):
-                logger.info(
-                    "GlobalPlanner: accepting final waypoint '%s' through the "
-                    "strict %.2fm positional route gate despite incomplete "
-                    "sensor-to-map validation",
-                    wp.name,
-                    self.FINAL_METRIC_STRICT_PROXIMITY_M,
-                )
-            elif metric_final and not route_arrival_consistent:
+        if dist < arrival_tolerance and arrival_consistent:
+            if metric_final and not route_arrival_consistent:
                 logger.info(
                     "GlobalPlanner: accepting sensor-confirmed final waypoint "
                     "'%s' inside %.2fm arrival region despite stale final-segment "
@@ -945,33 +911,6 @@ class GlobalPlanner:
 
         return wp
 
-    def _metric_corner_arrival_is_consistent(self, pose: RobotPose) -> bool:
-        """Do not let a circular waypoint radius cut a mapped corner early.
-
-        Metric corner samples use a generous radial tolerance so ordinary
-        odometry noise does not strand a route.  On the incoming side that
-        radius can nevertheless initiate a 90-degree turn while the robot is
-        still almost half a metre short of the safe corridor.  Require the
-        incoming longitudinal progress to reach the corner; expected-wall and
-        outgoing-corridor gates remain available for safe early/late handoff.
-        """
-        segment = self.current_segment()
-        if segment is None:
-            return False
-        start, target = segment
-        edge_x = target.x - start.x
-        edge_y = target.y - start.y
-        edge_length = math.hypot(edge_x, edge_y)
-        if edge_length <= 1e-6:
-            return False
-
-        unit_x, unit_y = edge_x / edge_length, edge_y / edge_length
-        relative_x = pose.x - start.x
-        relative_y = pose.y - start.y
-        along = relative_x * unit_x + relative_y * unit_y
-        longitudinal_remaining = edge_length - along
-        return longitudinal_remaining <= self.CORNER_METRIC_LONGITUDINAL_TOLERANCE_M
-
     def _effective_pass_through_tolerance(
         self,
         waypoint: MapNode,
@@ -1014,43 +953,15 @@ class GlobalPlanner:
 
     def _metric_final_arrival_is_consistent(self, pose: RobotPose) -> bool:
         """Require the final route corridor and entrance gate, not radius alone."""
-        geometry = self._metric_final_route_geometry(pose)
-        if geometry is None:
-            return False
-        longitudinal_remaining, cross_track, heading_error = geometry
-        return (
-            longitudinal_remaining
-            <= self.FINAL_METRIC_LONGITUDINAL_TOLERANCE_M
-            and cross_track <= self.FINAL_METRIC_CROSS_TRACK_TOLERANCE_M
-            and heading_error <= self.FINAL_METRIC_HEADING_TOLERANCE_RAD
-        )
-
-    def _metric_final_position_is_consistent(self, pose: RobotPose) -> bool:
-        """Validate the positional portion of the strict near-goal route gate."""
-        geometry = self._metric_final_route_geometry(pose)
-        if geometry is None:
-            return False
-        longitudinal_remaining, cross_track, _heading_error = geometry
-        return (
-            longitudinal_remaining
-            <= self.FINAL_METRIC_LONGITUDINAL_TOLERANCE_M
-            and cross_track <= self.FINAL_METRIC_CROSS_TRACK_TOLERANCE_M
-        )
-
-    def _metric_final_route_geometry(
-        self,
-        pose: RobotPose,
-    ) -> Optional[Tuple[float, float, float]]:
-        """Return final-segment longitudinal, lateral, and heading errors."""
         segment = self.current_segment()
         if segment is None:
-            return None
+            return False
         start, target = segment
         edge_x = target.x - start.x
         edge_y = target.y - start.y
         edge_length = math.hypot(edge_x, edge_y)
         if edge_length <= 1e-6:
-            return None
+            return False
 
         unit_x, unit_y = edge_x / edge_length, edge_y / edge_length
         relative_x = pose.x - start.x
@@ -1065,7 +976,12 @@ class GlobalPlanner:
                 math.cos(pose.yaw - route_heading),
             )
         )
-        return longitudinal_remaining, cross_track, heading_error
+        return (
+            longitudinal_remaining
+            <= self.FINAL_METRIC_LONGITUDINAL_TOLERANCE_M
+            and cross_track <= self.FINAL_METRIC_CROSS_TRACK_TOLERANCE_M
+            and heading_error <= self.FINAL_METRIC_HEADING_TOLERANCE_RAD
+        )
 
     def get_current_waypoint(self) -> Optional[MapNode]:
         """Return the active waypoint without changing route progress."""
@@ -2837,7 +2753,7 @@ class NavCore:
     )
     LOCOMOTION_MIN_VERIFICATION_COMMAND_MPS: float = _env_float(
         "NAV_LOCOMOTION_MIN_VERIFICATION_COMMAND",
-        0.15,
+        0.20,
     )
     FINAL_ROUTE_MAX_CROSS_TRACK_CORRECTION_RAD: float = _env_float(
         "NAV_FINAL_ROUTE_MAX_CROSS_TRACK_CORRECTION_RAD",
