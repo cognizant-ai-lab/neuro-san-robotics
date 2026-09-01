@@ -361,6 +361,26 @@ class TestLocalPlanner(unittest.TestCase):
             -planner.EARLY_WALL_MAX_ALIGNMENT_YAW_RPS,
         )
 
+    def test_clear_metric_route_is_not_reversed_by_side_wall_alignment(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            lateral = 0.65 - 0.12 * forward
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col - round(lateral / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        route_command = VelocityCommand(vx=0.28, vy=0.0, vyaw=0.08)
+        corrected = planner.apply_corridor_course_correction(
+            route_command,
+            grid,
+            correction_limit=0.02,
+            preserve_clear_route_heading=True,
+        )
+
+        self.assertAlmostEqual(corrected.vx, route_command.vx)
+        self.assertGreaterEqual(corrected.vyaw, 0.06)
+
     def test_comfortably_distant_wall_does_not_reverse_mapped_route_steering(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
         grid = _empty_grid()
