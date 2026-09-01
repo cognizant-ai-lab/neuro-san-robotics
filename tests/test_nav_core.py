@@ -522,6 +522,43 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertGreater(cmd.vx, 0.0)
         self.assertGreater(cmd.vyaw, 0.0)
 
+    def test_clear_metric_route_does_not_turn_toward_wider_open_sector(self):
+        planner = LocalPlanner(
+            max_linear_speed=0.30,
+            max_yaw_rate=0.08,
+            avoidance_distance=0.75,
+        )
+        grid = self._corridor_grid(slope=0.0, center_offset=0.18)
+        grid.path_obstacle_m = 2.50
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=math.radians(8.0),
+            goal_distance=3.0,
+            preserve_clear_route_heading=True,
+        )
+
+        self.assertGreater(cmd.vx, 0.0)
+        self.assertAlmostEqual(cmd.vyaw, planner.max_yaw_rate)
+
+    def test_blocked_metric_route_can_still_choose_open_sector(self):
+        planner = LocalPlanner(
+            max_linear_speed=0.30,
+            max_yaw_rate=0.08,
+            avoidance_distance=0.75,
+        )
+        grid = self._corridor_grid(slope=0.0, center_offset=0.18)
+        grid.path_obstacle_m = 0.60
+
+        cmd = planner.compute_velocity(
+            grid,
+            goal_direction=0.0,
+            goal_distance=3.0,
+            preserve_clear_route_heading=True,
+        )
+
+        self.assertGreater(cmd.vyaw, 0.0)
+
     def test_metric_turn_is_not_overridden_by_open_space_centering(self):
         planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
         grid = self._corridor_grid(slope=0.0, center_offset=0.18)

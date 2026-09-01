@@ -1396,6 +1396,7 @@ class LocalPlanner:
         *,
         slow_for_arrival: bool = True,
         pivot_heading: Optional[float] = None,
+        preserve_clear_route_heading: bool = False,
     ) -> VelocityCommand:
         """Compute velocity toward the goal while avoiding obstacles.
 
@@ -1405,16 +1406,27 @@ class LocalPlanner:
             goal_distance: Distance to goal in meters.
             slow_for_arrival: Brake inside 0.5m for a stopping destination. False
                 for intermediate route points that should be passed through.
+            preserve_clear_route_heading: Keep metric-route guidance authoritative
+                while its forward corridor is outside the avoidance range. Local
+                centering remains available once a real obstacle blocks that lane.
 
         Returns:
             VelocityCommand with speed modulated by obstacle proximity and goal distance.
         """
         path_nearest = obstacle_grid.path_obstacle_m
         mapped_heading = goal_direction if pivot_heading is None else pivot_heading
-        route_direction = self._centered_route_heading(
-            obstacle_grid,
-            goal_direction,
-        )
+        if preserve_clear_route_heading and path_nearest > self.avoidance_distance:
+            # Metric guidance already contains bounded cross-track correction.
+            # Choosing a geometrically wider sector here can steadily turn away
+            # from an unobstructed mapped corridor, eventually leaving a straight
+            # waypoint behind and provoking a large route-regression pivot.
+            self._route_center_heading = None
+            route_direction = goal_direction
+        else:
+            route_direction = self._centered_route_heading(
+                obstacle_grid,
+                goal_direction,
+            )
 
         if path_nearest > self.avoidance_distance:
             return self._compute_direct_velocity(
@@ -5255,6 +5267,7 @@ class NavCore:
                 goal_dist,
                 slow_for_arrival=slow_for_arrival,
                 pivot_heading=pivot_heading,
+                preserve_clear_route_heading=metric_route,
             )
             stabilized = self._local_planner.stabilize_translating_steering(cmd)
             if isinstance(stabilized, VelocityCommand):
