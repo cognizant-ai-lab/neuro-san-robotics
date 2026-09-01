@@ -23,6 +23,7 @@ def _make_config(**overrides) -> DepthProcessorConfig:
         camera_mount_height=0.30,
         robot_half_width=0.15,
         path_corridor_half_width=0.12,
+        right_side_clearance_margin=0.08,
         path_obstacle_min_points=6,
         min_depth_m=0.1,
         max_depth_m=4.0,
@@ -86,6 +87,7 @@ class TestDepthProcessing(unittest.TestCase):
         old_width = os.environ.pop("NAV_DEPTH_PROCESS_WIDTH", None)
         old_height = os.environ.pop("NAV_DEPTH_PROCESS_HEIGHT", None)
         old_corridor = os.environ.pop("NAV_PATH_CORRIDOR_HALF_WIDTH", None)
+        old_right_margin = os.environ.pop("NAV_RIGHT_SIDE_CLEARANCE_MARGIN", None)
         try:
             cfg = DepthProcessor._config_from_env()
         finally:
@@ -95,10 +97,13 @@ class TestDepthProcessing(unittest.TestCase):
                 os.environ["NAV_DEPTH_PROCESS_HEIGHT"] = old_height
             if old_corridor is not None:
                 os.environ["NAV_PATH_CORRIDOR_HALF_WIDTH"] = old_corridor
+            if old_right_margin is not None:
+                os.environ["NAV_RIGHT_SIDE_CLEARANCE_MARGIN"] = old_right_margin
 
         self.assertEqual(cfg.process_width, 640)
         self.assertEqual(cfg.process_height, 480)
         self.assertAlmostEqual(cfg.path_corridor_half_width, 0.27)
+        self.assertAlmostEqual(cfg.right_side_clearance_margin, 0.08)
 
     def test_empty_depth_produces_empty_grid(self):
         """All-zeros depth (out of range) should produce an empty grid."""
@@ -140,6 +145,29 @@ class TestDepthProcessing(unittest.TestCase):
         self.assertLess(grid.nearest_obstacle_m, 0.25)
         self.assertEqual(grid.path_obstacle_m, float("inf"))
         self.assertEqual(grid.path_obstacle_points, 0)
+
+    def test_path_corridor_has_extra_clearance_only_on_robot_right(self):
+        proc = DepthProcessor(
+            config=_make_config(
+                simulation_mode=True,
+                path_corridor_half_width=0.27,
+            )
+        )
+        depth = np.zeros((240, 320), dtype=np.float32)
+
+        # At 1m, these patches are about 0.30m from the camera centerline.
+        # The nominal 0.27m corridor excludes both, while the extra 0.08m
+        # right-side envelope includes only the camera-right/robot-right patch.
+        depth[115:135, 217:221] = 1.0
+        right_grid = proc._process_depth_to_grid(depth)
+
+        depth.fill(0.0)
+        depth[115:135, 99:103] = 1.0
+        left_grid = proc._process_depth_to_grid(depth)
+
+        self.assertLess(right_grid.path_obstacle_m, float("inf"))
+        self.assertGreaterEqual(right_grid.path_obstacle_points, 6)
+        self.assertEqual(left_grid.path_obstacle_m, float("inf"))
 
     def test_center_depth_reading_uses_mid_image_band(self):
         proc = DepthProcessor(config=_make_config(simulation_mode=True))

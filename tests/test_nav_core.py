@@ -611,6 +611,55 @@ class TestLocalPlanner(unittest.TestCase):
 
         self.assertAlmostEqual(heading, goal_heading)
 
+    def test_route_heading_reserves_extra_space_for_robot_right_side(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.30, 1.40, 23):
+            row = grid.origin_row - round(forward / grid.resolution)
+            # This is outside the old symmetric 0.42m swept corridor but
+            # inside the new 0.50m robot-right envelope.
+            col = grid.origin_col + round(0.47 / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        heading = planner._centered_route_heading(grid, goal_direction=0.0)
+
+        self.assertGreater(heading, 0.0)
+
+    def test_right_wall_margin_steers_left_before_leg_contact(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col + round(0.50 / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.28, vy=0.0, vyaw=-0.08),
+            grid,
+            correction_limit=0.02,
+            route_heading_authoritative=True,
+        )
+
+        self.assertGreater(corrected.vyaw, 0.0)
+
+    def test_final_approach_keeps_small_right_clearance_correction(self):
+        planner = LocalPlanner(max_yaw_rate=0.08, avoidance_distance=0.75)
+        grid = _empty_grid()
+        for forward in np.linspace(0.25, 1.80, 32):
+            row = grid.origin_row - round(forward / grid.resolution)
+            col = grid.origin_col + round(0.60 / grid.resolution)
+            grid.grid[row, col] = 1.0
+
+        corrected = planner.apply_corridor_course_correction(
+            VelocityCommand(vx=0.18, vy=0.0, vyaw=0.0),
+            grid,
+            correction_limit=0.02,
+            align_only=True,
+        )
+
+        self.assertGreater(corrected.vyaw, 0.0)
+        self.assertLessEqual(corrected.vyaw, 0.02)
+
     def test_velocity_steers_toward_widest_open_route_before_avoidance_band(self):
         planner = LocalPlanner(
             max_linear_speed=0.30,

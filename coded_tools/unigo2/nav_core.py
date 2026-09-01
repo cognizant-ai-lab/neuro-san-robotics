@@ -1367,6 +1367,13 @@ class LocalPlanner:
     )
     ROUTE_CENTER_LOOKAHEAD_M = _env_float("NAV_ROUTE_CENTER_LOOKAHEAD", 1.50)
     ROUTE_CENTER_HALF_WIDTH_M = _env_float("NAV_ROUTE_CENTER_HALF_WIDTH", 0.42)
+    # Extra robot-relative envelope for the Go2's right legs.  Applying it in
+    # the local planner protects the same physical side on outbound and return
+    # trips without moving map obstacles or globally widening every route.
+    RIGHT_SIDE_CLEARANCE_MARGIN_M = _env_float(
+        "NAV_RIGHT_SIDE_CLEARANCE_MARGIN",
+        0.08,
+    )
     ROUTE_CENTER_MAX_HEADING_RAD = _env_float(
         "NAV_ROUTE_CENTER_MAX_HEADING_RAD",
         math.radians(40.0),
@@ -1802,7 +1809,14 @@ class LocalPlanner:
         blocking = forward[
             (forward >= 0.10)
             & (forward <= self.ROUTE_CENTER_LOOKAHEAD_M)
-            & (np.abs(lateral) <= self.ROUTE_CENTER_HALF_WIDTH_M)
+            & (lateral <= self.ROUTE_CENTER_HALF_WIDTH_M)
+            & (
+                lateral
+                >= -(
+                    self.ROUTE_CENTER_HALF_WIDTH_M
+                    + self.RIGHT_SIDE_CLEARANCE_MARGIN_M
+                )
+            )
         ]
         if blocking.size < self.ROUTE_CENTER_MIN_BLOCKING_POINTS:
             return self.ROUTE_CENTER_LOOKAHEAD_M
@@ -1872,6 +1886,7 @@ class LocalPlanner:
             return cmd
 
         wall_heading, lateral_error, geometry_type = wall_geometry
+        protect_right_side_on_final_approach = False
         if geometry_type == "single_wall":
             walls = self._visible_wall_fits(obstacle_grid)
             candidates = []
@@ -1881,11 +1896,17 @@ class LocalPlanner:
                 candidates.append((abs(walls["right"][1]), -1.0, walls["right"]))
             if candidates:
                 clearance, side, (heading, _lateral) = min(candidates)
+                side_margin = (
+                    self.RIGHT_SIDE_CLEARANCE_MARGIN_M if side < 0.0 else 0.0
+                )
+                target_clearance = self.SINGLE_WALL_TARGET_CLEARANCE_M + side_margin
+                hard_clearance = self.SINGLE_WALL_HARD_CLEARANCE_M + side_margin
                 converging = (
                     side * heading <= -self.EARLY_WALL_CONVERGENCE_RAD
                 )
-                inside_target = clearance < self.SINGLE_WALL_TARGET_CLEARANCE_M
-                hard_too_close = clearance < self.SINGLE_WALL_HARD_CLEARANCE_M
+                inside_target = clearance < target_clearance
+                hard_too_close = clearance < hard_clearance
+                protect_right_side_on_final_approach = side < 0.0 and inside_target
                 if (
                     not align_only
                     and clearance <= self.EARLY_WALL_ALIGNMENT_CLEARANCE_M
@@ -1912,6 +1933,12 @@ class LocalPlanner:
                             desired_yaw = (
                                 away_sign * self.EARLY_WALL_MIN_AWAY_YAW_RPS
                             )
+                    elif side < 0.0 and inside_target:
+                        # Start opening right-side clearance while there is
+                        # still room for a small translating correction.
+                        desired_yaw += float(
+                            np.clip(0.35 * lateral_error, -0.03, 0.03)
+                        )
                     desired_yaw = float(
                         np.clip(
                             desired_yaw,
@@ -1943,6 +1970,12 @@ class LocalPlanner:
             # chasing a nominal wall clearance can gradually steer out of the
             # mapped entrance corridor even while the forward path is clear.
             correction = 0.25 * wall_heading
+            if protect_right_side_on_final_approach:
+                # Preserve the mapped final-approach heading, but do not let it
+                # carry the right legs underneath adjacent furniture.  This is
+                # deliberately bounded by the caller's small metric-route
+                # correction limit.
+                correction += 0.25 * lateral_error
         elif geometry_type == "corridor":
             correction = 0.30 * wall_heading + 0.20 * lateral_error
         else:
@@ -1998,7 +2031,10 @@ class LocalPlanner:
                     math.sin(left_heading) + math.sin(right_heading),
                     math.cos(left_heading) + math.cos(right_heading),
                 )
-                center_offset = 0.5 * (left_at_reference + right_at_reference)
+                center_offset = (
+                    0.5 * (left_at_reference + right_at_reference)
+                    + self.RIGHT_SIDE_CLEARANCE_MARGIN_M
+                )
                 return wall_heading, center_offset, "corridor"
 
         # A single visible wall is still useful. Prefer the side with the
@@ -2012,8 +2048,11 @@ class LocalPlanner:
             return None
 
         _clearance, side, (heading, lateral_at_reference) = min(candidates)
+        target_clearance = self.SINGLE_WALL_TARGET_CLEARANCE_M
+        if side < 0.0:
+            target_clearance += self.RIGHT_SIDE_CLEARANCE_MARGIN_M
         clearance_error = side * (
-            abs(lateral_at_reference) - self.SINGLE_WALL_TARGET_CLEARANCE_M
+            abs(lateral_at_reference) - target_clearance
         )
         return heading, clearance_error, "single_wall"
 
@@ -2078,7 +2117,10 @@ class LocalPlanner:
             math.sin(left_heading) + math.sin(right_heading),
             math.cos(left_heading) + math.cos(right_heading),
         )
-        center_offset = 0.5 * (left_at_reference + right_at_reference)
+        center_offset = (
+            0.5 * (left_at_reference + right_at_reference)
+            + self.RIGHT_SIDE_CLEARANCE_MARGIN_M
+        )
         return wall_heading, center_offset
 
     def _fit_corridor_wall(
