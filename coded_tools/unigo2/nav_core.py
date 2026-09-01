@@ -1634,7 +1634,6 @@ class LocalPlanner:
         *,
         correction_limit: Optional[float] = None,
         align_only: bool = False,
-        preserve_clear_route_heading: bool = False,
     ) -> VelocityCommand:
         """Add bounded steering from visible corridor or one-sided wall geometry."""
         if cmd.vx <= 0.05:
@@ -1662,7 +1661,6 @@ class LocalPlanner:
                 too_close = clearance < self.SINGLE_WALL_TARGET_CLEARANCE_M
                 if (
                     not align_only
-                    and not preserve_clear_route_heading
                     and clearance <= self.EARLY_WALL_ALIGNMENT_CLEARANCE_M
                     and (converging or too_close)
                 ):
@@ -5282,10 +5280,6 @@ class NavCore:
                     grid,
                     correction_limit=0.02 if metric_route else None,
                     align_only=metric_route and slow_for_arrival,
-                    preserve_clear_route_heading=(
-                        metric_route
-                        and grid.path_obstacle_m > self.AVOIDANCE_DISTANCE_M
-                    ),
                 )
                 if isinstance(corrected, VelocityCommand):
                     cmd = corrected
