@@ -2,6 +2,7 @@
 
 import json
 import time
+from dataclasses import dataclass
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -9,8 +10,35 @@ from apps.conscious_assistant.robot_identity import robot_home
 from apps.conscious_assistant.robot_identity import robot_name
 
 
-REALTIME_CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
+REALTIME_SESSION_URL = "https://api.openai.com/v1/realtime/client_secrets"
 TRANSIENT_STATUSES = {502, 503, 504}
+
+
+@dataclass(frozen=True)
+class RealtimeSessionResponse:
+    """
+    Upstream reply to a browser transcription session request.
+
+    ``payload`` is the raw upstream body. On success it carries the ephemeral
+    credential the browser authenticates with, so it is forwarded straight to
+    that browser and must never be logged or folded into an error message.
+    Every other field is ordinary transport metadata and is safe to log.
+    """
+
+    status: int
+    content_type: str
+    payload: bytes
+    request_id: str
+
+    @property
+    def failed(self) -> bool:
+        """Whether the upstream call reported an error."""
+        return self.status >= 400
+
+    @property
+    def transient(self) -> bool:
+        """Whether a gateway hiccup makes a retry worth attempting."""
+        return self.status in TRANSIENT_STATUSES
 
 
 def transcription_prompt() -> str:
@@ -45,12 +73,12 @@ def transcription_session_config(model: str) -> dict:
     }
 
 
-def _send_client_secret_request(api_key: str, model: str):
+def _post_session_request(api_key: str, model: str) -> RealtimeSessionResponse:
     request_body = json.dumps({
         "session": transcription_session_config(model),
     }).encode("utf-8")
     upstream_request = Request(
-        REALTIME_CLIENT_SECRETS_URL,
+        REALTIME_SESSION_URL,
         data=request_body,
         method="POST",
         headers={
@@ -60,32 +88,32 @@ def _send_client_secret_request(api_key: str, model: str):
     )
     try:
         with urlopen(upstream_request, timeout=20) as response:  # nosec B310
-            return (
-                response.status,
-                response.headers.get_content_type(),
-                response.read(),
-                response.headers.get("x-request-id", ""),
+            return RealtimeSessionResponse(
+                status=response.status,
+                content_type=response.headers.get_content_type(),
+                payload=response.read(),
+                request_id=response.headers.get("x-request-id", ""),
             )
     except HTTPError as error:
-        return (
-            error.code,
-            error.headers.get_content_type(),
-            error.read(),
-            error.headers.get("x-request-id", ""),
+        return RealtimeSessionResponse(
+            status=error.code,
+            content_type=error.headers.get_content_type(),
+            payload=error.read(),
+            request_id=error.headers.get("x-request-id", ""),
         )
 
 
-def create_realtime_client_secret(
+def request_realtime_session(
     api_key: str,
     model: str,
     *,
     max_attempts: int = 2,
-):
-    """Mint a short-lived browser token, retrying transient gateway failures."""
+) -> RealtimeSessionResponse:
+    """Open a short-lived browser session, retrying transient gateway failures."""
     attempts = max(1, max_attempts)
     for attempt in range(attempts):
-        result = _send_client_secret_request(api_key, model)
-        if result[0] not in TRANSIENT_STATUSES or attempt == attempts - 1:
-            return result
+        response = _post_session_request(api_key, model)
+        if not response.transient or attempt == attempts - 1:
+            return response
         time.sleep(0.5 * (attempt + 1))
     raise AssertionError("unreachable")
