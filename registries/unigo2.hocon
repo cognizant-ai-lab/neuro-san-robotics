@@ -24,9 +24,10 @@
             "safety": 0.8,    
         }
     },
-    "llm_config": {
-        "model_name": "gpt-4o",
-    },
+    # Deliberately a cheaper model than the conscious assistant; see
+    # llm_config.hocon. Driven by environment variables, not edited here.
+    include "llm_config.hocon"
+    "llm_config": ${llm_config_lightweight}
     "tools": [
         {
             "name": "robot_manager",

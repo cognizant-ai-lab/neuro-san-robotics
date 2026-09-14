@@ -58,6 +58,14 @@ from typing import Any, Callable, Dict, List, Optional
 
 from neuro_san.interfaces.coded_tool import CodedTool
 
+# neuro-san loads this file as "unigo2.tts_go2" with coded_tools/ as the root,
+# while the Flask app imports it as "coded_tools.unigo2.tts_go2". Both spellings
+# have to work, and the CLI at the bottom of this file runs it as a script.
+try:
+    from coded_tools.unigo2 import openai_provider
+except ImportError:  # pragma: no cover - depends on which root is on sys.path
+    from unigo2 import openai_provider
+
 
 # ---------------------------------------------------------------------
 # Configuration (override via env vars if needed)
@@ -353,7 +361,12 @@ def _run_playback(
 # ---------------------------------------------------------------------
 
 def _is_openai_available() -> bool:
-    """Check if OpenAI TTS is available (API key set)."""
+    """Check if hosted TTS is available (credentials for the active provider)."""
+    if openai_provider.use_azure():
+        return bool(
+            os.environ.get("AZURE_OPENAI_ENDPOINT")
+            and (os.environ.get("AZURE_OPENAI_API_KEY") or os.environ.get("AZURE_OPENAI_AD_TOKEN"))
+        )
     return bool(os.environ.get("OPENAI_API_KEY"))
 
 
@@ -567,12 +580,11 @@ def _openai_say_streaming(
         alsa_device: ALSA device for Linux (default from env var)
         volume: Volume level 0.0-1.0 (default 1.0)
     """
-    try:
-        from openai import OpenAI
-    except ImportError:
-        raise RuntimeError("openai package not installed. Run: pip install openai")
-
-    client = OpenAI(timeout=OPENAI_TIMEOUT_SECONDS, max_retries=0)
+    client = openai_provider.create_client(
+        timeout=OPENAI_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    model = openai_provider.deployment_for("GO2_AZURE_TTS_DEPLOYMENT", model)
     system = platform.system()
     device = alsa_device or _RESOLVED_ALSA_DEVICE
     generation = _PLAYBACK.generation
@@ -740,12 +752,12 @@ async def _openai_say_streaming_async(
 
     Uses the async OpenAI client for better integration with async code.
     """
-    try:
-        from openai import AsyncOpenAI
-    except ImportError:
-        raise RuntimeError("openai package not installed. Run: pip install openai")
-
-    client = AsyncOpenAI(timeout=OPENAI_TIMEOUT_SECONDS, max_retries=0)
+    client = openai_provider.create_client(
+        want_async=True,
+        timeout=OPENAI_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    model = openai_provider.deployment_for("GO2_AZURE_TTS_DEPLOYMENT", model)
     system = platform.system()
     device = alsa_device or _RESOLVED_ALSA_DEVICE
     generation = _PLAYBACK.generation

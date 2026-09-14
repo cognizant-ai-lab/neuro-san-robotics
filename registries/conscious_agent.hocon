@@ -10,13 +10,11 @@
 #
 # END COPYRIGHT
 {
-    "llm_config": {
-        "class" : "openai",
-        # "model_name": "gpt-5-mini",
-        # "model_name": "gpt-4.1"
-        "model_name": "gpt-5.1"
-        # "model_name": "gpt-4.1-2025-04-14"
-},
+    # Provider, model and Azure deployment all come from llm_config.hocon, which
+    # reads them from the environment. Retarget this agent at a different model
+    # -- or at a customer's Azure resource -- by editing setmyenv.sh, not here.
+    include "llm_config.hocon"
+    "llm_config": ${llm_config_default}
     # A normal turn needs at most a few LLM/tool stages. Bound event work so a
     # stalled model call cannot retain the native event session indefinitely.
     "max_steps": 12,
