@@ -11,6 +11,7 @@ from unittest.mock import patch
 from apps.conscious_assistant import interface_flask
 from apps.conscious_assistant import realtime_transcription
 from coded_tools.unigo2 import openai_provider
+from coded_tools.unigo2 import tts_go2
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +119,20 @@ class AudioProviderTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as caught:
                 openai_provider.create_client()
         self.assertIn("OPENAI_API_VERSION", str(caught.exception))
+
+
+class LegacyTtsDeploymentTests(unittest.TestCase):
+    """Some Azure regions offer only tts / tts-hd, which reject style guidance."""
+
+    def test_style_guidance_is_sent_when_configured(self):
+        self.assertEqual(
+            tts_go2._style_kwargs("Speak warmly."), {"instructions": "Speak warmly."}
+        )
+
+    def test_style_guidance_is_dropped_when_blanked(self):
+        """Blanking it must omit the parameter, not send an empty one."""
+        for blank in ("", "   ", None):
+            self.assertEqual(tts_go2._style_kwargs(blank), {}, repr(blank))
 
 
 class RealtimeRoutingTests(unittest.TestCase):

@@ -320,6 +320,28 @@ The conscious assistant's native event and periodic execution require
 `neuro-san==0.6.76` or later. Older releases can acknowledge an event without
 continuing the agent work, so the application refuses to start with them.
 
+### Install the offline TTS voice
+
+`requirements.txt` installs the Piper binary but not the voice it speaks with,
+and the voice is a ~114 MB download rather than a Python package, so it has to
+be fetched separately:
+
+```shell
+python scripts/install_piper_voice.py
+
+# Report what is installed without downloading anything
+python scripts/install_piper_voice.py --check
+```
+
+Piper is what the robot speaks with whenever the hosted text-to-speech API is
+unreachable, unconfigured, or not offered in the deployment's region. Skip this
+and that fallback drops through to `espeak-ng`, which is intelligible but
+markedly worse. `setmyenv.sh` warns at startup while the voice is missing.
+
+Sites with no hosted TTS at all should also set `GO2_TTS_ENGINE="piper"`, so
+the robot speaks immediately instead of waiting out a doomed API call before
+every utterance.
+
 ### Set up Unitree's SDK
 
 See https://github.com/unitreerobotics/unitree_sdk2_python for more details.

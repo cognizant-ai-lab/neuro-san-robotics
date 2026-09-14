@@ -360,6 +360,21 @@ def _run_playback(
 # OpenAI TTS with True Streaming
 # ---------------------------------------------------------------------
 
+def _style_kwargs(instructions: str) -> Dict[str, Any]:
+    """
+    Return the `instructions` kwarg only when there is something to say with it.
+
+    Style guidance is a gpt-4o-mini-tts feature. The older tts / tts-hd
+    deployments -- which in some Azure regions are the only text-to-speech
+    models on offer -- reject the parameter outright. Sending it unconditionally
+    would fail every request there, and because the engine defaults to "auto"
+    that failure is swallowed and the robot drops to espeak with only a warning.
+    Setting GO2_OPENAI_INSTRUCTIONS="" makes this call tts-compatible.
+    """
+    cleaned = (instructions or "").strip()
+    return {"instructions": cleaned} if cleaned else {}
+
+
 def _is_openai_available() -> bool:
     """Check if hosted TTS is available (credentials for the active provider)."""
     if openai_provider.use_azure():
@@ -609,8 +624,8 @@ def _openai_say_streaming(
         model=model,
         voice=voice,
         input=text,
-        instructions=instructions,
         response_format="pcm",
+        **_style_kwargs(instructions),
     ) as response:
         if system == "Linux":
             output_rate = ONBOARD_PCM_RATE if _is_onboard_audio_device(device) else OPENAI_PCM_RATE
@@ -780,8 +795,8 @@ async def _openai_say_streaming_async(
         model=model,
         voice=voice,
         input=text,
-        instructions=instructions,
         response_format="pcm",
+        **_style_kwargs(instructions),
     ) as response:
         if system == "Linux":
             output_rate = ONBOARD_PCM_RATE if _is_onboard_audio_device(device) else OPENAI_PCM_RATE
