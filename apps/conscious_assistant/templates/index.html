@@ -551,7 +551,13 @@
                     throw new Error('Token creation returned no ephemeral key');
                 }
 
-                response = await fetch('https://api.openai.com/v1/realtime/calls', {
+                // The server tells us which provider minted this credential, so
+                // an Azure-hosted robot offers to its own resource rather than
+                // to api.openai.com. Older responses omit it.
+                var callsUrl = tokenResponse.headers.get('X-Realtime-Calls-Url')
+                    || 'https://api.openai.com/v1/realtime/calls';
+
+                response = await fetch(callsUrl, {
                     method: 'POST',
                     headers: {
                         'Authorization': 'Bearer ' + tokenData.value,
