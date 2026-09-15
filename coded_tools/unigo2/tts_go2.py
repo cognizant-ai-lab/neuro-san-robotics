@@ -92,12 +92,12 @@ ONBOARD_PCM_RATE = 48_000
 # Piper TTS configuration
 PIPER_MODEL = os.environ.get(
     "GO2_PIPER_MODEL",
-    "/home/unitree/piper_models/en_GB-cori-high.onnx",
+    os.path.expanduser("~/piper_models/en_GB-cori-high.onnx"),
 )
 
 PIPER_CONFIG = os.environ.get(
     "GO2_PIPER_CONFIG",
-    "/home/unitree/piper_models/en_GB-cori-high.onnx.json",
+    os.path.expanduser("~/piper_models/en_GB-cori-high.onnx.json"),
 )
 
 ONBOARD_ALSA_DEVICE = os.environ.get(

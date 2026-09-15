@@ -263,6 +263,17 @@ where a timeout or a missing model quietly moves to the next engine.
 
 Default order: hosted → pocket → piper → `say` (macOS) → espeak.
 
+`setmyenv.sh` sets this and `GO2_STT_ENGINE` explicitly rather than falling
+back to whatever the shell already had. `source` runs in your current shell, so
+a value exported earlier in that terminal would otherwise survive and change
+what the robot does — including whether it downloads a model. If a robot
+reports an engine you did not choose, check for a stale export:
+
+```shell
+echo "$GO2_TTS_ENGINE $GO2_STT_ENGINE"
+unset GO2_TTS_ENGINE GO2_STT_ENGINE
+```
+
 ### Piper, the offline voice
 
 `requirements.txt` installs the Piper binary but not the voice it speaks with,
@@ -282,7 +293,10 @@ opts into fetching it regardless.
 Without the voice, offline speech falls through to `espeak-ng`, which is
 intelligible but markedly worse.
 
-Related: `GO2_PIPER_MODEL` and `GO2_PIPER_CONFIG` move where the voice lives.
+`GO2_PIPER_MODEL` and `GO2_PIPER_CONFIG` move where the voice lives. The
+default is `~/piper_models/`, which on the robot is `/home/unitree/piper_models`
+and on a laptop is under your own home directory, so the same setting works in
+both places.
 
 ### `GO2_STT_ENGINE`
 
