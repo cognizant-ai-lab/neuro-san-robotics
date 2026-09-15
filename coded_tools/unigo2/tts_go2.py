@@ -63,8 +63,10 @@ from neuro_san.interfaces.coded_tool import CodedTool
 # have to work, and the CLI at the bottom of this file runs it as a script.
 try:
     from coded_tools.unigo2 import openai_provider
+    from coded_tools.unigo2 import tts_engines
 except ImportError:  # pragma: no cover - depends on which root is on sys.path
     from unigo2 import openai_provider
+    from unigo2 import tts_engines
 
 
 # ---------------------------------------------------------------------
@@ -1486,6 +1488,58 @@ def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None
 # ---------------------------------------------------------------------
 
 
+def _speak_via_piper(text: str, *, volume: float = 1.0,
+                     alsa_device: str | None = None, **_unused: Any) -> None:
+    """Adapter so the registry can call Piper with a uniform signature."""
+    _linux_say_via_piper(text, volume=volume, alsa_device=alsa_device)
+
+
+def _speak_via_espeak(text: str, *, rate: int = 150, volume: float = 1.0,
+                      voice: str = "en-gb+f3", alsa_device: str | None = None,
+                      **_unused: Any) -> None:
+    """Adapter so the registry can call espeak-ng with a uniform signature."""
+    _linux_say_via_espeak(
+        text, rate=rate, volume=volume, voice=voice, alsa_device=alsa_device,
+    )
+
+
+def _speak_via_mac_say(text: str, *, rate: int = 150, **_unused: Any) -> None:
+    """Adapter so the registry can call macOS `say` with a uniform signature."""
+    _mac_say_via_subprocess(text, rate)
+
+
+def _register_offline_engines() -> None:
+    """
+    Put the offline engines in the registry, best-sounding first.
+
+    Adding another -- pocket-tts, say -- is one more call here plus its two
+    functions, rather than an edit to the availability gates, the Linux chain
+    and the fallback gate all at once, which is what it used to take.
+    """
+    register = tts_engines.REGISTRY.register
+    register(tts_engines.TtsEngine(
+        name="piper",
+        available=_is_piper_available,
+        speak=_speak_via_piper,
+        description="Piper neural voice, offline (needs scripts/install_piper_voice.py)",
+    ))
+    register(tts_engines.TtsEngine(
+        name="say",
+        available=lambda: platform.system() == "Darwin" and _has("say"),
+        speak=_speak_via_mac_say,
+        description="macOS built-in `say`",
+    ))
+    register(tts_engines.TtsEngine(
+        name="espeak",
+        available=lambda: _has("espeak-ng"),
+        speak=_speak_via_espeak,
+        description="espeak-ng, always-available last resort",
+    ))
+
+
+_register_offline_engines()
+
+
 def _say_single_chunk(
     text: str,
     rate: int = 150,
@@ -1498,31 +1552,21 @@ def _say_single_chunk(
 
     This function handles the actual TTS for one chunk of text.
     It does NOT sanitize text - caller should sanitize before calling.
+
+    Which engine speaks, and in what order they are tried, comes from the
+    registry rather than from a chain written out here; see tts_engines.py.
     """
-    system = platform.system()
-
-    if system == "Linux":
-        try:
-            _linux_say_via_piper(text, volume=volume, alsa_device=alsa_device)
-            return
-        except SpeechInterrupted:
-            raise
-        except Exception:
-            logging.exception("Piper failed, falling back to espeak-ng")
-            _linux_say_via_espeak(
-                text,
-                rate=rate,
-                volume=volume,
-                voice=voice,
-                alsa_device=alsa_device,
-            )
-            return
-
-    if system == "Darwin":
-        _mac_say_via_subprocess(text, rate)
-        return
-
-    raise RuntimeError(f"TTS not supported on OS={system}")
+    # SpeechInterrupted is a barge-in, not an engine fault: the registry must
+    # re-raise it rather than try the next engine, which would restart the
+    # utterance the user just talked over.
+    tts_engines.REGISTRY.speak(
+        text,
+        passthrough=(SpeechInterrupted,),
+        rate=rate,
+        volume=volume,
+        voice=voice,
+        alsa_device=alsa_device,
+    )
 
 
 def say_streaming(
