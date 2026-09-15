@@ -103,6 +103,96 @@ HTTP, so without a certificate voice input will not work from another machine.
 
 ---
 
+## Choosing a setup
+
+Three choices, and they are independent. Pick each one separately:
+
+| | What it decides | Variable |
+|---|---|---|
+| **Agents** | which LLM the agent networks think with | `AGENT_LLM_CLASS` |
+| **Speech out** | whether the robot's voice is a hosted model or Piper on the robot | `GO2_TTS_ENGINE` |
+| **Speech in** | whether transcription is a hosted model or Whisper on the robot | `GO2_STT_ENGINE` |
+
+A fourth, `GO2_AUDIO_PROVIDER`, only says *which cloud* hosted speech calls. It
+is ignored the moment both speech settings are local.
+
+### Common setups
+
+`—` means leave it unset.
+
+| Setup | `AGENT_LLM_CLASS` | `GO2_TTS_ENGINE` | `GO2_STT_ENGINE` | Also needs |
+|---|---|---|---|---|
+| Everything on public OpenAI | — | — | — | `OPENAI_API_KEY` |
+| Everything on Azure | `azure-openai` | — | — | Azure credentials + all 5 deployments |
+| **Azure agents, speech on the robot** | `azure-openai` | `piper` | `local` | Azure credentials + chat deployment only |
+| Azure agents, speech on public OpenAI | `azure-openai` | — | — | Azure credentials + `OPENAI_API_KEY` + `GO2_AUDIO_PROVIDER="openai"` |
+| Hosted voice, listening on the robot | either | — | `local` | credentials for the hosted half |
+| Robot voice, hosted listening | either | `piper` | — | credentials for the hosted half |
+| Fully offline | — | `piper` | `local` | no API keys at all |
+
+The bolded row is the usual Azure case, because Azure's speech models are
+region-limited and frequently absent from the resource serving chat.
+
+### Azure agents with speech on the robot
+
+The complete set. Nothing else is required, and no `OPENAI_API_KEY`:
+
+```shell
+export AGENT_LLM_CLASS="azure-openai"
+export AZURE_OPENAI_ENDPOINT="https://<your-resource>.openai.azure.com"
+export AZURE_OPENAI_API_KEY="..."
+export OPENAI_API_VERSION="2024-10-21"
+export AZURE_OPENAI_DEPLOYMENT_NAME="<your-gpt-5.1-or-5.4-deployment>"
+
+export GO2_TTS_ENGINE="piper"
+export GO2_STT_ENGINE="local"
+```
+
+Naming `piper` and `local` also installs what they need when `setmyenv.sh` is
+sourced: the Piper voice, and the Whisper weights.
+
+Set these by **editing `setmyenv.sh`**, not by exporting them beforehand. The
+file assigns both engines outright, so `GO2_TTS_ENGINE=piper source setmyenv.sh`
+is overwritten by the file's own value. That is deliberate — it is what stops a
+value left over in your shell from quietly changing what the robot does — but
+it does mean the file is the only place to set them.
+
+Two things worth knowing about this setup:
+
+- The `unigo2` network will report `model_name: gpt-4o-2024-08-06` while
+  pointing at your chat deployment. Harmless, since Azure routes on the
+  deployment name, but it reads oddly in logs. Set
+  `AGENT_LLM_MODEL_NAME_LIGHT` to what the deployment really serves if that
+  matters.
+- Do not set `GO2_TTS_ENGINE` back to `auto` here. With
+  `AZURE_OPENAI_ENDPOINT` set, `auto` makes the speech layer believe Azure is
+  available, so every utterance would call a text-to-speech deployment that
+  does not exist and wait out `GO2_OPENAI_TIMEOUT_SECONDS` before falling back
+  to Piper. Naming the engines explicitly is what avoids that.
+
+### Switching one thing later
+
+Each row above changes independently, so moving one part does not disturb the
+others:
+
+| To change | Edit | Effect |
+|---|---|---|
+| Speech out → the robot | `GO2_TTS_ENGINE="piper"` | stops calling out for the voice |
+| Speech out → hosted | `GO2_TTS_ENGINE="auto"` | hosted first, Piper if it fails |
+| Speech in → the robot | `GO2_STT_ENGINE="local"` | stops calling out for transcription |
+| Speech in → hosted | `GO2_STT_ENGINE="auto"` | hosted first, local Whisper if it fails |
+| Hosted speech → public OpenAI | `GO2_AUDIO_PROVIDER="openai"` | speech leaves Azure, agents stay |
+| Hosted speech → Azure | `GO2_AUDIO_PROVIDER="azure"` | needs the three Azure speech deployments |
+| Agents → Azure | `AGENT_LLM_CLASS="azure-openai"` | every agent network at once |
+| Agents → public OpenAI | unset `AGENT_LLM_CLASS` | back to `OPENAI_API_KEY` |
+
+`auto` versus naming an engine is worth restating: `auto` tries hosted first
+and falls back, which costs a failed request and its timeout before every
+utterance at a site with no hosted model. Naming the engine skips that
+entirely. Use `auto` where a hosted model genuinely exists.
+
+---
+
 ## Model providers
 
 Two separate APIs are in play, and they are configured independently.
