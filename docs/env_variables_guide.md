@@ -255,13 +255,16 @@ Which engine speaks, and in what order engines are tried.
 |---|---|
 | unset / `auto` | try each engine in order, skipping ones not installed |
 | `piper` | that engine only; its failures are raised, not hidden |
-| `pocket,piper,espeak` | try exactly these, in this order |
+| `piper,espeak` | try exactly these, in this order |
 
 Naming a single engine is a statement that you want to know when it breaks, so
 it is a chain of one rather than a preference. `auto` is the forgiving mode,
 where a timeout or a missing model quietly moves to the next engine.
 
-Default order: hosted → pocket → piper → `say` (macOS) → espeak.
+Default order: hosted → piper → `say` (macOS) → espeak.
+
+Only engines that exist are listed. pocket-tts and Qwen3-TTS are candidates
+but are not implemented; naming one would fail as though it were a typo.
 
 `setmyenv.sh` sets this and `GO2_STT_ENGINE` explicitly rather than falling
 back to whatever the shell already had. `source` runs in your current shell, so

@@ -150,6 +150,42 @@ class RegistrationTests(unittest.TestCase):
         for name in ("piper", "espeak", "say"):
             self.assertIn(name, tts_engines.REGISTRY.known())
 
+    def test_every_name_in_the_default_order_actually_exists(self):
+        """
+        A name in DEFAULT_ORDER that nothing registers is silently skipped in
+        auto, but makes an explicit GO2_TTS_ENGINE of that name fail as though
+        it were a typo. Listing an engine before implementing it did exactly
+        that to "pocket".
+        """
+        from coded_tools.unigo2 import tts_go2  # noqa: F401 - registers on import
+
+        accounted = set(tts_engines.REGISTRY.known()) | tts_engines.EXTERNALLY_HANDLED
+        for name in tts_engines.DEFAULT_ORDER:
+            self.assertIn(name, accounted, f"{name} is advertised but unreachable")
+
+    def test_every_default_order_name_is_selectable(self):
+        """Each advertised engine must resolve when named on its own."""
+        from coded_tools.unigo2 import tts_go2  # noqa: F401 - registers on import
+
+        for name in tts_engines.DEFAULT_ORDER:
+            with patch.dict(os.environ, {"GO2_TTS_ENGINE": name}):
+                try:
+                    tts_engines.REGISTRY.chain()
+                except ValueError as error:
+                    self.fail(f"GO2_TTS_ENGINE={name} rejected: {error}")
+
+    def test_the_hosted_engine_is_not_reported_as_a_typo(self):
+        """GO2_TTS_ENGINE=openai predates this registry and must keep working."""
+        from coded_tools.unigo2 import tts_go2  # noqa: F401 - registers on import
+
+        with patch.dict(os.environ, {"GO2_TTS_ENGINE": "openai"}):
+            self.assertEqual(tts_engines.REGISTRY.chain(), [])
+
+    def test_a_genuine_typo_is_still_rejected(self):
+        with patch.dict(os.environ, {"GO2_TTS_ENGINE": "openal"}):
+            with self.assertRaises(ValueError):
+                tts_engines.REGISTRY.chain()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ GO2_TTS_ENGINE selects what runs:
                           that are not installed, until one speaks
     "piper"               use exactly that engine; if it fails, the failure is
                           raised rather than hidden behind a fallback
-    "pocket,piper,espeak" try exactly these, in this order
+    "piper,espeak"        try exactly these, in this order
 
 The single-name form keeps its old meaning: naming an engine explicitly means
 you want to know when it breaks, so it is a chain of one rather than a
@@ -34,7 +34,17 @@ from typing import Any, Callable, Dict, List
 #
 # "openai" rather than "hosted" because GO2_TTS_ENGINE=openai is already a
 # documented setting on deployed robots, and it now covers Azure as well.
-DEFAULT_ORDER = ("openai", "pocket", "piper", "say", "espeak")
+#
+# Only engines that exist belong here. pocket-tts is a candidate but is not
+# implemented, and listing a name nothing registers makes an explicit
+# GO2_TTS_ENGINE="pocket" fail as though it were a typo.
+DEFAULT_ORDER = ("openai", "piper", "say", "espeak")
+
+# Names this registry recognises but does not own. The hosted engine streams
+# audio as it arrives rather than handing back a finished utterance, so
+# say_streaming() drives it directly and the registry never sees it. Listing it
+# keeps an explicit GO2_TTS_ENGINE="openai" from being reported as unknown.
+EXTERNALLY_HANDLED = frozenset({"openai"})
 
 
 @dataclass(frozen=True)
@@ -95,12 +105,15 @@ class EngineRegistry:
         chain: List[TtsEngine] = []
 
         for name in names:
+            if name in EXTERNALLY_HANDLED:
+                continue
             engine = self.engines.get(name)
             if engine is None:
                 if explicit:
+                    known = ", ".join(sorted(set(self.known()) | EXTERNALLY_HANDLED))
                     raise ValueError(
                         f"Unknown TTS engine {name!r} in GO2_TTS_ENGINE. "
-                        f"Known engines: {', '.join(self.known())}"
+                        f"Known engines: {known}"
                     )
                 continue
             if explicit and len(names) == 1:
