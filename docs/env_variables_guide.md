@@ -496,8 +496,26 @@ theirs.
 | `GO2_OPENAI_VOICE` | `coral` | hosted TTS voice |
 | `GO2_OPENAI_INSTRUCTIONS` | friendly, conversational | style guidance; blank to omit |
 | `GO2_OPENAI_TIMEOUT_SECONDS` | `20` | before falling back to an offline engine |
-| `GO2_TTS_DEVICE` | `auto` | ALSA output: `auto`, `usb`, `onboard`, or a device name |
+| `GO2_TTS_DEVICE` | `auto` | ALSA output: `auto`, `usb`, `onboard`, `pulse`, or a device name |
 | `GO2_TTS_VOLUME` | `100` | output volume percent |
+
+### When the speaker is busy
+
+`aplay: audio open error: Device or resource busy` means something already has
+the sound card open. `auto` and `usb` resolve to the hardware directly
+(`plughw:2,0`), which fails while a sound server owns the device -- PulseAudio
+claims USB speakers on boot on many images.
+
+```shell
+fuser -v /dev/snd/*     # who holds it
+aplay -l                # "Subdevices: 0/1" means the card is taken
+```
+
+If PulseAudio is the holder, route through it instead of fighting it:
+
+```shell
+export GO2_TTS_DEVICE="pulse"
+```
 
 ### Ambient listening and barge-in
 
