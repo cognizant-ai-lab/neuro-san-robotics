@@ -112,6 +112,11 @@ class EngineRegistry:
 
         So an explicit request that matches nothing available here drops back to
         the default order rather than failing, and says so.
+
+        The hosted engine never appears in the returned chain even though it is
+        first in DEFAULT_ORDER. say_streaming() has already tried it by the time
+        this runs, so a chain of ["piper", "espeak"] under "auto" means the full
+        order is hosted, then piper, then espeak -- not that hosted was skipped.
         """
         names = self.requested()
         explicit = names != list(DEFAULT_ORDER)

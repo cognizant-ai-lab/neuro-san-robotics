@@ -260,7 +260,9 @@ Naming a single engine is a statement that you want to know when it breaks, so
 it is a chain of one rather than a preference. `auto` is the forgiving mode,
 where a timeout or a missing model quietly moves to the next engine.
 
-Default order: hosted → piper → `say` (macOS) → espeak.
+Default order: hosted → piper → `say` (macOS) → espeak. Hosted is tried
+first whenever a key is configured, which is what `auto` meant before
+these engines were made swappable, and still means now.
 
 Only engines that exist are listed. pocket-tts and Qwen3-TTS are candidates
 but are not implemented; naming one would fail as though it were a typo.
