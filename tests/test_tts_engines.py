@@ -85,11 +85,20 @@ class EngineOrderTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 reg.speak("hi")
 
-    def test_a_named_engine_runs_even_if_it_reports_unavailable(self):
-        """Its own error is more useful than a silent skip to something else."""
-        reg = registry(engine("piper", available=False, fails=RuntimeError("no voice")))
+    def test_a_named_engine_that_is_not_installed_here_is_substituted(self):
+        """
+        One setmyenv.sh runs on the robot and on a laptop. Naming piper on a
+        host that has no piper should reach for whatever that host does have,
+        because the alternative is the robot going silent. An engine that is
+        installed and then fails is a different case, covered in
+        HostPortabilityTests.
+        """
+        reg = registry(
+            engine("piper", available=False),
+            engine("espeak", available=True),
+        )
         with patch.dict(os.environ, {"GO2_TTS_ENGINE": "piper"}):
-            self.assertEqual([e.name for e in reg.chain()], ["piper"])
+            self.assertEqual([e.name for e in reg.chain()], ["espeak"])
 
     def test_an_unknown_named_engine_is_a_clear_error(self):
         reg = registry(engine("espeak"))
@@ -102,6 +111,66 @@ class EngineOrderTests(unittest.TestCase):
     def test_no_usable_engine_says_what_was_tried(self):
         reg = registry(engine("piper", available=False))
         with patch.dict(os.environ, {"GO2_TTS_ENGINE": "auto"}):
+            with self.assertRaises(RuntimeError) as caught:
+                reg.speak("hi")
+        self.assertIn("No usable TTS engine", str(caught.exception))
+
+
+class HostPortabilityTests(unittest.TestCase):
+    """
+    One setmyenv.sh is copied to every machine, so the engine it names will
+    not exist on all of them. Piper is Linux-only; a laptop has `say` instead.
+    """
+
+    def robot(self, piper=True, espeak=True):
+        """A Linux robot: piper and espeak, no macOS `say`."""
+        return registry(
+            engine("piper", available=piper),
+            engine("say", available=False),
+            engine("espeak", available=espeak),
+        )
+
+    def mac(self):
+        """A laptop: only `say`."""
+        return registry(
+            engine("piper", available=False),
+            engine("say", available=True),
+            engine("espeak", available=False),
+        )
+
+    def names(self, reg, value):
+        with patch.dict(os.environ, {"GO2_TTS_ENGINE": value}):
+            return [e.name for e in reg.chain()]
+
+    def test_the_robot_is_unchanged(self):
+        """Piper is installed there, so it must still be chosen, alone."""
+        reg = self.robot()
+        self.assertEqual(self.names(reg, "piper"), ["piper"])
+        self.assertEqual(self.names(reg, "auto"), ["piper", "espeak"])
+        self.assertEqual(self.names(reg, "espeak"), ["espeak"])
+        self.assertEqual(self.names(reg, "piper,espeak"), ["piper", "espeak"])
+
+    def test_a_laptop_falls_back_to_what_it_has(self):
+        """GO2_TTS_ENGINE=piper on a Mac must speak, not raise and go silent."""
+        self.assertEqual(self.names(self.mac(), "piper"), ["say"])
+
+    def test_the_robot_without_a_piper_voice_still_speaks(self):
+        reg = self.robot(piper=False)
+        self.assertEqual(self.names(reg, "piper"), ["espeak"])
+
+    def test_an_installed_engine_that_fails_is_still_raised(self):
+        """Not-installed-here is a config mismatch; installed-and-broken is a fault."""
+        reg = registry(
+            engine("piper", available=True, fails=RuntimeError("piper segfaulted")),
+            engine("espeak", available=True),
+        )
+        with patch.dict(os.environ, {"GO2_TTS_ENGINE": "piper"}):
+            with self.assertRaises(RuntimeError):
+                reg.speak("hi")
+
+    def test_a_host_with_no_engines_at_all_still_reports_clearly(self):
+        reg = registry(engine("piper", available=False))
+        with patch.dict(os.environ, {"GO2_TTS_ENGINE": "piper"}):
             with self.assertRaises(RuntimeError) as caught:
                 reg.speak("hi")
         self.assertIn("No usable TTS engine", str(caught.exception))

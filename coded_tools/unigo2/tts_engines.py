@@ -91,18 +91,38 @@ class EngineRegistry:
         """
         return len(self.requested()) > 1
 
+    def _is_available(self, engine: TtsEngine) -> bool:
+        """Whether an engine reports itself usable, treating a broken check as no."""
+        try:
+            return bool(engine.available())
+        except Exception:
+            logging.exception("TTS engine %s failed its availability check", engine.name)
+            return False
+
     def chain(self) -> List[TtsEngine]:
         """
-        Return the engines to try, in order, skipping unavailable ones.
+        Return the engines to try, in order, skipping the ones not installed.
 
-        An engine named explicitly is kept even when it reports itself
-        unavailable, so the caller gets that engine's own error rather than a
-        silent no-op. In "auto" the unavailable ones are dropped, which is what
-        makes a robot with no Piper voice fall through to espeak.
+        An engine that is asked for but not installed on this machine is a
+        different thing from one that is installed and fails. The first is a
+        config that does not fit the host -- the same setmyenv.sh naming piper
+        runs on the robot and on a laptop, where piper does not exist -- and
+        falling through to something that works beats silence. The second is a
+        real fault and is raised by speak().
+
+        So an explicit request that matches nothing available here drops back to
+        the default order rather than failing, and says so.
         """
         names = self.requested()
         explicit = names != list(DEFAULT_ORDER)
         chain: List[TtsEngine] = []
+
+        # A request naming only engines this registry does not own -- in
+        # practice GO2_TTS_ENGINE="openai" -- is not ours to satisfy or to
+        # substitute for. Returning nothing lets the hosted path keep its
+        # meaning of "use the hosted model, and tell me when it fails".
+        if explicit and all(name in EXTERNALLY_HANDLED for name in names):
+            return []
 
         for name in names:
             if name in EXTERNALLY_HANDLED:
@@ -116,16 +136,27 @@ class EngineRegistry:
                         f"Known engines: {known}"
                     )
                 continue
-            if explicit and len(names) == 1:
+            if self._is_available(engine):
                 chain.append(engine)
-                continue
-            try:
-                if engine.available():
-                    chain.append(engine)
-            except Exception:
-                logging.exception("TTS engine %s failed its availability check", name)
 
-        return chain
+        if chain or not explicit:
+            return chain
+
+        # Nothing that was asked for exists here. Rather than go silent, use
+        # whatever this host does have, and make the substitution visible.
+        fallback = [
+            engine
+            for name in DEFAULT_ORDER
+            if name not in EXTERNALLY_HANDLED
+            and (engine := self.engines.get(name)) is not None
+            and self._is_available(engine)
+        ]
+        if fallback:
+            logging.warning(
+                "TTS engine(s) %s not available here; using %s instead",
+                ", ".join(names), fallback[0].name,
+            )
+        return fallback
 
     def speak(self, text: str, passthrough: tuple = (), **kwargs: Any) -> str:
         """
