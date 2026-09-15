@@ -10,11 +10,25 @@
 #
 # END COPYRIGHT
 {
-    # Provider, model and Azure deployment all come from llm_config.hocon, which
-    # reads them from the environment. Retarget this agent at a different model
-    # -- or at a customer's Azure resource -- by editing setmyenv.sh, not here.
-    include "llm_config.hocon"
-    "llm_config": ${llm_config_default}
+    # Model and provider come from the environment, so pointing this agent at
+    # another model -- or at a customer's Azure resource -- is an edit to
+    # setmyenv.sh and a restart, not a change here.
+    # See docs/env_variables_guide.md#model-providers
+    #
+    # Inlined rather than shared with unigo2.hocon: neuro-san parses registries
+    # with parse_string(), which gives an `include` no directory to resolve
+    # against, and the network then fails to load at all.
+    "llm_config": {
+        class = "openai"
+        class = ${?AGENT_LLM_CLASS}
+
+        model_name = "gpt-5.1"
+        model_name = ${?AGENT_LLM_MODEL_NAME}
+
+        # Azure only. Ignored by the "openai" class, so it is safe to leave set.
+        deployment_name = ${?AZURE_OPENAI_DEPLOYMENT_NAME}
+        openai_api_version = ${?OPENAI_API_VERSION}
+    }
     # A normal turn needs at most a few LLM/tool stages. Bound event work so a
     # stalled model call cannot retain the native event session indefinitely.
     "max_steps": 12,

@@ -24,10 +24,23 @@
             "safety": 0.8,    
         }
     },
-    # Deliberately a cheaper model than the conscious assistant; see
-    # llm_config.hocon. Driven by environment variables, not edited here.
-    include "llm_config.hocon"
-    "llm_config": ${llm_config_lightweight}
+    # A cheaper model than the conscious assistant: this network only turns
+    # short commands into robot actions. Driven by the environment, and inlined
+    # for the reason given in conscious_agent.hocon.
+    # See docs/env_variables_guide.md#model-providers
+    "llm_config": {
+        class = "openai"
+        class = ${?AGENT_LLM_CLASS}
+
+        # Dated because an explicit class skips neuro-san's model catalogue,
+        # which is what used to expand a bare "gpt-4o" to this snapshot.
+        model_name = "gpt-4o-2024-08-06"
+        model_name = ${?AGENT_LLM_MODEL_NAME_LIGHT}
+
+        # Azure only. setmyenv.sh defaults this to AZURE_OPENAI_DEPLOYMENT_NAME.
+        deployment_name = ${?AZURE_OPENAI_DEPLOYMENT_NAME_LIGHT}
+        openai_api_version = ${?OPENAI_API_VERSION}
+    }
     "tools": [
         {
             "name": "robot_manager",

@@ -108,9 +108,8 @@ HTTP, so without a certificate voice input will not work from another machine.
 Two separate APIs are in play, and they are configured independently.
 
 1. **Agents** — the reasoning LLM behind every agent network. neuro-san owns
-   this. It reads the `AZURE_OPENAI_*` variables itself and takes the model
-   from `registries/llm_config.hocon`, which reads the `AGENT_LLM_*`
-   variables below.
+   this. It reads the `AZURE_OPENAI_*` variables itself, and each agent
+   registry under `registries/` reads the `AGENT_LLM_*` variables below.
 2. **Speech** — text-to-speech, push-to-talk transcription and ambient
    listening. neuro-san has no audio support at all, so this repo calls those
    endpoints directly and they need their own settings: the `GO2_*` variables.
