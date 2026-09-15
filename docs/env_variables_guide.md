@@ -114,7 +114,8 @@ Three choices, and they are independent. Pick each one separately:
 | **Speech in** | whether transcription is a hosted model or Whisper on the robot | `GO2_STT_ENGINE` |
 
 A fourth, `GO2_AUDIO_PROVIDER`, only says *which cloud* hosted speech calls. It
-is ignored the moment both speech settings are local.
+is never consulted once both speech settings are local, and the startup summary
+leaves it out in that case rather than printing a value that decides nothing.
 
 ### Common setups
 
