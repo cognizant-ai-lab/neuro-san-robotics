@@ -138,6 +138,39 @@ def transcribe(audio_path: str, language: Optional[str] = None) -> str:
     return "".join(segment.text for segment in segments).strip()
 
 
+def ambient_mode(hosted_key_present: bool) -> str:
+    """
+    How always-on listening should run: "realtime", "local" or "unavailable".
+
+    The browser asks this before it opens a microphone, so that a robot with no
+    hosted recogniser goes straight to listening locally instead of negotiating
+    a WebRTC session that cannot succeed.
+
+    "local" here segments on silence rather than on a clock. An earlier version
+    of ambient listening posted a recording every five seconds and was replaced
+    precisely because that was slow and cut words in half; falling back to that
+    would undo the change rather than stand in for it.
+    """
+    choice = engine()
+    if choice == "local":
+        # Chosen deliberately, so the weights may still be downloading.
+        return "local" if _importable() else "unavailable"
+    if choice == "openai":
+        return "realtime" if hosted_key_present else "unavailable"
+    if hosted_key_present:
+        return "realtime"
+    return "local" if available() else "unavailable"
+
+
+def _importable() -> bool:
+    """Whether faster-whisper is installed, regardless of cached weights."""
+    try:
+        import faster_whisper  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def describe() -> str:
     """One-line summary for start-up logs."""
     if not available():

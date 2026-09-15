@@ -174,5 +174,85 @@ class RouteSelectionTests(unittest.TestCase):
         self.assertEqual(response.get_json(), {"error": "Transcription failed"})
 
 
+class AmbientModeTests(unittest.TestCase):
+    """What the browser is told to do before it opens a microphone."""
+
+    def mode(self, hosted_key, **env):
+        with patch.dict(os.environ, stt_env(**env)):
+            return local_stt.ambient_mode(hosted_key)
+
+    def test_a_hosted_key_means_realtime(self):
+        self.assertEqual(self.mode(True), "realtime")
+
+    def test_local_engine_wins_over_a_hosted_key(self):
+        """Chosen deliberately, so it is not second-guessed."""
+        with patch.object(local_stt, "_importable", return_value=True):
+            self.assertEqual(self.mode(True, GO2_STT_ENGINE="local"), "local")
+
+    def test_local_engine_without_the_package_is_unavailable(self):
+        with patch.object(local_stt, "_importable", return_value=False):
+            self.assertEqual(self.mode(True, GO2_STT_ENGINE="local"), "unavailable")
+
+    def test_openai_engine_never_falls_back(self):
+        with patch.object(local_stt, "available", return_value=True):
+            self.assertEqual(self.mode(False, GO2_STT_ENGINE="openai"), "unavailable")
+
+    def test_auto_falls_back_to_local_when_there_is_no_hosted_key(self):
+        with patch.object(local_stt, "available", return_value=True):
+            self.assertEqual(self.mode(False, GO2_STT_ENGINE="auto"), "local")
+
+    def test_auto_with_nothing_configured_is_unavailable(self):
+        with patch.object(local_stt, "available", return_value=False):
+            self.assertEqual(self.mode(False, GO2_STT_ENGINE="auto"), "unavailable")
+
+    def test_the_route_reports_the_mode(self):
+        env = stt_env()
+        env["OPENAI_API_KEY"] = "sk-test"
+        with patch.dict(os.environ, env):
+            with interface_flask.app.test_client() as client:
+                response = client.get("/api/speech-config")
+        self.assertEqual(response.get_json(), {"ambient_mode": "realtime"})
+
+
+class AmbientBrowserTests(unittest.TestCase):
+    """The browser side of local ambient listening."""
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        cls.browser = (
+            root / "apps" / "conscious_assistant" / "templates" / "index.html"
+        ).read_text(encoding="utf-8")
+
+    def test_it_asks_the_server_before_opening_a_session(self):
+        self.assertIn("/api/speech-config", self.browser)
+        self.assertIn("ambient_mode", self.browser)
+
+    def test_local_utterances_reuse_the_existing_transcribe_route(self):
+        self.assertIn("transcribeLocalAmbient", self.browser)
+        self.assertIn("ambient.webm", self.browser)
+
+    def test_local_transcripts_reach_the_agent_the_same_way(self):
+        """Same socket event as the hosted path, so the server is unchanged."""
+        self.assertIn("socket.emit('ambient_transcript'", self.browser)
+
+    def test_it_segments_on_silence_rather_than_a_clock(self):
+        """
+        Ambient listening used to post a recording every five seconds and was
+        changed away from that because it was slow and cut words in half. The
+        fallback must not reintroduce a fixed interval.
+        """
+        self.assertIn("LOCAL_AMBIENT_SILENCE_MS", self.browser)
+        self.assertNotIn("AMBIENT_CHUNK_MS", self.browser)
+        self.assertNotIn("ambientRecorder", self.browser)
+
+    def test_stopping_ambient_also_stops_the_local_loop(self):
+        """Otherwise the mic and the poll timer outlive the session."""
+        teardown = self.browser.split("function teardownAmbientTransport()")[1]
+        self.assertIn("stopLocalAmbient()", teardown.split("\n        }")[0])
+
+
 if __name__ == "__main__":
     unittest.main()

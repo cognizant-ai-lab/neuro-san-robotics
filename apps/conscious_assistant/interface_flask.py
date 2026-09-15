@@ -727,6 +727,22 @@ def transcribe_audio():
                 logging.exception("Failed to delete transcription temp file")
 
 
+@app.route("/api/speech-config")
+def speech_config():
+    """
+    Tell the browser how to listen before it opens a microphone.
+
+    Without this the browser would negotiate a WebRTC session against a
+    recogniser the deployment may not have, wait for it to fail, and only then
+    consider a local fallback -- with the microphone already live.
+    """
+    return jsonify({
+        "ambient_mode": local_stt.ambient_mode(
+            bool(openai_provider.realtime_api_key())
+        ),
+    })
+
+
 @app.route("/api/realtime/transcription-token", methods=["POST"])
 def realtime_transcription_token():
     """Mint a short-lived token for a browser transcription WebRTC session."""
