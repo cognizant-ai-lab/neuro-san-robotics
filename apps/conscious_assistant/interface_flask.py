@@ -39,6 +39,7 @@ from scripts import setup_tls_certs as tls_certs
 from apps.conscious_assistant.realtime_transcription import request_realtime_session
 from apps.conscious_assistant.robot_identity import robot_name
 from apps.conscious_assistant.scene_observer import SceneObserver
+from coded_tools.unigo2 import local_stt
 from coded_tools.unigo2 import openai_provider
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 from coded_tools.unigo2.agent_events import queue_agent_event
@@ -635,10 +636,12 @@ def transcribe_audio():
     Expects a multipart/form-data POST with an 'audio' file.
     Returns JSON with 'text' field containing the transcription.
     """
-    if not openai_provider.realtime_api_key():
+    # A site running GO2_STT_ENGINE="local" has no hosted key by design.
+    if local_stt.engine() != "local" and not openai_provider.realtime_api_key():
         return jsonify({
             "error": "Speech API key not configured. Set OPENAI_API_KEY, or "
-                     "AZURE_OPENAI_API_KEY when running against Azure."
+                     "AZURE_OPENAI_API_KEY when running against Azure. "
+                     'Or set GO2_STT_ENGINE="local" to transcribe on the robot.'
         }), 503
 
     if "audio" not in request.files:
@@ -680,6 +683,12 @@ def transcribe_audio():
         audio_file.save(temp_file.name)
         temp_file.close()
 
+        # GO2_STT_ENGINE="local" skips the hosted call outright. A site whose
+        # region has no whisper deployment wants that: on "auto" every press
+        # would otherwise wait out a doomed request before falling back.
+        if local_stt.engine() == "local":
+            return jsonify({"text": local_stt.transcribe(temp_file.name)})
+
         try:
             client = openai_provider.create_client()
 
@@ -695,6 +704,15 @@ def transcribe_audio():
             return jsonify({"text": transcript.text})
 
         except Exception:
+            # On "auto", a hosted failure is recoverable if a local recogniser
+            # is installed. Naming "openai" explicitly means the caller wants
+            # the failure, so that path falls through to the handler below.
+            if local_stt.engine() == "auto" and local_stt.available():
+                logging.warning("Hosted transcription failed; using local Whisper")
+                try:
+                    return jsonify({"text": local_stt.transcribe(temp_file.name)})
+                except Exception:
+                    logging.exception("Local transcription failed too")
             # Keep the traceback on the robot's own log. The browser is a
             # public surface on the robot's network, so it only learns that
             # the call failed, never which host, path or key was involved.
@@ -707,6 +725,22 @@ def transcribe_audio():
                 os.unlink(temp_file.name)
             except OSError:
                 logging.exception("Failed to delete transcription temp file")
+
+
+@app.route("/api/speech-config")
+def speech_config():
+    """
+    Tell the browser how to listen before it opens a microphone.
+
+    Without this the browser would negotiate a WebRTC session against a
+    recogniser the deployment may not have, wait for it to fail, and only then
+    consider a local fallback -- with the microphone already live.
+    """
+    return jsonify({
+        "ambient_mode": local_stt.ambient_mode(
+            bool(openai_provider.realtime_api_key())
+        ),
+    })
 
 
 @app.route("/api/realtime/transcription-token", methods=["POST"])
