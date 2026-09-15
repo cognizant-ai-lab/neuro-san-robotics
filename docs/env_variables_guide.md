@@ -152,6 +152,10 @@ export GO2_STT_ENGINE="local"
 Naming `piper` and `local` also installs what they need when `setmyenv.sh` is
 sourced: the Piper voice, and the Whisper weights.
 
+Re-source `setmyenv.sh` after editing it, in the shell you start the app from.
+The app reads the environment of the process that launches it, so an edit that
+has not been sourced leaves it running on the old values.
+
 Set these by **editing `setmyenv.sh`**, not by exporting them beforehand. The
 file assigns both engines outright, so `GO2_TTS_ENGINE=piper source setmyenv.sh`
 is overwritten by the file's own value. That is deliberate — it is what stops a
@@ -239,7 +243,22 @@ the key unset.
 
 `OPENAI_API_VERSION` is **not** discoverable from Azure. It is a constant you
 pick from Microsoft's published API version list, and the Python SDK refuses to
-build a client without it. `2024-10-21` is a safe GA value; use `preview` only
+build a client without it.
+
+It is **not the model's version**. `gpt-5.1` has a version of `2025-11-13`,
+which is the model snapshot you choose in the Deployments blade; the
+api-version is the REST contract, one of `2024-10-21`, `2025-04-01-preview`
+and so on. Putting a model version here returns `404 Resource not found` on
+every call, because Azure does not recognise it as an api-version. Newer
+models generally need a recent preview: `2025-04-01-preview` works for the
+GPT-5 series.
+
+The endpoint is the resource **root**, with no path: the SDK appends
+`/openai/deployments/<name>/...` itself. Both host forms work --
+`https://<resource>.openai.azure.com` and
+`https://<resource>.services.ai.azure.com` -- but a Foundry *project* URL
+(`.../api/projects/<name>`) or a `/openai/v1` suffix will not, because the SDK
+appends its own path on top of yours. `2024-10-21` is a safe GA value; use `preview` only
 if you need something that has not reached GA. If an audio model returns 404 on
 a deployment you can see in the portal, a too-old api-version is the usual
 cause — those models landed after the older ones.
