@@ -92,11 +92,26 @@ The address browsers use to reach the Flask UI, embedded as an IP SAN in the
 TLS certificate. DHCP rotates it, so it is auto-detected from the default route
 rather than hardcoded; export it beforehand to override.
 
-After an IP rotation, refresh the certificate:
+The certificate is refreshed by the app itself on every start, so an address
+change usually needs nothing. To inspect or force it:
 
 ```shell
-python scripts/setup_tls_certs.py
+python scripts/setup_tls_certs.py --check
+python scripts/setup_tls_certs.py --force
+python scripts/setup_tls_certs.py --fresh   # forget previous networks
 ```
+
+Addresses accumulate rather than replace each other. A robot that moves between
+a few known routers ends up with a certificate covering all of them and stops
+regenerating; only a router it has never seen triggers a new one. The list of
+remembered addresses is bounded, so a network handing out a fresh lease every
+day cannot grow it without limit.
+
+`ROBOT_HOST_IP` is captured once when `setmyenv.sh` is sourced and then sticks
+for the life of that shell, so it goes stale as soon as the robot changes
+network. The certificate therefore covers both it *and* the address the robot
+is actually on, which is why a stale value no longer leaves you serving a
+certificate for somewhere you used to be.
 
 Browsers withhold microphone access from anything but `localhost` over plain
 HTTP, so without a certificate voice input will not work from another machine.
