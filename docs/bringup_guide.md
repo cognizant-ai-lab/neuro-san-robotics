@@ -812,8 +812,10 @@ python scripts/test_lidar.py --seconds 5
 ```
 
 Want: `backend: lidar:rt/utlidar/cloud`, a nearest-obstacle line that matches
-where you are standing, and a drawing whose walls match the room. Exit status
-is 0 only when usable data arrived, so this works as a gate.
+where you are standing, and a picture whose walls match the room. Scans are
+merged over a few seconds and saved as a PNG under `~/lidar_checks`; the last
+ten are kept. Exit status is 0 only when usable data arrived, so this works as
+a gate.
 
 If nothing arrives, work down the list the script prints: the dome must spin
 freely, `setmyenv.sh` must have been sourced so CycloneDDS is configured,
@@ -823,18 +825,17 @@ freely, `setmyenv.sh` must have been sourced so CycloneDDS is configured,
 If data arrives but the drawing disagrees with the room, the mounting angle is
 wrong. `NAV_LIDAR_POINTCLOUD_YAW_OFFSET_RAD` describes how the unit is bolted
 on and defaults to 70 degrees, which is correct for the robots this repo was
-built against. A unit mounted differently needs its own value:
+built against. A unit mounted differently needs its own, measured rather than
+guessed:
 
 ```bash
-python scripts/test_lidar.py --sweep
+python scripts/test_lidar.py --calibrate
 ```
 
-Stand somewhere unmistakable, pick the angle whose picture matches the room,
-and put it in `setmyenv.sh` **in radians**:
-
-```bash
-export NAV_LIDAR_POINTCLOUD_YAW_OFFSET_RAD="1.2217"   # 70 degrees
-```
+Put one unmistakable object a metre directly in front of the nose, closer than
+anything else. The script prints the `export` line to paste into
+`setmyenv.sh`, then redraws the room with it applied so you can confirm the
+object sits straight ahead.
 
 Do not set `NAV_LIDAR_ANGLE_OFFSET_RAD` instead. It applies to 2D scan
 messages rather than the point cloud the Go2 publishes, and because the
