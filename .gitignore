@@ -220,3 +220,6 @@ unitree_sdk2_python/
 
 # local set env
 setmyenv.sh
+
+# Microsoft azure related local packages
+packages.microsoft.gpg
