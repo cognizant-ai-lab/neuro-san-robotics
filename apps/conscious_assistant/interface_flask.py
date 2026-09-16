@@ -39,6 +39,7 @@ from scripts import setup_tls_certs as tls_certs
 from apps.conscious_assistant.realtime_transcription import request_realtime_session
 from apps.conscious_assistant.robot_identity import robot_name
 from apps.conscious_assistant.scene_observer import SceneObserver
+from coded_tools.unigo2 import openai_provider
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 from coded_tools.unigo2.agent_events import queue_agent_event
 
@@ -634,10 +635,10 @@ def transcribe_audio():
     Expects a multipart/form-data POST with an 'audio' file.
     Returns JSON with 'text' field containing the transcription.
     """
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if not openai_api_key:
+    if not openai_provider.realtime_api_key():
         return jsonify({
-            "error": "OpenAI API key not configured. Set OPENAI_API_KEY env var."
+            "error": "Speech API key not configured. Set OPENAI_API_KEY, or "
+                     "AZURE_OPENAI_API_KEY when running against Azure."
         }), 503
 
     if "audio" not in request.files:
@@ -680,12 +681,13 @@ def transcribe_audio():
         temp_file.close()
 
         try:
-            from openai import OpenAI
-            client = OpenAI(api_key=openai_api_key)
+            client = openai_provider.create_client()
 
             with open(temp_file.name, "rb") as f:
                 transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
+                    model=openai_provider.deployment_for(
+                        "GO2_AZURE_TRANSCRIBE_DEPLOYMENT", "whisper-1"
+                    ),
                     file=f,
                     language="en"  # Optimize for English
                 )
@@ -710,18 +712,19 @@ def transcribe_audio():
 @app.route("/api/realtime/transcription-token", methods=["POST"])
 def realtime_transcription_token():
     """Mint a short-lived token for a browser transcription WebRTC session."""
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if not openai_api_key:
+    speech_api_key = openai_provider.realtime_api_key()
+    if not speech_api_key:
         return jsonify({
-            "error": "OpenAI API key not configured. Set OPENAI_API_KEY env var."
+            "error": "Speech API key not configured. Set OPENAI_API_KEY, or "
+                     "AZURE_OPENAI_API_KEY when running against Azure."
         }), 503
 
-    model = os.environ.get(
-        "CONSCIOUS_AMBIENT_TRANSCRIPTION_MODEL",
-        "gpt-4o-transcribe",
+    model = openai_provider.deployment_for(
+        "GO2_AZURE_REALTIME_DEPLOYMENT",
+        os.environ.get("CONSCIOUS_AMBIENT_TRANSCRIPTION_MODEL", "gpt-4o-transcribe"),
     )
     try:
-        session = request_realtime_session(openai_api_key, model)
+        session = request_realtime_session(speech_api_key, model)
     except OSError:
         logging.exception("Could not reach realtime transcription service")
         return jsonify({"error": "Realtime transcription service is unavailable"}), 502
@@ -741,9 +744,13 @@ def realtime_transcription_token():
         "Realtime transcription session created (request_id=%s)",
         session.request_id or "unavailable",
     )
+    # The browser posts its WebRTC offer to whichever provider minted the
+    # credential. Sent as a header so the credential body is forwarded exactly
+    # as it arrived, rather than being parsed and re-serialised here.
     return session.payload, session.status, {
         "Content-Type": session.content_type or "application/json",
         "Cache-Control": "no-store",
+        "X-Realtime-Calls-Url": openai_provider.realtime_urls()["calls"],
     }
 
 

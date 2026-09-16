@@ -8,9 +8,9 @@ from urllib.request import Request, urlopen
 
 from apps.conscious_assistant.robot_identity import robot_home
 from apps.conscious_assistant.robot_identity import robot_name
+from coded_tools.unigo2 import openai_provider
 
 
-REALTIME_SESSION_URL = "https://api.openai.com/v1/realtime/client_secrets"
 TRANSIENT_STATUSES = {502, 503, 504}
 
 
@@ -77,14 +77,13 @@ def _post_session_request(api_key: str, model: str) -> RealtimeSessionResponse:
     request_body = json.dumps({
         "session": transcription_session_config(model),
     }).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(openai_provider.realtime_auth_headers(api_key))
     upstream_request = Request(
-        REALTIME_SESSION_URL,
+        openai_provider.realtime_urls()["client_secrets"],
         data=request_body,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
     )
     try:
         with urlopen(upstream_request, timeout=20) as response:  # nosec B310
