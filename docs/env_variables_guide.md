@@ -36,7 +36,7 @@ re-sourcing the file does not append duplicates.
 
 Where the locally built CycloneDDS lives, and its config file. This is the
 transport the Unitree SDK rides on. It is also why the robot is pinned to
-Python 3.11 — see [Python version](#python-version).
+Python 3.11. See [Python version](#python-version).
 
 ### `GO2_NETWORK_INTERFACE` / `CYCLONEDDS_NETWORK_INTERFACE`
 
@@ -134,17 +134,17 @@ leaves it out in that case rather than printing a value that decides nothing.
 
 ### Common setups
 
-`—` means leave it unset.
+`-` means leave it unset.
 
 | Setup | `AGENT_LLM_CLASS` | `GO2_TTS_ENGINE` | `GO2_STT_ENGINE` | Also needs |
 |---|---|---|---|---|
-| Everything on public OpenAI | — | — | — | `OPENAI_API_KEY` |
-| Everything on Azure | `azure-openai` | — | — | Azure credentials + all 5 deployments |
+| Everything on public OpenAI | - | - | - | `OPENAI_API_KEY` |
+| Everything on Azure | `azure-openai` | - | - | Azure credentials + all 5 deployments |
 | **Azure agents, speech on the robot** | `azure-openai` | `piper` | `local` | Azure credentials + chat deployment only |
-| Azure agents, speech on public OpenAI | `azure-openai` | — | — | Azure credentials + `OPENAI_API_KEY` + `GO2_AUDIO_PROVIDER="openai"` |
-| Hosted voice, listening on the robot | either | — | `local` | credentials for the hosted half |
-| Robot voice, hosted listening | either | `piper` | — | credentials for the hosted half |
-| Fully offline | — | `piper` | `local` | no API keys at all |
+| Azure agents, speech on public OpenAI | `azure-openai` | - | - | Azure credentials + `OPENAI_API_KEY` + `GO2_AUDIO_PROVIDER="openai"` |
+| Hosted voice, listening on the robot | either | - | `local` | credentials for the hosted half |
+| Robot voice, hosted listening | either | `piper` | - | credentials for the hosted half |
+| Fully offline | - | `piper` | `local` | no API keys at all |
 
 The bolded row is the usual Azure case, because Azure's speech models are
 region-limited and frequently absent from the resource serving chat.
@@ -173,9 +173,9 @@ has not been sourced leaves it running on the old values.
 
 Set these by **editing `setmyenv.sh`**, not by exporting them beforehand. The
 file assigns both engines outright, so `GO2_TTS_ENGINE=piper source setmyenv.sh`
-is overwritten by the file's own value. That is deliberate — it is what stops a
-value left over in your shell from quietly changing what the robot does — but
-it does mean the file is the only place to set them.
+is overwritten by the file's own value. That is deliberate: it is what stops a
+value left over in your shell from quietly changing what the robot does. It
+does mean the file is the only place to set them.
 
 Two things worth knowing about this setup:
 
@@ -217,10 +217,10 @@ entirely. Use `auto` where a hosted model genuinely exists.
 
 Two separate APIs are in play, and they are configured independently.
 
-1. **Agents** — the reasoning LLM behind every agent network. neuro-san owns
+1. **Agents**: the reasoning LLM behind every agent network. neuro-san owns
    this. It reads the `AZURE_OPENAI_*` variables itself, and each agent
    registry under `registries/` reads the `AGENT_LLM_*` variables below.
-2. **Speech** — text-to-speech, push-to-talk transcription and ambient
+2. **Speech**: text-to-speech, push-to-talk transcription and ambient
    listening. neuro-san has no audio support at all, so this repo calls those
    endpoints directly and they need their own settings: the `GO2_*` variables.
 
@@ -276,7 +276,7 @@ The endpoint is the resource **root**, with no path: the SDK appends
 appends its own path on top of yours. `2024-10-21` is a safe GA value; use `preview` only
 if you need something that has not reached GA. If an audio model returns 404 on
 a deployment you can see in the portal, a too-old api-version is the usual
-cause — those models landed after the older ones.
+cause, because those models landed after the older ones.
 
 #### Agents
 
@@ -307,7 +307,7 @@ export GO2_AZURE_REALTIME_DEPLOYMENT="<gpt-4o-transcribe deployment>"
 
 `GO2_AUDIO_PROVIDER` is `auto` by default, which follows
 `AZURE_OPENAI_ENDPOINT`. Set `openai` to keep speech on public OpenAI while the
-agents run on Azure — useful when the chat region carries no audio models. Set
+agents run on Azure, useful when the chat region carries no audio models. Set
 `azure` to force it.
 
 ### What to deploy on Azure
@@ -329,7 +329,7 @@ The `gpt-4o` version matters: Azure lets you pick it at deploy time, and
 #### Finding the deployment names
 
 Deployment names are chosen by whoever deployed the model, so there is no
-canonical name for `gpt-5.1` — you have to look up what yours was called. In
+canonical name for `gpt-5.1`, so you have to look up what yours was called. In
 the portal: Microsoft Foundry → your resource → **Deployments**. The Name
 column is the deployment name; the Model column says what it serves.
 
@@ -401,9 +401,13 @@ python scripts/test_lidar.py --seconds 5
 ```
 
 Want `backend: lidar:rt/utlidar/cloud`, a nearest-obstacle line that matches
-where you are standing, and a drawing whose walls match the room. Exit status is
-0 only when usable data arrived, so it works as a bring-up gate. `--out PATH`
-writes the report to a file, which is worth doing over ssh.
+where you are standing, and a picture whose walls match the room. Exit status is
+0 only when usable data arrived, so it works as a bring-up gate.
+
+Scans are merged over a few seconds and written as a PNG under
+`~/lidar_checks` (`NAV_LIDAR_CHECK_DIR` moves it). A single rotation is a thin
+scatter of points that no one can read; merged, the shape of the room appears.
+The last ten snapshots are kept and older ones pruned.
 
 Phase 10.9 of [the bring-up guide](bringup_guide.md) covers this in sequence.
 
@@ -411,14 +415,21 @@ Phase 10.9 of [the bring-up guide](bringup_guide.md) covers this in sequence.
 
 How the LiDAR is bolted on, in radians. Defaults to 70 degrees, which is correct
 for the units this repo was built against. A differently mounted one needs its
-own value:
+own, and it can be measured rather than guessed:
 
 ```shell
-python scripts/test_lidar.py --sweep
+python scripts/test_lidar.py --calibrate
 ```
 
-Stand somewhere unmistakable, pick the angle whose picture matches the room, and
-set it **in radians**.
+Put one unmistakable object a metre directly in front of the nose, closer than
+anything else. With the rotation switched off, the bearing the LiDAR reports for
+it *is* the mounting angle, so the offset that corrects it is that bearing
+negated. The script prints the `export` line to paste in, then redraws the room
+with it applied so you can confirm the object now sits straight ahead.
+
+This works because coverage is 360 degrees. Nothing is missing from the scan; the
+only question is which direction each point is filed under, and one known
+direction is enough to pin that down.
 
 Do not reach for `NAV_LIDAR_ANGLE_OFFSET_RAD` instead. That one applies to 2D
 scan messages rather than the point cloud the Go2 publishes -- and because the
@@ -481,7 +492,7 @@ but are not implemented; naming one would fail as though it were a typo.
 `setmyenv.sh` sets this and `GO2_STT_ENGINE` explicitly rather than falling
 back to whatever the shell already had. `source` runs in your current shell, so
 a value exported earlier in that terminal would otherwise survive and change
-what the robot does — including whether it downloads a model. If a robot
+what the robot does, including whether it downloads a model. If a robot
 reports an engine you did not choose, check for a stale export:
 
 ```shell
@@ -501,8 +512,8 @@ python scripts/install_piper_voice.py --check
 
 `setmyenv.sh` installs it automatically when `GO2_TTS_ENGINE` names `piper`,
 since declaring that engine is the same as saying the robot depends on it.
-Otherwise it warns while the voice is missing and leaves the download to you —
-sourcing an env file should not block on 114 MB. `GO2_PIPER_AUTO_INSTALL=1`
+Otherwise it warns while the voice is missing and leaves the download to you,
+because sourcing an env file should not block on 114 MB. `GO2_PIPER_AUTO_INSTALL=1`
 opts into fetching it regardless.
 
 Without the voice, offline speech falls through to `espeak-ng`, which is
@@ -531,7 +542,7 @@ This governs both halves: the push-to-talk button and ambient listening.
 
 ### The local recogniser
 
-Whisper, via `faster-whisper` — the same model family as the hosted `whisper-1`
+Whisper, via `faster-whisper`, the same model family as the hosted `whisper-1`
 it stands in for.
 
 ```shell
@@ -573,7 +584,7 @@ Ambient listening works locally as well. The browser asks the robot how to
 listen before it opens a microphone, so a site with no realtime recogniser goes
 straight to listening locally rather than negotiating a session that cannot
 succeed. Local ambient listening segments on silence rather than on a timer, so
-it hears a whole sentence and reacts when you stop speaking — expect it to be
+it hears a whole sentence and reacts when you stop speaking. Expect it to be
 slower to respond than the hosted realtime path, which transcribes while you
 are still talking.
 
@@ -581,7 +592,7 @@ are still talking.
 
 Not worth chasing as a middle ground: both are still Preview on Azure while
 `gpt-4o-mini-tts` is GA, and Piper runs locally with no latency or egress. If
-you do use one, blank `GO2_OPENAI_INSTRUCTIONS` — they reject style guidance —
+you do use one, blank `GO2_OPENAI_INSTRUCTIONS` (they reject style guidance)
 and pick a classic voice such as `alloy` or `nova`, since `coral` is not one of
 theirs.
 
@@ -629,7 +640,7 @@ export GO2_TTS_DEVICE="pulse"
 | `CONSCIOUS_DUCK_RELEASE_SECONDS` | `2.5` | restore volume after a duck with no transcript behind it |
 | `CONSCIOUS_ACKNOWLEDGE_USER_INPUT` | `0` | speak an acknowledgement before answering |
 
-The microphone stays open while the robot talks — that is what makes barge-in
+The microphone stays open while the robot talks, which is what makes barge-in
 possible. The server drops transcripts that turn out to be the robot hearing
 itself.
 
