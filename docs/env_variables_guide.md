@@ -365,6 +365,92 @@ through `gpt-5.5` are all fine.
 
 ---
 
+## Navigation sensing
+
+### `NAV_OBSTACLE_SOURCE`
+
+What the robot avoids obstacles with.
+
+| Value | Sensing |
+|---|---|
+| `depth` (default) | the front depth camera only |
+| `fused` | depth camera and LiDAR together |
+| `lidar` | LiDAR only |
+
+The camera sees through a narrow cone in front of the robot; the LiDAR sees all
+round. That difference matters most in **free navigation** -- moving without a
+map, where nothing but live sensing keeps the robot off the furniture, and
+anything approaching from the side is invisible to the camera until it is
+already in the way.
+
+`fused` is the recommendation for a new robot: it adds the LiDAR without giving
+up the camera as a second opinion.
+
+The template leaves this at `depth` so a robot already in service keeps the
+sensing it was commissioned with until someone has run the check below on it.
+
+### Verify the LiDAR before trusting it
+
+Two things go wrong here and neither raises an error. Either no data arrives --
+and the robot quietly navigates on depth alone -- or data arrives **rotated**,
+which is the dangerous one: the obstacle map is turned, so the robot swerves
+around empty floor and walks into a real wall.
+
+```shell
+python scripts/test_lidar.py --seconds 5
+```
+
+Want `backend: lidar:rt/utlidar/cloud`, a nearest-obstacle line that matches
+where you are standing, and a drawing whose walls match the room. Exit status is
+0 only when usable data arrived, so it works as a bring-up gate. `--out PATH`
+writes the report to a file, which is worth doing over ssh.
+
+Phase 10.9 of [the bring-up guide](bringup_guide.md) covers this in sequence.
+
+### `NAV_LIDAR_POINTCLOUD_YAW_OFFSET_RAD`
+
+How the LiDAR is bolted on, in radians. Defaults to 70 degrees, which is correct
+for the units this repo was built against. A differently mounted one needs its
+own value:
+
+```shell
+python scripts/test_lidar.py --sweep
+```
+
+Stand somewhere unmistakable, pick the angle whose picture matches the room, and
+set it **in radians**.
+
+Do not reach for `NAV_LIDAR_ANGLE_OFFSET_RAD` instead. That one applies to 2D
+scan messages rather than the point cloud the Go2 publishes -- and because the
+point-cloud offset falls back to it, setting it to `0` silently cancels the
+70-degree default and rotates the map.
+
+### What free navigation can do
+
+With `NAV_MAP_FILE` empty the robot navigates relative to itself:
+
+- **Works:** `move_forward`, `move_until_obstacle`, `turn`, `stop`, `status`,
+  `obstacles`
+- **Needs a map:** `navigate_to`, `set_location`, `destinations`
+
+Without one the robot says so rather than guessing: *"No map loaded. Only
+relative navigation (move_forward, turn) is available."*
+
+### Other LiDAR settings
+
+Rarely changed, but worth knowing they exist when something looks wrong:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `NAV_USE_LIDAR` | on outside simulation | second switch; can disable LiDAR while `NAV_OBSTACLE_SOURCE` still says `fused` |
+| `NAV_LIDAR_TOPIC` | `rt/utlidar/cloud` | DDS topic the Go2 publishes on |
+| `NAV_LIDAR_MIN_HEIGHT` / `MAX_HEIGHT` | `-0.25` / `0.80` m | rejects the floor and the ceiling |
+| `NAV_LIDAR_MIN_RANGE` / `MAX_RANGE` | `0.05` / `4.0` m | usable range |
+| `NAV_LIDAR_SELF_MASK_FORWARD` / `REAR` / `HALF_WIDTH` | `0.45` / `0.35` / `0.25` m | stops the robot seeing its own body |
+| `NAV_LIDAR_MAX_SAMPLE_AGE` | `0.75` s | how stale a scan may be before it is ignored |
+
+---
+
 ## Speech engines and offline fallbacks
 
 The robot does not need a hosted speech model to talk or listen. Both fall back
