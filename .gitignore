@@ -223,3 +223,8 @@ setmyenv.sh
 
 # Microsoft azure related local packages
 packages.microsoft.gpg
+
+# LiDAR check snapshots. Default to ~/lidar_checks, but NAV_LIDAR_CHECK_DIR
+# can point them inside the repo.
+lidar_checks/
+lidar-*.png
