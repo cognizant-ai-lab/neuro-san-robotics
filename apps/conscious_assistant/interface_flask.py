@@ -349,13 +349,19 @@ def _normalize_for_echo(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9\s]", " ", text.lower()).split())
 
 
-def is_self_echo(transcript: str) -> bool:
+def is_self_echo(transcript: str, captured_ago: float = 0.0) -> bool:
     """
     Return whether a transcript is the robot hearing its own voice.
 
     Only transcripts captured while the robot was speaking (plus a short tail
     for room latency) are candidates, so ordinary conversation is never
     suppressed just because it repeats a word the robot happened to use.
+
+    `captured_ago` is how long before now the audio was heard, in seconds. It
+    matters because a recogniser running on the robot takes seconds to return,
+    by which time the robot has stopped speaking and arrival time says nothing
+    about whether this was echo. The hosted recogniser answers while the audio
+    is still streaming, so it leaves this at zero and behaves as it always did.
     """
     with _speech_state_lock:
         spoken = _active_speech_text
@@ -364,7 +370,9 @@ def is_self_echo(transcript: str) -> bool:
 
     if not spoken:
         return False
-    if not speaking and time.monotonic() - ended_at > SELF_ECHO_TAIL_SECONDS:
+    # Judge against when the words were said, not when the transcript landed.
+    heard_at = time.monotonic() - max(0.0, captured_ago)
+    if not speaking and heard_at - ended_at > SELF_ECHO_TAIL_SECONDS:
         return False
 
     heard_words = _normalize_for_echo(transcript).split()
@@ -872,7 +880,15 @@ def handle_ambient_transcript(json, *_):
     if not transcript:
         return
 
-    if is_self_echo(transcript):
+    # Sent as an age rather than a timestamp so the browser's clock and the
+    # robot's never have to agree. Absent on the hosted path, which answers
+    # fast enough that arrival time is a good enough proxy.
+    try:
+        captured_ago = max(0.0, float((json or {}).get("captured_ms_ago", 0)) / 1000.0)
+    except (TypeError, ValueError):
+        captured_ago = 0.0
+
+    if is_self_echo(transcript, captured_ago):
         logging.info("Ignoring self-echo transcript: %s", transcript[:80])
         duck_speech(False)
         return

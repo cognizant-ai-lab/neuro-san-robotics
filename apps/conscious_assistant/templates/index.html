@@ -493,7 +493,11 @@
                     var blob = new Blob(state.chunks, {type: 'audio/webm'});
                     state.chunks = [];
                     if (spoken >= LOCAL_AMBIENT_MIN_SPEECH_MS && blob.size > 1000) {
-                        transcribeLocalAmbient(blob);
+                        // lastVoiceAt, not now: transcribing locally takes long
+                        // enough that the server cannot tell from arrival time
+                        // whether this audio was captured while the robot was
+                        // still talking.
+                        transcribeLocalAmbient(blob, state.lastVoiceAt);
                     }
                 };
                 recorder.start();
@@ -520,7 +524,7 @@
             return state;
         }
 
-        async function transcribeLocalAmbient(blob) {
+        async function transcribeLocalAmbient(blob, capturedAt) {
             try {
                 var form = new FormData();
                 form.append('audio', blob, 'ambient.webm');
@@ -531,9 +535,16 @@
                 }
                 var text = ((await response.json()).text || '').trim();
                 // The server applies the same self-echo filter it uses for the
-                // hosted path, so the robot hearing itself is handled there.
+                // hosted path, but that filter asks "was the robot speaking
+                // when this was heard". Transcribing on the robot takes seconds,
+                // so it is told how old the audio is rather than being left to
+                // assume the transcript just arrived. Sent as an age rather
+                // than a timestamp so the two clocks never have to agree.
                 if (text && socket.connected) {
-                    socket.emit('ambient_transcript', {data: text});
+                    socket.emit('ambient_transcript', {
+                        data: text,
+                        captured_ms_ago: Math.max(0, Date.now() - capturedAt),
+                    });
                 }
             } catch (err) {
                 console.warn('Local ambient transcription error:', err);
