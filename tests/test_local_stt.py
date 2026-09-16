@@ -256,3 +256,133 @@ class AmbientBrowserTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SelfEchoTimingTests(unittest.TestCase):
+    """
+    The robot must not answer its own voice in ambient mode.
+
+    The self-echo filter only considers audio heard while the robot was
+    speaking, plus a short tail. The hosted recogniser returns while the audio
+    is still streaming, so arrival time is a fair proxy for when it was heard.
+    A recogniser running on the robot takes seconds, so by the time its
+    transcript arrives the robot has stopped and arrival time says nothing --
+    which let the robot's own words come back as a person and start a loop.
+    """
+
+    import time as _time
+
+    def setUp(self):
+        self.spoken = "Woof! Today I am patrolling the AI Studio."
+        with interface_flask._speech_state_lock:
+            interface_flask._active_speech_text = self.spoken
+            interface_flask._speech_active = False
+            interface_flask._active_speech_ended_at = self._time.monotonic()
+
+    def finished_speaking(self, seconds_ago):
+        with interface_flask._speech_state_lock:
+            interface_flask._speech_active = False
+            interface_flask._active_speech_ended_at = (
+                self._time.monotonic() - seconds_ago)
+
+    def still_speaking(self):
+        with interface_flask._speech_state_lock:
+            interface_flask._speech_active = True
+            interface_flask._active_speech_ended_at = self._time.monotonic()
+
+    def test_a_slow_local_transcript_of_its_own_voice_is_still_echo(self):
+        """The case that made the robot talk to itself."""
+        self.finished_speaking(4.0)
+        heard = "Woof today I am patrolling the AI studio"
+        self.assertFalse(
+            interface_flask.is_self_echo(heard),
+            "judged by arrival this looks like a person -- the old behaviour",
+        )
+        self.assertTrue(
+            interface_flask.is_self_echo(heard, captured_ago=3.8),
+            "told when it was heard, it must be recognised as echo",
+        )
+
+    def test_a_person_speaking_later_is_not_suppressed(self):
+        """Being told the audio is old must not mute real conversation."""
+        self.finished_speaking(4.0)
+        self.assertFalse(
+            interface_flask.is_self_echo("what time is the standup", captured_ago=0.2)
+        )
+
+    def test_barge_in_over_the_robot_still_gets_through(self):
+        self.still_speaking()
+        self.assertFalse(
+            interface_flask.is_self_echo(
+                "no stop that is not what I asked you to do", captured_ago=0.5)
+        )
+
+    def test_the_hosted_path_is_unchanged(self):
+        """It sends no age, so the default keeps the previous behaviour."""
+        self.finished_speaking(0.2)
+        heard = "Woof today I am patrolling the AI studio"
+        self.assertEqual(
+            interface_flask.is_self_echo(heard),
+            interface_flask.is_self_echo(heard, captured_ago=0.0),
+        )
+
+    def test_a_nonsense_age_does_not_break_the_handler(self):
+        for value in ("abc", None, -500, [1]):
+            with patch.object(interface_flask, "is_self_echo", return_value=True) as echo:
+                interface_flask.handle_ambient_transcript(
+                    {"data": "hello", "captured_ms_ago": value})
+            self.assertGreaterEqual(echo.call_args.args[1], 0.0, repr(value))
+
+    def test_the_browser_sends_the_age(self):
+        from pathlib import Path
+
+        browser = (Path(__file__).resolve().parents[1] / "apps" /
+                   "conscious_assistant" / "templates" / "index.html").read_text()
+        self.assertIn("captured_ms_ago", browser)
+        self.assertIn("state.lastVoiceAt", browser)
+
+
+class LocalAmbientDoesNotListenWhileSpeakingTests(unittest.TestCase):
+    """
+    On the local path the robot waits its turn instead of filtering echo.
+
+    Transcribing on the robot takes seconds, so its own voice comes back long
+    after it stopped and looks like somebody spoke. Not listening while it
+    talks removes the problem rather than detecting it, and saves running
+    Whisper over the robot's own speech. Interrupting mid-sentence is given up
+    in exchange, which only applies here: the hosted path still barges in.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        cls.browser = (root / "apps" / "conscious_assistant"
+                       / "templates" / "index.html").read_text(encoding="utf-8")
+        start = cls.browser.index("function startLocalAmbient")
+        cls.local = cls.browser[start:cls.browser.index(
+            "async function transcribeLocalAmbient")]
+
+    def test_the_local_loop_stops_capturing_while_the_robot_speaks(self):
+        self.assertIn("if (isSpeaking)", self.local)
+        self.assertIn("state.mutedUntil", self.local)
+
+    def test_an_utterance_in_progress_is_thrown_away_not_transcribed(self):
+        """Otherwise its tail carries the robot's voice into the transcript."""
+        self.assertIn("state.discard = true", self.local)
+        self.assertIn("discarded", self.browser)
+
+    def test_it_keeps_ignoring_the_room_briefly_after_speech(self):
+        """The speaker rings out and the room reverberates past the last word."""
+        self.assertIn("LOCAL_AMBIENT_SPEAK_TAIL_MS", self.browser)
+
+    def test_the_hosted_path_still_listens_while_speaking(self):
+        """Barge-in is the whole reason the hosted mic stays open."""
+        webrtc = self.browser[self.browser.index("ambientPeerConnection = new RTCPeerConnection"):]
+        webrtc = webrtc[:webrtc.index("setRemoteDescription")]
+        self.assertNotIn("isSpeaking", webrtc)
+
+    def test_the_gate_is_not_applied_globally(self):
+        """It belongs to the local loop, not to ambient listening as a whole."""
+        self.assertEqual(self.local.count("if (isSpeaking)"), 1)
