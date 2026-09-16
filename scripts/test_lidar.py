@@ -146,6 +146,85 @@ def save_png(image, label: str) -> Path:
     return path
 
 
+# Only look for the calibration target in this band. Anything nearer is the
+# robot seeing its own body: the self mask is a box around the chassis, and
+# returns sitting right on its edge survive it. Measuring off those gives a
+# bearing to whichever part of the robot leaked through, which changes between
+# rotations. Further out is furniture and walls, which would win on a clear
+# floor and give an angle measured off the wrong thing entirely.
+TARGET_FAR_M = 2.0
+
+# Clear of the self mask by a margin, derived from the mask so the two cannot
+# drift apart.
+SELF_MASK_MARGIN_M = 0.15
+
+
+def target_near_m() -> float:
+    """Closest a calibration target may be and still be the robot's own body."""
+    mask = max(
+        float(os.environ.get("NAV_LIDAR_SELF_MASK_FORWARD", 0.45)),
+        float(os.environ.get("NAV_LIDAR_SELF_MASK_REAR", 0.35)),
+        float(os.environ.get("NAV_LIDAR_SELF_MASK_HALF_WIDTH", 0.25)),
+    )
+    return mask + SELF_MASK_MARGIN_M
+
+# Cells within this radius of the closest one are treated as the same object,
+# so the bearing is to the middle of the target rather than to whichever corner
+# of it happened to return first.
+TARGET_RADIUS_M = 0.25
+
+# Independent measurements taken per calibration run. The median of several is
+# used, because any single one can be thrown by a passing reflection.
+CALIBRATION_ROUNDS = 5
+
+
+def occupied_xy(cells, grid):
+    """Occupied cells as (x forward, y left) metres from the robot."""
+    import numpy as np
+
+    rows, cols = np.nonzero(cells > 0)
+    if rows.size == 0:
+        return None, None
+    # build_obstacle_grid stores row = origin_row - x/res and
+    # col = origin_col - y/res, so both invert the same way.
+    x = (grid.origin_row - rows).astype(np.float32) * grid.resolution
+    y = (grid.origin_col - cols).astype(np.float32) * grid.resolution
+    return x, y
+
+
+def measure_bearing(cells, grid):
+    """
+    Bearing to the middle of the nearest object, in degrees.
+
+    Taken over merged scans rather than one rotation, and over the whole object
+    rather than its nearest cell. A single cell moves between rotations, which
+    made repeated calibrations disagree by tens of degrees.
+
+    Returns (degrees, distance) or (None, None) when nothing is in the band.
+    """
+    import numpy as np
+
+    x, y = occupied_xy(cells, grid)
+    if x is None:
+        return None, None
+
+    distance = np.hypot(x, y)
+    in_band = (distance >= target_near_m()) & (distance <= TARGET_FAR_M)
+    if not np.any(in_band):
+        return None, None
+    x, y, distance = x[in_band], y[in_band], distance[in_band]
+
+    closest = int(np.argmin(distance))
+    same_object = np.hypot(x - x[closest], y - y[closest]) <= TARGET_RADIUS_M
+
+    # Circular mean, so an object straddling the back of the robot does not
+    # average its bearings to the front.
+    bearings = np.arctan2(y[same_object], x[same_object])
+    mean = math.atan2(float(np.mean(np.sin(bearings))),
+                      float(np.mean(np.cos(bearings))))
+    return math.degrees(mean), float(np.mean(distance[same_object]))
+
+
 def describe(grid) -> str:
     """One line on the nearest obstacle, in degrees rather than radians."""
     if grid is None or grid.nearest_obstacle_m == float("inf"):
@@ -193,38 +272,89 @@ def run_calibrate(gather_s: float, topic: str) -> int:
     With the rotation switched off, whatever sits directly in front of the nose
     is reported at the sensor's own bearing. That bearing is the mounting angle,
     so the offset that corrects it is its negative.
-    """
-    print("Put one unmistakable object a metre directly in front of the nose,")
-    print("closer than anything else, then stand clear of the robot.\n")
 
-    service = start_service(yaw_offset_deg=0.0)
+    Several measurements are taken and the median used, because one rotation can
+    be thrown by a reflection and a single reading is not worth trusting.
+    """
+    import numpy as np
+
+    print("Put one unmistakable object a metre directly in front of the nose,")
+    print("closer than anything else within two metres, then stand clear.")
+    print(f"Returns nearer than {target_near_m():.2f} m are ignored: that close"
+          " is the robot's own body.\n")
+
+    # Measure with the configured offset applied rather than with no rotation.
+    # The self mask is a box in the robot's frame and is applied after the
+    # rotation, so un-rotating the cloud moves the robot's body out from under
+    # its own mask: the chassis and rear legs then survive as obstacles half a
+    # metre away, and the bearing measured is to whichever part of the robot
+    # leaked through. Keeping the current offset leaves the mask aligned, and
+    # the answer comes out as a correction to it.
+    current_deg = math.degrees(
+        float(os.environ.get("NAV_LIDAR_POINTCLOUD_YAW_OFFSET_RAD",
+                             math.radians(70.0))))
+    print(f"measuring with the configured {current_deg:.1f} deg applied, so the"
+          " robot stays masked\n")
+
+    service = start_service(yaw_offset_deg=current_deg)
     if service.backend in {"none", "disabled"}:
         status = report_no_data(service, topic, gather_s)
         service.stop()
         return status
 
-    _, samples, grid = accumulate(service, gather_s)
+    window = max(0.8, gather_s / CALIBRATION_ROUNDS)
+    readings, distances, total = [], [], 0
+    for round_index in range(CALIBRATION_ROUNDS):
+        cells, samples, grid = accumulate(service, window)
+        total += samples
+        if cells is None or grid is None:
+            continue
+        degrees, distance = measure_bearing(cells, grid)
+        if degrees is None:
+            continue
+        readings.append(degrees)
+        distances.append(distance)
+        print(f"  round {round_index + 1}: {degrees:+.1f} deg "
+              f"at {distance:.2f} m ({samples} scans)")
     service.stop()
-    if grid is None or grid.nearest_obstacle_m == float("inf"):
-        print("\nNothing found within range. Place an object closer and retry.",
+
+    if not readings:
+        print(f"\nNothing found between {target_near_m():.2f} m and "
+              f"{TARGET_FAR_M:.1f} m. Place an object in that band and retry.",
               file=sys.stderr)
         return 1
 
-    measured_deg = math.degrees(grid.nearest_obstacle_bearing)
-    offset_deg = -measured_deg
+    measured_deg = float(np.median(readings))
+    spread = max(readings) - min(readings)
+    # The target is physically straight ahead, so whatever bearing it comes back
+    # at is how far the configured offset is out. Subtracting corrects it.
+    offset_deg = current_deg - measured_deg
     offset_rad = math.radians(offset_deg)
 
-    print(f"samples   : {samples}")
-    print(f"target    : {grid.nearest_obstacle_m:.2f} m away")
-    print(f"raw bearing: {measured_deg:+.1f} deg with no rotation applied")
-    print(f"\nMounting angle is {offset_deg:+.1f} deg. Put this in setmyenv.sh:")
+    print(f"\nsamples   : {total} scans over {CALIBRATION_ROUNDS} rounds")
+    print(f"target    : {np.mean(distances):.2f} m away")
+    print(f"target sits at: {measured_deg:+.1f} deg median, "
+          f"{spread:.1f} deg spread")
+    if abs(measured_deg) < 5.0:
+        print(f"That is close to straight ahead, so {current_deg:.1f} deg is"
+              " already right for this robot.")
+
+    if spread > 15.0:
+        # Readings this inconsistent are measuring different things, so the
+        # median is not meaningful and should not be pasted into a config.
+        print(f"\nReadings disagree by {spread:.0f} degrees, so this is not a"
+              " reliable measurement.", file=sys.stderr)
+        print("Something other than the target is the closest thing, or the"
+              " target moved.", file=sys.stderr)
+        print("Clear the floor around the robot, leave one object about a metre"
+              " ahead, and retry.", file=sys.stderr)
+        return 1
+
+    print(f"\nMounting angle is {offset_deg:+.1f} deg "
+          f"({current_deg:.1f} measured minus {measured_deg:+.1f} residual).")
+    print("Put this in setmyenv.sh:")
     print(f'    export NAV_LIDAR_POINTCLOUD_YAW_OFFSET_RAD="{offset_rad:.4f}"'
           f'   # {offset_deg:.1f} degrees')
-
-    if abs(grid.nearest_obstacle_m - 1.0) > 0.6:
-        print(f"\nNote: the nearest thing is {grid.nearest_obstacle_m:.2f} m away,"
-              " not about a metre.\nIf that is not the object you placed, this"
-              " angle was measured off the wrong thing.")
 
     # Confirmation. The same surroundings redrawn with the measured offset
     # applied: the object should now sit straight up from the robot.
@@ -232,8 +362,11 @@ def run_calibrate(gather_s: float, topic: str) -> int:
     cells, _, grid = accumulate(confirm, gather_s)
     confirm.stop()
     if cells is not None and grid is not None:
-        print(f"\nafter     : {describe(grid)}")
-        title = f"calibrated {offset_deg:+.1f} deg | {describe(grid)}"
+        after_deg, after_m = measure_bearing(cells, grid)
+        if after_deg is not None:
+            print(f"\nafter     : target now at {after_deg:+.1f} deg, "
+                  f"{after_m:.2f} m")
+        title = f"calibrated {offset_deg:+.1f} deg | spread {spread:.1f} deg"
         print(f"snapshot  : {save_png(render_png(cells, grid, title), 'calibrate')}")
         print("The object should be straight up from the robot in that picture.")
     return 0
