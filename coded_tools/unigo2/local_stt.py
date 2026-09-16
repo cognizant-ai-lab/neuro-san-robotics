@@ -27,11 +27,18 @@ Environment:
 import logging
 import os
 import threading
+import time
 from typing import Optional
 
 
 _model = None
 _model_lock = threading.Lock()
+
+# One decode at a time. faster-whisper's WhisperModel is not safe to call from
+# two threads at once, and with GO2_STT_ENGINE=local both the mic button and
+# ambient listening post to the same route, so they do collide in practice. The
+# symptom is a request that never returns rather than an error.
+_decode_lock = threading.Lock()
 
 
 def engine() -> str:
@@ -128,14 +135,52 @@ def transcribe(audio_path: str, language: Optional[str] = None) -> str:
     Transcribe a recorded utterance offline.
 
     Blocking, and meant to be called from a request thread rather than an
-    event loop. CTranslate2 releases the GIL while it decodes, so this does not
-    stall the rest of the process the way a pure-Python loop would.
+    event loop. CTranslate2 releases the GIL while it decodes, so waiting here
+    does not stall the rest of the process.
+
+    Serialised: the model cannot decode two clips at once, and callers that
+    queue up simply wait their turn.
     """
-    segments, _info = model().transcribe(
-        audio_path,
-        language=language or os.environ.get("GO2_STT_LANGUAGE", "en"),
-    )
-    return "".join(segment.text for segment in segments).strip()
+    whisper = model()
+    started = time.monotonic()
+    with _decode_lock:
+        waited = time.monotonic() - started
+        if waited > 1.0:
+            logging.info("Local transcription waited %.1fs for the model", waited)
+        segments, _info = whisper.transcribe(
+            audio_path,
+            language=language or os.environ.get("GO2_STT_LANGUAGE", "en"),
+        )
+        # The generator is consumed inside the lock: that is where the decoding
+        # actually happens, so releasing early would not serialise anything.
+        text = "".join(segment.text for segment in segments).strip()
+    logging.info("Local transcription took %.1fs (%d chars)",
+                 time.monotonic() - started, len(text))
+    return text
+
+
+def warm_in_background() -> None:
+    """
+    Load the model now, off the request path.
+
+    Otherwise the first person to press the mic button pays for the load, which
+    on the robot's CPU is slow enough to look like a hang: the button sits on
+    "transcribing" with nothing coming back. Started as a daemon so it cannot
+    hold up shutdown, and errors are logged rather than raised because a warm-up
+    failing should not stop the app from starting.
+    """
+    if engine() != "local" or not _importable():
+        return
+
+    def load():
+        try:
+            started = time.monotonic()
+            model()
+            logging.info("Local Whisper warmed in %.1fs", time.monotonic() - started)
+        except Exception:
+            logging.exception("Could not warm the local speech model")
+
+    threading.Thread(target=load, name="whisper-warmup", daemon=True).start()
 
 
 def ambient_mode(hosted_key_present: bool) -> str:

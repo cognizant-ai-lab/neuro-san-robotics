@@ -778,7 +778,84 @@ PY
 
 Want: `backend: realsense`, `grid: True`, and a finite `center_depth_m` near the true distance to a test object. This is the first gate that opens a stream, so a failure here after 10b passes points at stream configuration or USB bandwidth, not installation.
 
-Leave `NAV_OBSTACLE_SOURCE` and `NAV_DEPTH_CAMERA_SOURCE` unset. Depth is the default and the backend auto-detects.
+Leave `NAV_DEPTH_CAMERA_SOURCE` unset; the backend auto-detects.
+
+`NAV_OBSTACLE_SOURCE` is worth setting, and Phase 10.9 covers it.
+
+### 10.9 Add the LiDAR
+
+The depth camera sees through a narrow cone in front of the robot. The LiDAR
+sees all round. That difference matters most in free navigation -- moving
+without a map, where nothing but live sensing keeps the robot off the
+furniture -- because anything approaching from the side is invisible to the
+camera until it is already in the way.
+
+Fusing the two is the recommended configuration for a new robot:
+
+```bash
+export NAV_OBSTACLE_SOURCE="fused"
+```
+
+`fused` keeps the depth camera as a second opinion rather than replacing it.
+`lidar` uses the LiDAR alone, and `depth` (the default when unset) ignores the
+LiDAR entirely.
+
+**Check it before trusting it.** Two things go wrong here and neither raises an
+error: no data arrives at all, or data arrives rotated. A rotated point cloud
+is the dangerous one -- the robot swerves around empty floor and walks into a
+real wall.
+
+```bash
+cd ~/exp/neuro-san-robotics
+source setmyenv.sh
+python scripts/test_lidar.py --seconds 5
+```
+
+Want: `backend: lidar:rt/utlidar/cloud`, a nearest-obstacle line that matches
+where you are standing, and a picture whose walls match the room. Scans are
+merged over a few seconds and saved as a PNG under `~/lidar_checks`; the last
+ten are kept. Exit status is 0 only when usable data arrived, so this works as
+a gate.
+
+If nothing arrives, work down the list the script prints: the dome must spin
+freely, `setmyenv.sh` must have been sourced so CycloneDDS is configured,
+`GO2_NETWORK_INTERFACE` must name the interface facing the robot, and
+`NAV_USE_LIDAR` must not be set to `0`.
+
+If data arrives but the drawing disagrees with the room, the mounting angle is
+wrong. `NAV_LIDAR_POINTCLOUD_YAW_OFFSET_RAD` describes how the unit is bolted
+on and defaults to 70 degrees, which is correct for the robots this repo was
+built against. A unit mounted differently needs its own, measured rather than
+guessed:
+
+```bash
+python scripts/test_lidar.py --calibrate
+```
+
+Put one unmistakable object a metre directly in front of the nose, closer than
+anything else. The script prints the `export` line to paste into
+`setmyenv.sh`, then redraws the room with it applied so you can confirm the
+object sits straight ahead.
+
+Do not set `NAV_LIDAR_ANGLE_OFFSET_RAD` instead. It applies to 2D scan
+messages rather than the point cloud the Go2 publishes, and because the
+point-cloud offset falls back to it, setting it to `0` silently cancels the
+70-degree default and rotates the map.
+
+### 10.10 Gate: free navigation
+
+With no `NAV_MAP_FILE` set, the robot navigates relative to itself. Ask it to
+`move_forward`, or ask what it can see:
+
+- `move_forward`, `move_until_obstacle`, `turn`, `stop`, `status`, `obstacles`
+  all work with no map.
+- `navigate_to`, `set_location` and `destinations` need one. Without it the
+  robot says so: *"No map loaded. Only relative navigation (move_forward,
+  turn) is available."*
+
+Want: `obstacles` describes what is actually around the robot, and
+`move_until_obstacle` stops at a real object rather than walking into it or
+halting in clear space. Both failures point back at 10.9.
 
 ---
 

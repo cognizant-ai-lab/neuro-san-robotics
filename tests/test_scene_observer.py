@@ -1,13 +1,14 @@
 import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import numpy as np
 
 from apps.conscious_assistant.scene_observer import SceneObserver
-from apps.conscious_assistant.scene_observer import REPO_ROOT
 from apps.conscious_assistant.scene_observer import _resolve_repo_relative_path
 from apps.conscious_assistant.scene_observer import build_scene_input
 from apps.conscious_assistant.scene_observer import observation_signature
@@ -75,9 +76,26 @@ class SceneObserverTests(unittest.TestCase):
         self.assertTrue(captured)
 
     def test_resolve_repo_relative_path_uses_repo_copy_when_present(self):
-        resolved = _resolve_repo_relative_path("yolov8n.pt")
+        # The weights are downloaded rather than committed, so a checkout that
+        # has never run vision does not have them and this test used to pass or
+        # fail depending on the machine. A stand-in repo root keeps it about the
+        # resolver.
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            (root / "yolov8n.pt").touch()
+            with patch("apps.conscious_assistant.scene_observer.REPO_ROOT", root):
+                resolved = _resolve_repo_relative_path("yolov8n.pt")
 
-        self.assertEqual(resolved, str(REPO_ROOT / "yolov8n.pt"))
+        self.assertEqual(resolved, str(root / "yolov8n.pt"))
+
+    def test_resolve_repo_relative_path_is_left_alone_when_absent(self):
+        """The other half: with no repo copy the caller's own path stands."""
+        with tempfile.TemporaryDirectory() as root:
+            with patch("apps.conscious_assistant.scene_observer.REPO_ROOT",
+                       Path(root)):
+                resolved = _resolve_repo_relative_path("yolov8n.pt")
+
+        self.assertEqual(resolved, "yolov8n.pt")
 
     def test_summarize_observed_objects_deduplicates_and_sorts(self):
         objects = [
@@ -131,6 +149,10 @@ class SceneObserverTests(unittest.TestCase):
     def test_ensure_vision_uses_shared_defaults_helper(self):
         observer = SceneObserver(enabled=True)
         captured_kwargs = {}
+        # Same reason as the resolver test: yolov8n.pt is downloaded, not
+        # committed, so the repo root here is a stand-in with it present.
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / "yolov8n.pt").touch()
 
         def fake_defaults(**kwargs):
             captured_kwargs.update(kwargs)
@@ -146,6 +168,7 @@ class SceneObserverTests(unittest.TestCase):
             }
 
         with (
+            patch("apps.conscious_assistant.scene_observer.REPO_ROOT", root),
             patch("apps.conscious_assistant.scene_observer.cv2", object()),
             patch("apps.conscious_assistant.scene_observer.detect_camera_snapshot", object()),
             patch("apps.conscious_assistant.scene_observer.open_camera", object()),
@@ -158,9 +181,9 @@ class SceneObserverTests(unittest.TestCase):
         self.assertEqual(
             captured_kwargs,
             {
-                "yolo_model": str(REPO_ROOT / "yolov8n.pt"),
+                "yolo_model": str(root / "yolov8n.pt"),
                 "face_model": "Facenet",
-                "face_db_path": str(REPO_ROOT / "face_database"),
+                "face_db_path": str(root / "face_database"),
             },
         )
         ctor.assert_called_once()

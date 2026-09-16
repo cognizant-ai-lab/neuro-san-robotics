@@ -611,6 +611,10 @@ def enqueue_speech(
     )
 
 
+# Load the local recogniser now if it is the configured one, so the first press
+# of the mic button is not waiting on a model load.
+local_stt.warm_in_background()
+
 # Start speech worker thread
 speech_thread = threading.Thread(target=speech_worker, daemon=True)
 speech_thread.start()
