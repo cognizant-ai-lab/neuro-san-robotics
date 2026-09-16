@@ -516,13 +516,21 @@
             state.timer = setInterval(function() {
                 if (state.stopped) { return; }
 
-                // The robot's own voice is in the room while it talks, and
-                // transcribing on the robot is far too slow to sort that out
-                // afterwards -- the transcript lands seconds later, looking
-                // like somebody spoke. So simply do not listen until it has
-                // finished. Interrupting the robot mid-sentence is a
-                // hosted-path feature; here it waits its turn.
-                if (isSpeaking) {
+                // Stand down while the robot talks, and while the mic button
+                // is in use.
+                //
+                // Talking: its own voice is in the room, and transcribing on
+                // the robot is too slow to sort that out afterwards. The
+                // transcript lands seconds later looking like somebody spoke,
+                // so it simply does not listen until the robot has finished.
+                // Interrupting mid-sentence is a hosted-path feature; here it
+                // waits its turn.
+                //
+                // Mic button: both paths post to the same route and the robot
+                // decodes one clip at a time, so an ambient utterance queued
+                // here is one the person is waiting behind. It would also
+                // transcribe the same speech twice.
+                if (isSpeaking || isRecording || isTranscribing) {
                     if (state.recorder) {
                         state.discard = true;
                         finishUtterance();
