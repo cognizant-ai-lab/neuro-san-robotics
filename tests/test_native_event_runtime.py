@@ -13,6 +13,19 @@ from apps.conscious_assistant import agent_runtime
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def prompt_text(path: Path) -> str:
+    """
+    File contents with every run of whitespace collapsed to one space.
+
+    Agent instructions are hard-wrapped, so a phrase that happens to straddle a
+    line break cannot be found by a plain substring search. That silently broke
+    a test here for months: the prompt said "remain completely\\nsilent" and the
+    assertion looked for "remain completely silent". Collapsing first means
+    re-wrapping a paragraph no longer breaks a test about what it says.
+    """
+    return " ".join(path.read_text().split())
+
+
 class NativeEventRuntimeTests(unittest.TestCase):
 
     def test_only_terminal_navigation_updates_wake_agent(self):
@@ -52,9 +65,11 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn('"name": "nav_planner"', source)
         self.assertNotIn('"name": "nav_status"', source)
         self.assertIn("Treat those events as authoritative", source)
-        self.assertIn("call nav_planner with command `status` before answering", source)
         self.assertIn("Do not call set_location in response", source)
-        self.assertIn("You must use command 'status'", source)
+        self.assertIn(
+            "You must use command 'status' before answering any user question",
+            source,
+        )
         self.assertIn("always call nav_planner with command `resume`", source)
         self.assertIn("substitute robot_macros step_forward", source)
 
@@ -66,11 +81,16 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn("For `observation:` and `system:` events, never use the `say` field", source)
 
     def test_ambient_speech_is_sent_to_the_agent_without_a_prefilter(self):
-        source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
+        source = prompt_text(ROOT / "registries" / "conscious_agent.hocon")
         interface_source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()
 
         self.assertIn("`ambient:` is an automatic transcription", source)
-        self.assertIn("remain completely silent", source)
+        # Whether to answer overheard speech is the agent's call, not a filter
+        # in front of it. The prompt has to say so, and has to leave silence
+        # open, or every conversation in the room gets a reply.
+        self.assertIn("not automatically a request for you", source)
+        self.assertIn("Decide if you would like to respond, or just listen", source)
+        self.assertIn("Silence is always allowed and often preferred", source)
         self.assertIn("only the relevant addressed speech", source)
         self.assertIn('queue_agent_event(transcript, source="ambient")', interface_source)
         self.assertNotIn("ambient_llm_filter", interface_source)
@@ -255,7 +275,13 @@ class NativeEventRuntimeTests(unittest.TestCase):
         source = (ROOT / "apps" / "conscious_assistant" / "interface_flask.py").read_text()
 
         self.assertIn('os.environ["CONSCIOUS_UI_EVENT_ENDPOINT"] = _ui_event_endpoint()', source)
-        self.assertIn('TLS_CERT = Path("/home/unitree/certs/cert.pem")', source)
+        # Flask and the native callback read one pair of constants. The paths
+        # themselves moved out to setup_tls_certs, which derives them from
+        # TLS_CERT_DIR, so a fleet on mixed addressing shares this file. The
+        # assertNotIn below still guards the regression this test was written
+        # for: a second hard-coded copy of the path living somewhere else.
+        self.assertIn("TLS_CERT = tls_certs.cert_path()", source)
+        self.assertIn("TLS_KEY = tls_certs.key_path()", source)
         self.assertNotIn('CERT = "/home/unitree/certs/cert.pem"', source)
 
     def test_robot_actions_execute_in_the_native_agent_process(self):
