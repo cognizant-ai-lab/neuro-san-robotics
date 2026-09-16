@@ -37,8 +37,12 @@ BASE_URL = (
 )
 
 # Defaults mirror tts_go2.py so both agree on where the voice lives.
-DEFAULT_MODEL = f"/home/unitree/piper_models/{VOICE}.onnx"
-DEFAULT_CONFIG = f"/home/unitree/piper_models/{VOICE}.onnx.json"
+#
+# ~ rather than a literal /home/unitree: on the robot the user is unitree, so
+# this resolves to exactly the same directory it always did, and it also works
+# on a laptop, where the literal path failed outright trying to mkdir /home.
+DEFAULT_MODEL = str(Path.home() / "piper_models" / f"{VOICE}.onnx")
+DEFAULT_CONFIG = str(Path.home() / "piper_models" / f"{VOICE}.onnx.json")
 
 # The .onnx is around 110 MB; anything tiny is an error page, not a model.
 MIN_MODEL_BYTES = 1_000_000

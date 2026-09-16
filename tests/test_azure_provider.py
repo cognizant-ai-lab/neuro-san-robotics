@@ -183,22 +183,30 @@ class RealtimeRoutingTests(unittest.TestCase):
 
 
 class AgentLlmConfigTests(unittest.TestCase):
-    """registries/llm_config.hocon drives every agent network from the env."""
+    """The agent registries take their model and provider from the env."""
 
     def resolve(self, **env):
         """Parse both agent networks in a clean interpreter and return llm_config."""
+        # parse_string from an unrelated directory, which is exactly how
+        # neuro-san loads these: leaf_common reads the file and hands the text
+        # to ConfigFactory.parse_string(). Testing with parse_file() instead
+        # once hid a broken `include` that stopped both networks from loading.
         script = (
-            "import json\n"
+            "import json, pathlib, os\n"
             "from pyhocon import ConfigFactory\n"
-            "out = {}\n"
-            "for n in ('conscious_agent', 'unigo2'):\n"
-            "    out[n] = dict(ConfigFactory.parse_file('registries/%s.hocon' % n)['llm_config'])\n"
+            "root = pathlib.Path(os.environ['REPO_ROOT'])\n"
+            "text = {n: (root / 'registries' / (n + '.hocon')).read_text()\n"
+            "        for n in ('conscious_agent', 'unigo2')}\n"
+            "os.chdir('/')\n"
+            "out = {n: dict(ConfigFactory.parse_string(t)['llm_config'])\n"
+            "       for n, t in text.items()}\n"
             "print(json.dumps(out))\n"
         )
         child = dict(os.environ)
         for name in PROVIDER_VARS:
             child.pop(name, None)
         child.update(env)
+        child['REPO_ROOT'] = str(ROOT)
         result = subprocess.run(
             [sys.executable, "-c", script],
             cwd=str(ROOT), env=child, capture_output=True, text=True, check=False,
@@ -249,6 +257,17 @@ class AgentLlmConfigTests(unittest.TestCase):
         self.assertEqual(
             config["conscious_agent"], {"class": "openai", "model_name": "gpt-5.2"}
         )
+
+    def test_registries_do_not_use_include(self):
+        """
+        neuro-san parses registries with parse_string(), which leaves an
+        `include` resolving against the working directory. A shared config
+        pulled in that way passed every parsing test here and still stopped
+        both networks from loading, so every agent request returned 404.
+        """
+        for name in ("conscious_agent", "unigo2"):
+            source = (ROOT / "registries" / f"{name}.hocon").read_text()
+            self.assertNotIn("include ", source, f"{name}.hocon uses include")
 
     def test_no_null_deployment_leaks_when_azure_is_unused(self):
         """A null here would be handed to a provider that never asked for it."""

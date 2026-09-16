@@ -320,6 +320,22 @@ The conscious assistant's native event and periodic execution require
 `neuro-san==0.6.76` or later. Older releases can acknowledge an event without
 continuing the agent work, so the application refuses to start with them.
 
+### Environment variables
+
+`.env.example` is the template you copy to `setmyenv.sh`. It is deliberately
+short; every variable in it, and the reasoning behind it, is documented in
+[docs/env_variables_guide.md](docs/env_variables_guide.md).
+
+```shell
+cp .env.example setmyenv.sh
+# edit setmyenv.sh, add your API key, then:
+source setmyenv.sh
+```
+
+Upgrading an existing robot? Nothing above the "new in this version" line in
+the template has changed, and every setting below it defaults to how the robot
+already behaves.
+
 ### Install the offline TTS voice
 
 `requirements.txt` installs the Piper binary but not the voice it speaks with,
