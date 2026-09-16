@@ -2,6 +2,7 @@
 
 import io
 import os
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -365,8 +366,17 @@ class LocalAmbientDoesNotListenWhileSpeakingTests(unittest.TestCase):
             "async function transcribeLocalAmbient")]
 
     def test_the_local_loop_stops_capturing_while_the_robot_speaks(self):
-        self.assertIn("if (isSpeaking)", self.local)
+        self.assertIn("isSpeaking", self.local)
         self.assertIn("state.mutedUntil", self.local)
+
+    def test_it_also_stands_down_while_the_mic_button_is_in_use(self):
+        """
+        Both paths post to the same route and the robot decodes one clip at a
+        time, so ambient work queued during a press is work the person waits
+        behind. It would also transcribe the same speech twice.
+        """
+        self.assertIn("isRecording", self.local)
+        self.assertIn("isTranscribing", self.local)
 
     def test_an_utterance_in_progress_is_thrown_away_not_transcribed(self):
         """Otherwise its tail carries the robot's voice into the transcript."""
@@ -385,4 +395,71 @@ class LocalAmbientDoesNotListenWhileSpeakingTests(unittest.TestCase):
 
     def test_the_gate_is_not_applied_globally(self):
         """It belongs to the local loop, not to ambient listening as a whole."""
-        self.assertEqual(self.local.count("if (isSpeaking)"), 1)
+        self.assertEqual(
+            self.local.count("isSpeaking || isRecording || isTranscribing"), 1)
+
+
+class WarmUpTests(unittest.TestCase):
+    """
+    Loading the model at start-up, and only where it is actually used.
+
+    On the robot's CPU the load takes long enough that paying for it inside the
+    first request looks like a hang: the button sits on "transcribing" with
+    nothing coming back. Doing it at start-up fixes that, but it must stay
+    invisible to everyone on hosted speech, who would otherwise gain a model
+    load and a few hundred megabytes of resident memory they never asked for.
+    """
+
+    def warm(self, **overrides):
+        """Run the warm-up and report whether it started a thread."""
+        with patch.dict(os.environ, stt_env(**overrides)):
+            with patch.object(local_stt, "_importable", return_value=True):
+                with patch.object(local_stt.threading, "Thread") as thread:
+                    local_stt.warm_in_background()
+        return thread.called
+
+    def test_an_existing_hosted_robot_loads_nothing(self):
+        """Nothing configured is the upgrade case: it must not change."""
+        self.assertFalse(self.warm())
+
+    def test_the_hosted_engine_loads_nothing(self):
+        self.assertFalse(self.warm(GO2_STT_ENGINE="openai"))
+
+    def test_auto_loads_nothing_because_it_prefers_the_hosted_call(self):
+        """
+        auto only reaches Whisper if a hosted call fails, which may never
+        happen, so warming it up front would be cost for nothing.
+        """
+        self.assertFalse(self.warm(GO2_STT_ENGINE="auto"))
+
+    def test_the_local_engine_warms_up(self):
+        self.assertTrue(self.warm(GO2_STT_ENGINE="local"))
+
+    def test_it_stays_quiet_when_the_package_is_missing(self):
+        with patch.dict(os.environ, stt_env(GO2_STT_ENGINE="local")):
+            with patch.object(local_stt, "_importable", return_value=False):
+                with patch.object(local_stt.threading, "Thread") as thread:
+                    local_stt.warm_in_background()
+        self.assertFalse(thread.called)
+
+    def test_a_failed_warm_up_does_not_stop_the_app(self):
+        """A start-up nicety must never be the reason the robot will not boot."""
+        with patch.dict(os.environ, stt_env(GO2_STT_ENGINE="local")):
+            with patch.object(local_stt, "_importable", return_value=True):
+                with patch.object(local_stt, "model",
+                                  side_effect=RuntimeError("no weights")):
+                    # assertLogs both proves it was reported and keeps the
+                    # traceback out of the test run's output.
+                    with self.assertLogs(level="ERROR") as logged:
+                        local_stt.warm_in_background()
+                        for thread in threading.enumerate():
+                            if thread.name == "whisper-warmup":
+                                thread.join(timeout=5)
+        self.assertIn("Could not warm", "".join(logged.output))
+
+    def test_it_runs_as_a_daemon_so_it_cannot_hold_up_shutdown(self):
+        with patch.dict(os.environ, stt_env(GO2_STT_ENGINE="local")):
+            with patch.object(local_stt, "_importable", return_value=True):
+                with patch.object(local_stt.threading, "Thread") as thread:
+                    local_stt.warm_in_background()
+        self.assertTrue(thread.call_args.kwargs["daemon"])
