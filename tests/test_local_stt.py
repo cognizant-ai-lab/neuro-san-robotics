@@ -340,3 +340,49 @@ class SelfEchoTimingTests(unittest.TestCase):
                    "conscious_assistant" / "templates" / "index.html").read_text()
         self.assertIn("captured_ms_ago", browser)
         self.assertIn("state.lastVoiceAt", browser)
+
+
+class LocalAmbientDoesNotListenWhileSpeakingTests(unittest.TestCase):
+    """
+    On the local path the robot waits its turn instead of filtering echo.
+
+    Transcribing on the robot takes seconds, so its own voice comes back long
+    after it stopped and looks like somebody spoke. Not listening while it
+    talks removes the problem rather than detecting it, and saves running
+    Whisper over the robot's own speech. Interrupting mid-sentence is given up
+    in exchange, which only applies here: the hosted path still barges in.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        cls.browser = (root / "apps" / "conscious_assistant"
+                       / "templates" / "index.html").read_text(encoding="utf-8")
+        start = cls.browser.index("function startLocalAmbient")
+        cls.local = cls.browser[start:cls.browser.index(
+            "async function transcribeLocalAmbient")]
+
+    def test_the_local_loop_stops_capturing_while_the_robot_speaks(self):
+        self.assertIn("if (isSpeaking)", self.local)
+        self.assertIn("state.mutedUntil", self.local)
+
+    def test_an_utterance_in_progress_is_thrown_away_not_transcribed(self):
+        """Otherwise its tail carries the robot's voice into the transcript."""
+        self.assertIn("state.discard = true", self.local)
+        self.assertIn("discarded", self.browser)
+
+    def test_it_keeps_ignoring_the_room_briefly_after_speech(self):
+        """The speaker rings out and the room reverberates past the last word."""
+        self.assertIn("LOCAL_AMBIENT_SPEAK_TAIL_MS", self.browser)
+
+    def test_the_hosted_path_still_listens_while_speaking(self):
+        """Barge-in is the whole reason the hosted mic stays open."""
+        webrtc = self.browser[self.browser.index("ambientPeerConnection = new RTCPeerConnection"):]
+        webrtc = webrtc[:webrtc.index("setRemoteDescription")]
+        self.assertNotIn("isSpeaking", webrtc)
+
+    def test_the_gate_is_not_applied_globally(self):
+        """It belongs to the local loop, not to ambient listening as a whole."""
+        self.assertEqual(self.local.count("if (isSpeaking)"), 1)

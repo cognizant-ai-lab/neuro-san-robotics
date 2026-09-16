@@ -462,6 +462,9 @@
         var LOCAL_AMBIENT_SILENCE_MS = 700;   // silence that ends an utterance
         var LOCAL_AMBIENT_MIN_SPEECH_MS = 250; // ignore coughs and door clicks
         var LOCAL_AMBIENT_RMS_THRESHOLD = 0.012;
+        // How long after the robot stops to keep ignoring the room, so the tail
+        // of its own utterance and the speaker ringing out are not picked up.
+        var LOCAL_AMBIENT_SPEAK_TAIL_MS = 400;
 
         function startLocalAmbient(stream) {
             var context = new (window.AudioContext || window.webkitAudioContext)();
@@ -473,6 +476,9 @@
             var state = {
                 context: context, recorder: null, chunks: [],
                 speechStartedAt: 0, lastVoiceAt: 0, stopped: false, timer: null,
+                // Set while the robot is speaking, so an utterance already in
+                // progress is thrown away rather than transcribed.
+                discard: false, mutedUntil: 0,
             };
 
             function finishUtterance() {
@@ -491,8 +497,10 @@
                 recorder.onstop = function() {
                     var spoken = state.lastVoiceAt - state.speechStartedAt;
                     var blob = new Blob(state.chunks, {type: 'audio/webm'});
+                    var discarded = state.discard;
                     state.chunks = [];
-                    if (spoken >= LOCAL_AMBIENT_MIN_SPEECH_MS && blob.size > 1000) {
+                    state.discard = false;
+                    if (!discarded && spoken >= LOCAL_AMBIENT_MIN_SPEECH_MS && blob.size > 1000) {
                         // lastVoiceAt, not now: transcribing locally takes long
                         // enough that the server cannot tell from arrival time
                         // whether this audio was captured while the robot was
@@ -507,6 +515,23 @@
 
             state.timer = setInterval(function() {
                 if (state.stopped) { return; }
+
+                // The robot's own voice is in the room while it talks, and
+                // transcribing on the robot is far too slow to sort that out
+                // afterwards -- the transcript lands seconds later, looking
+                // like somebody spoke. So simply do not listen until it has
+                // finished. Interrupting the robot mid-sentence is a
+                // hosted-path feature; here it waits its turn.
+                if (isSpeaking) {
+                    if (state.recorder) {
+                        state.discard = true;
+                        finishUtterance();
+                    }
+                    state.mutedUntil = Date.now() + LOCAL_AMBIENT_SPEAK_TAIL_MS;
+                    return;
+                }
+                if (Date.now() < state.mutedUntil) { return; }
+
                 analyser.getFloatTimeDomainData(samples);
                 var sum = 0;
                 for (var i = 0; i < samples.length; i += 1) { sum += samples[i] * samples[i]; }
