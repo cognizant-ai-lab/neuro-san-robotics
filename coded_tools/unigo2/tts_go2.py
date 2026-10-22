@@ -1348,9 +1348,15 @@ def _linux_say_via_piper(
             piper_proc.stdin.close()
             _run_playback(aplay_cmd, stdin=piper_proc.stdout, check=True)
         finally:
-            # Drop our end of the pipe. If aplay was killed by a barge-in,
-            # this is what makes Piper exit instead of blocking on a write.
+            # Drop our end of the pipe so Piper cannot block on a write once
+            # aplay is gone. After a normal run Piper has already exited; if it
+            # is still going, aplay was killed by a barge-in and Piper is in the
+            # middle of a sentence it would only abandon on its next write. On
+            # a slow CPU that is seconds of the speech worker sitting here
+            # after the user has already interrupted, so end it now.
             piper_proc.stdout.close()
+            if piper_proc.poll() is None:
+                piper_proc.terminate()
             piper_proc.wait()
             piper_stderr.seek(0)
             stderr = piper_stderr.read()
