@@ -544,6 +544,40 @@ voice's own config, so mixing tiers is safe.
 `~/piper_models/` on the robot is `/home/unitree/piper_models` and on a laptop
 is under your own home directory, so the same setting works in both places.
 
+#### Checking speech latency
+
+`scripts/tts_latency_check.py` measures what a listener hears once the agent's
+reply is in hand: how long until the first sound, whether playback ever
+stalls, and how long the whole utterance takes. It runs the real speech path,
+`tts_go2.say` unchunked as the speech worker calls it, with `aplay` wrapped so
+every block of audio reaching the speaker is timestamped.
+
+```shell
+python scripts/tts_latency_check.py                      # built-in three-paragraph reply
+python scripts/tts_latency_check.py --file reply.txt     # a saved agent reply
+pbpaste | python scripts/tts_latency_check.py --text -   # a reply from the clipboard
+python scripts/tts_latency_check.py --engine openai      # the hosted path, for comparison
+python scripts/tts_latency_check.py --silent             # measure without playing anything
+```
+
+The same command runs on the robot and on a laptop. On the robot the wrapper
+forwards to the real `aplay`, so what you hear is what is measured. On macOS it
+uses `ffplay` or sox `play` if one works, otherwise it paces the audio silently
+in real time, and in every case saves what reached the speaker as
+`tts_check_heard.wav` for `afplay`.
+
+The report has three parts: a timeline of start, first audio, any gap and done;
+a result block with time to first audio, speech length, overhead over the
+speech length and the gap count; and the path of the saved audio. Overhead
+equal to time-to-first-audio means synthesis stayed ahead of the speaker for
+the whole reply. On Linux also watch stderr, where the real `aplay` prints its
+own `underrun!!!` lines if the pipe starves.
+
+On macOS, Piper is not in `requirements.txt`, so install it into the project
+venv first with `uv pip install --python .venv/bin/python piper-tts`, then
+fetch a voice with `scripts/install_piper_voice.py`. The check refuses to run
+if the requested engine is unavailable rather than quietly measuring another.
+
 ### `GO2_STT_ENGINE`
 
 Mirrors `GO2_TTS_ENGINE`, for listening.
