@@ -234,3 +234,6 @@ tts_check_heard.wav
 
 # local db
 nss_local.db
+
+# local memory
+:memory:.ses
