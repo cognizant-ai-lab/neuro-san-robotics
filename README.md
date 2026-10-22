@@ -359,7 +359,7 @@ the robot speaks immediately instead of waiting out a doomed API call before
 every utterance.
 
 The default voice is `en_GB-cori-high`. To use another from the
-[Rhasspy piper-voices](https://huggingface.co/rhasspy/piper-voices) repo, set
+[Piper voice samples](https://rhasspy.github.io/piper-samples/) page, set
 `GO2_PIPER_VOICE` in `setmyenv.sh` and re-run the installer; see
 [docs/env_variables_guide.md](docs/env_variables_guide.md#piper-the-offline-voice).
 
