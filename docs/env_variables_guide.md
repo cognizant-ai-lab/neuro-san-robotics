@@ -536,7 +536,7 @@ python scripts/install_piper_voice.py        # or: --voice en_GB-southern_englis
 ```
 
 Any voice on the [Piper voice samples](https://rhasspy.github.io/piper-samples/) page
-repo works. The quality tiers trade naturalness for speed: `low` voices are
+works. The quality tiers trade naturalness for speed: `low` voices are
 16 kHz and the fastest to synthesise on the robot's CPU, `medium` and `high`
 are 22.05 kHz and sound better. The playback sample rate is read from the
 voice's own config, so mixing tiers is safe.
