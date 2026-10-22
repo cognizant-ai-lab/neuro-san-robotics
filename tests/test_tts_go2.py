@@ -262,11 +262,13 @@ class FakePiperProcess:
             self.written = self.getvalue()
             super().close()
 
-    def __init__(self, returncode=0, stderr_text=""):
+    def __init__(self, returncode=0, stderr_text="", still_running=False):
         self.stdin = self._RecordingStdin()
         self.stdout = io.BytesIO()      # aplay should be given exactly this handle
         self.returncode = returncode
         self._stderr_text = stderr_text
+        self._still_running = still_running
+        self.terminated = False
 
     def __call__(self, cmd, **kwargs):
         stderr = kwargs.get("stderr")
@@ -274,7 +276,16 @@ class FakePiperProcess:
             stderr.write(self._stderr_text.encode())
         return self
 
+    def poll(self):
+        return None if self._still_running else self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self._still_running = False
+
     def wait(self, timeout=None):
+        if self._still_running:
+            raise AssertionError("waited on a piper that was still synthesising; terminate it first")
         return self.returncode
 
     def communicate(self, *args, **kwargs):
@@ -332,3 +343,14 @@ class PiperStreamsIntoAplayTests(unittest.TestCase):
                                    side_effect=tts_go2.SpeechInterrupted("barge-in"))
         with self.assertRaises(tts_go2.SpeechInterrupted):
             self.speak(piper, run_playback=interrupted)
+
+    def test_a_barge_in_does_not_wait_for_piper_to_finish_the_sentence(self):
+        # Piper only notices aplay is gone on its next write, after the current
+        # sentence is synthesised. On a slow CPU that can be seconds the speech
+        # worker would otherwise spend blocked after the user has interrupted.
+        piper = FakePiperProcess(returncode=-15, still_running=True)
+        interrupted = patch.object(tts_go2, "_run_playback",
+                                   side_effect=tts_go2.SpeechInterrupted("barge-in"))
+        with self.assertRaises(tts_go2.SpeechInterrupted):
+            self.speak(piper, run_playback=interrupted)
+        self.assertTrue(piper.terminated)
