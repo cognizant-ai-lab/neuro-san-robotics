@@ -129,7 +129,7 @@ with open(trace_path, "a") as trace:
         if first is None:
             first = now
         total += len(buf)
-        trace.write(f"{now:.6f} {len(buf)}\n")
+        trace.write(f"{now:.6f} {len(buf)}\n"); trace.flush()  # survive being killed by a barge-in
         if sink:
             try:
                 sink.stdin.write(buf); sink.stdin.flush()
