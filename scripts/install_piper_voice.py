@@ -15,10 +15,12 @@ Usage:
     python scripts/install_piper_voice.py           # install if missing
     python scripts/install_piper_voice.py --check   # report status, change nothing
     python scripts/install_piper_voice.py --force   # re-download over existing files
+    python scripts/install_piper_voice.py --voice en_GB-southern_english_female-low
 
-Honours GO2_PIPER_MODEL and GO2_PIPER_CONFIG, so a robot that keeps its voices
-somewhere other than the default path installs to the same place tts_go2.py
-will look.
+Which voice, and where it goes, come from coded_tools/unigo2/piper_voice.py:
+GO2_PIPER_VOICE names it, GO2_PIPER_DIR places it, and GO2_PIPER_MODEL /
+GO2_PIPER_CONFIG pin exact paths. tts_go2.py reads the same module, so the
+installer always writes where the robot will look.
 """
 
 import argparse
@@ -28,31 +30,28 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-VOICE = "en_GB-cori-high"
+from coded_tools.unigo2 import piper_voice  # noqa: E402
 
-# Piper's voices are published on Hugging Face by the Rhasspy project.
-BASE_URL = (
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/high"
-)
-
-# Defaults mirror tts_go2.py so both agree on where the voice lives.
-#
-# ~ rather than a literal /home/unitree: on the robot the user is unitree, so
-# this resolves to exactly the same directory it always did, and it also works
-# on a laptop, where the literal path failed outright trying to mkdir /home.
-DEFAULT_MODEL = str(Path.home() / "piper_models" / f"{VOICE}.onnx")
-DEFAULT_CONFIG = str(Path.home() / "piper_models" / f"{VOICE}.onnx.json")
-
-# The .onnx is around 110 MB; anything tiny is an error page, not a model.
+# The .onnx is tens of MB at the smallest tier; anything tiny is an error page,
+# not a model.
 MIN_MODEL_BYTES = 1_000_000
 
 
 def target_paths() -> tuple[Path, Path]:
     """Return where the model and its config belong, honouring the env vars."""
-    model = Path(os.environ.get("GO2_PIPER_MODEL", DEFAULT_MODEL))
-    config = Path(os.environ.get("GO2_PIPER_CONFIG", DEFAULT_CONFIG))
-    return model, config
+    return Path(piper_voice.model_path()), Path(piper_voice.config_path())
+
+
+def downloads() -> list[tuple[str, Path]]:
+    """The (url, destination) pairs that install the configured voice."""
+    name = piper_voice.voice_name()
+    model, config = target_paths()
+    return [
+        (piper_voice.download_url(name, "onnx"), model),
+        (piper_voice.download_url(name, "onnx.json"), config),
+    ]
 
 
 def _download(url: str, destination: Path) -> None:
@@ -87,19 +86,27 @@ def report(model: Path, config: Path) -> bool:
         else:
             print(f"  MISSING: {path}")
             ready = False
+    if ready:
+        print(f"  sample rate: {piper_voice.sample_rate(str(config))} Hz")
     return ready
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    parser.add_argument("--voice", default=None,
+                        help="Piper voice name, e.g. en_GB-cori-high "
+                             "(default: GO2_PIPER_VOICE, else en_GB-cori-high)")
     parser.add_argument("--check", action="store_true",
                         help="report status and exit without downloading")
     parser.add_argument("--force", action="store_true",
                         help="re-download even if the files are already present")
     args = parser.parse_args()
 
+    if args.voice:
+        os.environ["GO2_PIPER_VOICE"] = args.voice
+
     model, config = target_paths()
-    print(f"Piper voice: {VOICE}")
+    print(f"Piper voice: {piper_voice.voice_name()}")
 
     if args.check:
         ready = report(model, config)
@@ -113,10 +120,7 @@ def main() -> int:
         print("\nAlready installed. Use --force to re-download.")
         return 0
 
-    for url, destination in (
-        (f"{BASE_URL}/{VOICE}.onnx", model),
-        (f"{BASE_URL}/{VOICE}.onnx.json", config),
-    ):
+    for url, destination in downloads():
         _download(url, destination)
 
     print("\nInstalled. The robot now falls back to Piper rather than espeak-ng.")
