@@ -519,10 +519,30 @@ opts into fetching it regardless.
 Without the voice, offline speech falls through to `espeak-ng`, which is
 intelligible but markedly worse.
 
-`GO2_PIPER_MODEL` and `GO2_PIPER_CONFIG` move where the voice lives. The
-default is `~/piper_models/`, which on the robot is `/home/unitree/piper_models`
-and on a laptop is under your own home directory, so the same setting works in
-both places.
+#### Choosing a voice
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GO2_PIPER_VOICE` | `en_GB-cori-high` | Which voice, named as Piper publishes it: `<lang>-<speaker>-<quality>` |
+| `GO2_PIPER_DIR` | `~/piper_models` | Where the `.onnx` and `.onnx.json` live |
+| `GO2_PIPER_MODEL`, `GO2_PIPER_CONFIG` | derived from the two above | Exact file paths, for a voice kept somewhere unusual |
+
+All four are read by `coded_tools/unigo2/piper_voice.py`, which `tts_go2.py`,
+the installer and `setmyenv.sh` share, so a voice swap is one env change:
+
+```shell
+export GO2_PIPER_VOICE="en_GB-southern_english_female-low"
+python scripts/install_piper_voice.py        # or: --voice en_GB-southern_english_female-low
+```
+
+Any voice on the [Piper voice samples](https://rhasspy.github.io/piper-samples/) page
+works. The quality tiers trade naturalness for speed: `low` voices are
+16 kHz and the fastest to synthesise on the robot's CPU, `medium` and `high`
+are 22.05 kHz and sound better. The playback sample rate is read from the
+voice's own config, so mixing tiers is safe.
+
+`~/piper_models/` on the robot is `/home/unitree/piper_models` and on a laptop
+is under your own home directory, so the same setting works in both places.
 
 ### `GO2_STT_ENGINE`
 

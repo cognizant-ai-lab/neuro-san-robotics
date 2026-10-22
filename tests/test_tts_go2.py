@@ -195,3 +195,59 @@ class PlaybackCancellationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PiperSampleRateTests(unittest.TestCase):
+    """
+    aplay plays raw PCM at whatever rate it is told. Piper's low-tier voices
+    are 16 kHz where the medium and high tiers are 22.05 kHz, so the rate has
+    to follow the installed voice's config rather than a constant.
+    """
+
+    def setUp(self):
+        import json
+        import os
+        import tempfile
+
+        handle = tempfile.NamedTemporaryFile("w", suffix=".onnx.json", delete=False)
+        json.dump({"audio": {"sample_rate": 16000, "quality": "low"}}, handle)
+        handle.close()
+        self.config = handle.name
+        self.addCleanup(lambda: os.unlink(self.config))
+
+    @staticmethod
+    def rate_passed_to_aplay(cmd):
+        return cmd[cmd.index("-r") + 1]
+
+    def test_cached_audio_plays_at_the_voice_sample_rate(self):
+        with (
+            patch.object(tts_go2, "PIPER_CONFIG", self.config),
+            patch.object(tts_go2, "_run_playback") as run_playback,
+        ):
+            tts_go2._play_audio_bytes(b"\x00\x00", alsa_device="plughw:1,0")
+
+        cmd = run_playback.call_args.args[0]
+        self.assertEqual(cmd[0], "aplay")
+        self.assertEqual(self.rate_passed_to_aplay(cmd), "16000")
+
+    def test_direct_piper_speech_plays_at_the_voice_sample_rate(self):
+        class FakePiper:
+            returncode = 0
+
+            def communicate(self, input=None):  # pylint: disable=redefined-builtin
+                return b"\x00\x00", b""
+
+        with (
+            patch.object(tts_go2, "PIPER_MODEL", "/voice.onnx"),
+            patch.object(tts_go2, "PIPER_CONFIG", self.config),
+            patch.object(tts_go2, "_has", return_value=True),
+            patch.object(tts_go2.os.path, "isfile", return_value=True),
+            patch.object(tts_go2, "_set_alsa_volume"),
+            patch.object(tts_go2.subprocess, "Popen", return_value=FakePiper()),
+            patch.object(tts_go2, "_run_playback") as run_playback,
+        ):
+            tts_go2._linux_say_via_piper("hello", alsa_device="plughw:1,0")
+
+        cmd = run_playback.call_args.args[0]
+        self.assertEqual(cmd[0], "aplay")
+        self.assertEqual(self.rate_passed_to_aplay(cmd), "16000")

@@ -9,7 +9,7 @@ TTS Engine Priority (configurable via GO2_TTS_ENGINE env var):
 
 Linux / Unitree Go2:
 - OpenAI TTS: True streaming via chunk transfer encoding (recommended)
-- Piper TTS: Neural, offline, British female voice - en_GB-cori-high
+- Piper TTS: Neural, offline. Voice from GO2_PIPER_VOICE (default en_GB-cori-high)
 - espeak-ng: Fallback via ALSA
 
 macOS:
@@ -63,9 +63,11 @@ from neuro_san.interfaces.coded_tool import CodedTool
 # have to work, and the CLI at the bottom of this file runs it as a script.
 try:
     from coded_tools.unigo2 import openai_provider
+    from coded_tools.unigo2 import piper_voice
     from coded_tools.unigo2 import tts_engines
 except ImportError:  # pragma: no cover - depends on which root is on sys.path
     from unigo2 import openai_provider
+    from unigo2 import piper_voice
     from unigo2 import tts_engines
 
 
@@ -89,16 +91,10 @@ OPENAI_VOLUME_GAIN = float(os.environ.get("GO2_OPENAI_VOLUME_GAIN", "3.0"))
 OPENAI_PCM_RATE = 24_000
 ONBOARD_PCM_RATE = 48_000
 
-# Piper TTS configuration
-PIPER_MODEL = os.environ.get(
-    "GO2_PIPER_MODEL",
-    os.path.expanduser("~/piper_models/en_GB-cori-high.onnx"),
-)
-
-PIPER_CONFIG = os.environ.get(
-    "GO2_PIPER_CONFIG",
-    os.path.expanduser("~/piper_models/en_GB-cori-high.onnx.json"),
-)
+# Piper TTS configuration. The voice, its paths and its sample rate are all
+# resolved by piper_voice so the installer and env scripts agree with us.
+PIPER_MODEL = piper_voice.model_path()
+PIPER_CONFIG = piper_voice.config_path()
 
 ONBOARD_ALSA_DEVICE = os.environ.get(
     "GO2_ONBOARD_TTS_DEVICE",
@@ -938,6 +934,11 @@ async def _openai_say_streaming_async(
     logging.info("GO2_TTS: OpenAI async streaming complete")
 
 
+def _piper_sample_rate() -> int:
+    """Rate of the PCM Piper emits, read from the installed voice's config."""
+    return piper_voice.sample_rate(PIPER_CONFIG)
+
+
 def _is_piper_available() -> bool:
     """Check if Piper TTS is available."""
     return (
@@ -1315,7 +1316,7 @@ def _linux_say_via_piper(
     aplay_cmd = [
         "aplay",
         "-D", device,
-        "-r", "22050",
+        "-r", str(_piper_sample_rate()),
         "-f", "S16_LE",
         "-c", "1",  # Mono output (Piper outputs mono audio)
         "-t", "raw",
@@ -1421,7 +1422,7 @@ def _convert_text_to_audio_piper(text: str) -> bytes:
         text: Text to convert (should already be sanitized)
 
     Returns:
-        Raw audio bytes (22050 Hz, 16-bit signed LE, mono)
+        Raw audio bytes (16-bit signed LE, mono, at the voice's sample rate)
 
     Raises:
         RuntimeError: If Piper is not available or conversion fails
@@ -1466,7 +1467,7 @@ def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None
     Play raw audio bytes via aplay.
 
     Args:
-        audio_data: Raw audio bytes (22050 Hz, 16-bit signed LE, mono)
+        audio_data: Raw audio bytes (16-bit signed LE, mono, at the voice's sample rate)
         alsa_device: ALSA device to use (default from env var)
     """
     device = alsa_device or _RESOLVED_ALSA_DEVICE
@@ -1474,7 +1475,7 @@ def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None
     aplay_cmd = [
         "aplay",
         "-D", device,
-        "-r", "22050",
+        "-r", str(_piper_sample_rate()),
         "-f", "S16_LE",
         "-c", "1",
         "-t", "raw",
