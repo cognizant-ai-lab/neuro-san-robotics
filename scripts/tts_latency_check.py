@@ -37,6 +37,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +49,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # ALSA devices hold a few tens of milliseconds, so anything under that is
 # absorbed and never heard.
 GAP_TOLERANCE_S = 0.05
+
+# For the progress bar only. Piper and the hosted voice both land near this;
+# the bar is a hint of how far along the speech is, the report has the truth.
+WORDS_PER_SECOND = 3.5
+BAR_WIDTH = 30
+BAR_FULL, BAR_EMPTY = "#", "."
 
 DEFAULT_TEXT = (
     "Hello, I am CAIL-E, the robot dog at the Cognizant AI Lab in San Francisco. I can walk, look "
@@ -91,6 +98,59 @@ def analyse(start: float, arrivals: List[Tuple[float, int]], rate: int) -> Repor
         covered_until += nbytes / 2 / rate
     speech_s = sum(n for _, n in arrivals) / 2 / rate
     return Report(first_audio_s=first - start, speech_s=speech_s, gaps=gaps)
+
+
+def estimate_speech_s(text: str) -> float:
+    """A rough length for the progress bar, from the word count alone."""
+    return len(text.split()) / WORDS_PER_SECOND
+
+
+def progress_line(now: float, start: float, arrivals: List[Tuple[float, int]], rate: int,
+                  estimated_s: float) -> str:
+    """
+    One line describing the run so far, from the same trace the report uses.
+
+    Before the first block: how long we have waited. After it: how much the
+    listener has heard and whether the speaker is still being fed. The pipe
+    into aplay fills at playback speed, so the trace cannot see how far ahead
+    synthesis is; it can only see when it falls behind.
+    """
+    if not arrivals:
+        return f"  waiting for first audio ... {now - start:.1f} s"
+    report = analyse(start, arrivals, rate)
+    first = arrivals[0][0]
+    stalled = sum(length for _, length in report.gaps)
+    played_s = min(max(now - first - stalled, 0.0), report.speech_s)
+    filled = min(BAR_WIDTH, int(BAR_WIDTH * played_s / max(estimated_s, 0.1)))
+    bar = BAR_FULL * filled + BAR_EMPTY * (BAR_WIDTH - filled)
+    if now - first - stalled > report.speech_s + GAP_TOLERANCE_S:
+        state = "STALLED, waiting for audio"
+    else:
+        state = "keeping up"
+    gaps = f"   gaps {len(report.gaps)}" if report.gaps else ""
+    return f"  [{bar}] played {played_s:.1f} s of ~{estimated_s:.0f} s   {state}{gaps}"
+
+
+class Progress(threading.Thread):
+    """Redraws progress_line on stderr every tenth of a second while say() runs."""
+
+    def __init__(self, trace: Path, start: float, rate: int, estimated_s: float):
+        super().__init__(daemon=True)
+        self.trace, self.started_at, self.rate, self.estimated_s = trace, start, rate, estimated_s
+        self.stop = threading.Event()
+
+    def run(self) -> None:
+        while not self.stop.wait(0.1):
+            _sink, arrivals = read_trace(self.trace)
+            line = progress_line(time.time(), self.started_at, arrivals, self.rate, self.estimated_s)
+            sys.stderr.write(f"\r\x1b[K{line}")
+            sys.stderr.flush()
+
+    def finish(self) -> None:
+        self.stop.set()
+        self.join()
+        sys.stderr.write("\r\x1b[K")
+        sys.stderr.flush()
 
 
 # The aplay stand-in. Written to a temp dir and put first on PATH, so the
@@ -228,11 +288,16 @@ def main() -> int:
               f"{len(text.split())} words")
 
         start = time.time()
+        progress = Progress(trace, start, rate, estimate_speech_s(text)) if sys.stderr.isatty() else None
+        if progress:
+            progress.start()
         try:
             tts_go2.say(text, chunked=False, alsa_device=args.device)
         except Exception as error:  # report, do not trace-dump
             print(f"  say() FAILED: {error}", file=sys.stderr)
         done = time.time()
+        if progress:
+            progress.finish()
 
         sink, arrivals = read_trace(trace)
         report = analyse(start, arrivals, rate)
