@@ -566,6 +566,11 @@ uses `ffplay` or sox `play` if one works, otherwise it paces the audio silently
 in real time, and in every case saves what reached the speaker as
 `tts_check_heard.wav` for `afplay`.
 
+While it runs, a single status line on stderr shows the wait for the first
+sound, then a bar of how much has played against a word-count estimate and
+whether the speaker is still being fed or has stalled. It only appears on a
+terminal, so output piped to a file stays clean.
+
 The report has three parts: a timeline of start, first audio, any gap and done;
 a result block with time to first audio, speech length, overhead over the
 speech length and the gap count; and the path of the saved audio. Overhead
