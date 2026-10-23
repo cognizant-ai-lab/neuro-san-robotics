@@ -358,6 +358,10 @@ Sites with no hosted TTS at all should also set `GO2_TTS_ENGINE="piper"`, so
 the robot speaks immediately instead of waiting out a doomed API call before
 every utterance.
 
+To measure how quickly the robot starts speaking and whether playback stays
+smooth, run `scripts/tts_latency_check.py`; see
+[docs/env_variables_guide.md](docs/env_variables_guide.md#checking-speech-latency).
+
 The default voice is `en_GB-cori-high`. To use another from the
 [Piper voice samples](https://rhasspy.github.io/piper-samples/) page, set
 `GO2_PIPER_VOICE` in `setmyenv.sh` and re-run the installer; see

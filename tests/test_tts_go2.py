@@ -231,19 +231,13 @@ class PiperSampleRateTests(unittest.TestCase):
         self.assertEqual(self.rate_passed_to_aplay(cmd), "16000")
 
     def test_direct_piper_speech_plays_at_the_voice_sample_rate(self):
-        class FakePiper:
-            returncode = 0
-
-            def communicate(self, input=None):  # pylint: disable=redefined-builtin
-                return b"\x00\x00", b""
-
         with (
             patch.object(tts_go2, "PIPER_MODEL", "/voice.onnx"),
             patch.object(tts_go2, "PIPER_CONFIG", self.config),
             patch.object(tts_go2, "_has", return_value=True),
             patch.object(tts_go2.os.path, "isfile", return_value=True),
             patch.object(tts_go2, "_set_alsa_volume"),
-            patch.object(tts_go2.subprocess, "Popen", return_value=FakePiper()),
+            patch.object(tts_go2.subprocess, "Popen", side_effect=FakePiperProcess()),
             patch.object(tts_go2, "_run_playback") as run_playback,
         ):
             tts_go2._linux_say_via_piper("hello", alsa_device="plughw:1,0")
@@ -251,3 +245,112 @@ class PiperSampleRateTests(unittest.TestCase):
         cmd = run_playback.call_args.args[0]
         self.assertEqual(cmd[0], "aplay")
         self.assertEqual(self.rate_passed_to_aplay(cmd), "16000")
+
+
+class FakePiperProcess:
+    """
+    A piper subprocess as the streaming path sees it: a stdin to write text to,
+    a stdout handle to hand to aplay, and an exit code once it is waited on.
+    Pass an instance as Popen's side_effect so it can see the stderr file the
+    caller provides and write its diagnostics there, as a real process would.
+    """
+
+    class _RecordingStdin(io.BytesIO):
+        """Remembers what was written, since BytesIO forgets once closed."""
+
+        def close(self):
+            self.written = self.getvalue()
+            super().close()
+
+    def __init__(self, returncode=0, stderr_text="", still_running=False):
+        self.stdin = self._RecordingStdin()
+        self.stdout = io.BytesIO()      # aplay should be given exactly this handle
+        self.returncode = returncode
+        self._stderr_text = stderr_text
+        self._still_running = still_running
+        self.terminated = False
+
+    def __call__(self, cmd, **kwargs):
+        stderr = kwargs.get("stderr")
+        if hasattr(stderr, "write"):
+            stderr.write(self._stderr_text.encode())
+        return self
+
+    def poll(self):
+        return None if self._still_running else self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self._still_running = False
+
+    def wait(self, timeout=None):
+        if self._still_running:
+            raise AssertionError("waited on a piper that was still synthesising; terminate it first")
+        return self.returncode
+
+    def communicate(self, *args, **kwargs):
+        raise AssertionError("streaming path must not buffer piper's output with communicate()")
+
+
+class PiperStreamsIntoAplayTests(unittest.TestCase):
+    """
+    Piper emits each sentence's audio as soon as it is synthesised. Handing its
+    stdout straight to aplay means the first sentence plays while the rest is
+    still being made, the same shape as the hosted streaming path. Buffering the
+    whole reply first kept the robot silent for the entire synthesis.
+    """
+
+    def speak(self, piper, run_playback=None):
+        run_playback = run_playback or patch.object(tts_go2, "_run_playback")
+        with (
+            patch.object(tts_go2, "PIPER_MODEL", "/voice.onnx"),
+            patch.object(tts_go2, "PIPER_CONFIG", "/voice.onnx.json"),
+            patch.object(tts_go2, "_piper_sample_rate", return_value=22050),
+            patch.object(tts_go2, "_has", return_value=True),
+            patch.object(tts_go2.os.path, "isfile", return_value=True),
+            patch.object(tts_go2, "_set_alsa_volume"),
+            patch.object(tts_go2.subprocess, "Popen", side_effect=piper) as popen,
+            run_playback as playback,
+        ):
+            tts_go2._linux_say_via_piper("Hello there. How are you?", alsa_device="plughw:1,0")
+        return popen, playback
+
+    def test_aplay_reads_directly_from_pipers_stdout(self):
+        piper = FakePiperProcess()
+        _popen, playback = self.speak(piper)
+
+        kwargs = playback.call_args.kwargs
+        self.assertIs(kwargs.get("stdin"), piper.stdout)
+        self.assertNotIn("input", kwargs)
+
+    def test_the_text_is_written_to_piper_and_its_stdin_closed(self):
+        piper = FakePiperProcess()
+        self.speak(piper)
+
+        self.assertEqual(piper.stdin.written, b"Hello there. How are you?\n")
+        self.assertTrue(piper.stdin.closed)
+
+    def test_a_piper_failure_surfaces_with_its_stderr(self):
+        piper = FakePiperProcess(returncode=1, stderr_text="no such model")
+        with self.assertRaises(RuntimeError) as raised:
+            self.speak(piper)
+        self.assertIn("no such model", str(raised.exception))
+
+    def test_a_barge_in_is_reported_as_an_interruption_not_a_piper_error(self):
+        # aplay was killed mid-utterance, so piper died on a broken pipe too.
+        piper = FakePiperProcess(returncode=1, stderr_text="Broken pipe")
+        interrupted = patch.object(tts_go2, "_run_playback",
+                                   side_effect=tts_go2.SpeechInterrupted("barge-in"))
+        with self.assertRaises(tts_go2.SpeechInterrupted):
+            self.speak(piper, run_playback=interrupted)
+
+    def test_a_barge_in_does_not_wait_for_piper_to_finish_the_sentence(self):
+        # Piper only notices aplay is gone on its next write, after the current
+        # sentence is synthesised. On a slow CPU that can be seconds the speech
+        # worker would otherwise spend blocked after the user has interrupted.
+        piper = FakePiperProcess(returncode=-15, still_running=True)
+        interrupted = patch.object(tts_go2, "_run_playback",
+                                   side_effect=tts_go2.SpeechInterrupted("barge-in"))
+        with self.assertRaises(tts_go2.SpeechInterrupted):
+            self.speak(piper, run_playback=interrupted)
+        self.assertTrue(piper.terminated)

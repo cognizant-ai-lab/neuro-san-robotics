@@ -1324,28 +1324,47 @@ def _linux_say_via_piper(
 
     logging.info("GO2_TTS: Piper -> aplay (%s) at %d%% volume", device, volume_percent)
 
-    # IMPORTANT: newline + communicate()
-    piper_proc = subprocess.Popen(
-        piper_cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    piper_input = (text.strip() + "\n").encode("utf-8")
-
-    stdout, stderr = piper_proc.communicate(input=piper_input)
+    # Piper synthesises sentence by sentence and, with --output-raw, flushes
+    # each sentence's audio to stdout as soon as it exists. Handing that pipe
+    # straight to aplay means the first sentence plays while the rest is still
+    # being made: the same shape as the hosted streaming path, with no text
+    # chunking on our side and Piper's own prosody left alone. Buffering the
+    # whole reply first, as this used to, kept the robot silent for the entire
+    # synthesis.
+    #
+    # stderr goes to a file rather than a pipe: nobody is reading it while we
+    # block on aplay, and a full pipe would stall Piper.
+    with tempfile.TemporaryFile() as piper_stderr:
+        piper_proc = subprocess.Popen(  # nosec B603 - fixed command, text via stdin
+            piper_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=piper_stderr,
+        )
+        try:
+            # One utterance is far smaller than the pipe buffer, so this write
+            # cannot block. Closing stdin is what tells Piper the text is done.
+            piper_proc.stdin.write((text.strip() + "\n").encode("utf-8"))
+            piper_proc.stdin.close()
+            _run_playback(aplay_cmd, stdin=piper_proc.stdout, check=True)
+        finally:
+            # Drop our end of the pipe so Piper cannot block on a write once
+            # aplay is gone. After a normal run Piper has already exited; if it
+            # is still going, aplay was killed by a barge-in and Piper is in the
+            # middle of a sentence it would only abandon on its next write. On
+            # a slow CPU that is seconds of the speech worker sitting here
+            # after the user has already interrupted, so end it now.
+            piper_proc.stdout.close()
+            if piper_proc.poll() is None:
+                piper_proc.terminate()
+            piper_proc.wait()
+            piper_stderr.seek(0)
+            stderr = piper_stderr.read()
 
     if piper_proc.returncode != 0:
         raise RuntimeError(
             f"Piper failed (rc={piper_proc.returncode}): {stderr.decode(errors='ignore')}"
         )
-
-    _run_playback(
-        aplay_cmd,
-        input=stdout,
-        check=True,
-    )
 
 
 # ---------------------------------------------------------------------

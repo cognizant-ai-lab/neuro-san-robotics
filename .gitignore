@@ -228,3 +228,12 @@ packages.microsoft.gpg
 # can point them inside the repo.
 lidar_checks/
 lidar-*.png
+
+# scripts/tts_latency_check.py output
+tts_check_heard.wav
+
+# local db
+nss_local.db
+
+# local memory
+:memory:.ses
