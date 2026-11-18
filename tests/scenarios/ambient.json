@@ -1,0 +1,9 @@
+{
+  "name": "ambient listening",
+  "turns": [
+    {"say": "Yeah I think the meeting ran long again, we should grab lunch after.", "via": "ambient",
+     "expect": {"reply": false}},
+    {"say": "Hey CAIL-E, what's your name?", "via": "ambient",
+     "expect": {"reply": true, "speech_matches": "(?i)cail"}}
+  ]
+}

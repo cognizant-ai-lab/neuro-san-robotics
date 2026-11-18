@@ -575,6 +575,29 @@ from the requested distance until real odometry is available.
 
 ---
 
+## Testing
+
+Unit tests mock the robot and OpenAI, and run on every push and PR in CI:
+
+```bash
+PYTHONPATH=. python -m unittest discover -s tests
+```
+
+Conversation scenarios (`tests/scenarios/*.json`) drive the real app, LLM agent and tools
+over the UI's Socket.IO events with no robot attached, and check replies, silence on
+unaddressed ambient speech, tool calls, and reaction time. They use real OpenAI calls, so
+CI runs them nightly, on manual dispatch, or on PRs labelled `run-voice-eval` (needs the
+`OPENAI_API_KEY` repo secret):
+
+```bash
+python scripts/talk_driver.py --start-server tests/scenarios/*.json   # launch app in simulation mode
+python scripts/talk_driver.py tests/scenarios/*.json                  # against an already running app
+```
+
+Locally, scenario turns write to the agent's memory store like any other conversation.
+
+---
+
 ## How to run neuro-san agents on the robot
 
 **Step1:** 
