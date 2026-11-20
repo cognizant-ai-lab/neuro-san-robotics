@@ -43,6 +43,7 @@ is reversible when the interruption turns out to be a false trigger.
 import argparse
 import asyncio
 import fcntl
+import importlib.util
 import io
 import logging
 import os
@@ -53,6 +54,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import wave
 from typing import Any, Callable, Dict, List, Optional
 
@@ -95,6 +97,10 @@ ONBOARD_PCM_RATE = 48_000
 # resolved by piper_voice so the installer and env scripts agree with us.
 PIPER_MODEL = piper_voice.model_path()
 PIPER_CONFIG = piper_voice.config_path()
+# The loaded PiperVoice. Loading takes ~2.7 s on the robot, so it happens once
+# per process instead of once per utterance (#5).
+_PIPER_VOICE = None
+_PIPER_VOICE_LOCK = threading.Lock()
 
 ONBOARD_ALSA_DEVICE = os.environ.get(
     "GO2_ONBOARD_TTS_DEVICE",
@@ -942,7 +948,7 @@ def _piper_sample_rate() -> int:
 def _is_piper_available() -> bool:
     """Check if Piper TTS is available."""
     return (
-        _has("piper")
+        importlib.util.find_spec("piper") is not None
         and os.path.isfile(PIPER_MODEL)
         and os.path.isfile(PIPER_CONFIG)
     )
@@ -1284,34 +1290,51 @@ def _apply_mixer_volume(volume_percent: int) -> None:
 # Linux: Piper TTS (primary)
 # ---------------------------------------------------------------------
 
+def _piper_voice() -> Any:
+    """Return the Piper voice, loading it on first use."""
+    global _PIPER_VOICE  # pylint: disable=global-statement
+    with _PIPER_VOICE_LOCK:
+        if _PIPER_VOICE is None:
+            if not os.path.isfile(PIPER_MODEL) or not os.path.isfile(PIPER_CONFIG):
+                raise RuntimeError(
+                    f"Piper model/config not found:\n"
+                    f"  MODEL={PIPER_MODEL}\n"
+                    f"  CONFIG={PIPER_CONFIG}"
+                )
+            from piper import PiperVoice  # pylint: disable=import-outside-toplevel
+
+            started = time.monotonic()
+            _PIPER_VOICE = PiperVoice.load(PIPER_MODEL, config_path=PIPER_CONFIG)
+            logging.info("GO2_TTS: Piper voice loaded in %.1fs", time.monotonic() - started)
+        return _PIPER_VOICE
+
+
+def warm_piper_in_background() -> None:
+    """Load the Piper voice off the request path, so the first reply does not pay for it."""
+    if TTS_ENGINE not in ("piper", "auto") or not _is_piper_available():
+        return
+
+    def load():
+        try:
+            _piper_voice()
+        except Exception:
+            logging.exception("Could not warm the Piper voice")
+
+    threading.Thread(target=load, name="piper-warmup", daemon=True).start()
+
+
 def _linux_say_via_piper(
     text: str,
     volume: float = 1.0,
     alsa_device: str | None = None,
 ) -> None:
-    if not _has("piper"):
-        raise RuntimeError("piper binary not found on PATH")
-
-    if not os.path.isfile(PIPER_MODEL) or not os.path.isfile(PIPER_CONFIG):
-        raise RuntimeError(
-            f"Piper model/config not found:\n"
-            f"  MODEL={PIPER_MODEL}\n"
-            f"  CONFIG={PIPER_CONFIG}"
-        )
-
+    voice = _piper_voice()
     device = alsa_device or _RESOLVED_ALSA_DEVICE
 
     # Set ALSA volume before playback to ensure consistent volume
     # This prevents volume drift that can occur on some systems
     volume_percent = int(volume * DEFAULT_VOLUME_PERCENT)
     _set_alsa_volume(volume_percent)
-
-    piper_cmd = [
-        "piper",
-        "-m", PIPER_MODEL,
-        "-c", PIPER_CONFIG,
-        "--output-raw",
-    ]
 
     aplay_cmd = [
         "aplay",
@@ -1324,47 +1347,37 @@ def _linux_say_via_piper(
 
     logging.info("GO2_TTS: Piper -> aplay (%s) at %d%% volume", device, volume_percent)
 
-    # Piper synthesises sentence by sentence and, with --output-raw, flushes
-    # each sentence's audio to stdout as soon as it exists. Handing that pipe
-    # straight to aplay means the first sentence plays while the rest is still
-    # being made: the same shape as the hosted streaming path, with no text
-    # chunking on our side and Piper's own prosody left alone. Buffering the
-    # whole reply first, as this used to, kept the robot silent for the entire
-    # synthesis.
-    #
-    # stderr goes to a file rather than a pipe: nobody is reading it while we
-    # block on aplay, and a full pipe would stall Piper.
-    with tempfile.TemporaryFile() as piper_stderr:
-        piper_proc = subprocess.Popen(  # nosec B603 - fixed command, text via stdin
-            piper_cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=piper_stderr,
-        )
+    # Piper yields one chunk per sentence. Each goes to aplay as soon as it
+    # exists, so the first sentence plays while the rest is still being made.
+    generation = _PLAYBACK.generation
+    _raise_if_cancelled(generation)
+    started = time.monotonic()
+    aplay = _popen_playback(aplay_cmd, stdin=subprocess.PIPE)
+    try:
         try:
-            # One utterance is far smaller than the pipe buffer, so this write
-            # cannot block. Closing stdin is what tells Piper the text is done.
-            piper_proc.stdin.write((text.strip() + "\n").encode("utf-8"))
-            piper_proc.stdin.close()
-            _run_playback(aplay_cmd, stdin=piper_proc.stdout, check=True)
-        finally:
-            # Drop our end of the pipe so Piper cannot block on a write once
-            # aplay is gone. After a normal run Piper has already exited; if it
-            # is still going, aplay was killed by a barge-in and Piper is in the
-            # middle of a sentence it would only abandon on its next write. On
-            # a slow CPU that is seconds of the speech worker sitting here
-            # after the user has already interrupted, so end it now.
-            piper_proc.stdout.close()
-            if piper_proc.poll() is None:
-                piper_proc.terminate()
-            piper_proc.wait()
-            piper_stderr.seek(0)
-            stderr = piper_stderr.read()
-
-    if piper_proc.returncode != 0:
-        raise RuntimeError(
-            f"Piper failed (rc={piper_proc.returncode}): {stderr.decode(errors='ignore')}"
-        )
+            for index, chunk in enumerate(voice.synthesize(text.strip())):
+                # A barge-in kills aplay; stop synthesising the rest of the reply.
+                _raise_if_cancelled(generation)
+                if index == 0:
+                    logging.info("GO2_TTS: first Piper audio after %.2fs", time.monotonic() - started)
+                aplay.stdin.write(chunk.audio_int16_bytes)
+                aplay.stdin.flush()
+            aplay.stdin.close()
+        except BrokenPipeError:
+            _raise_if_cancelled(generation)
+            raise
+        aplay.wait()
+    finally:
+        _PLAYBACK.unregister(aplay)
+        try:
+            aplay.stdin.close()
+        except OSError:  # aplay already gone after a barge-in
+            pass
+        if aplay.poll() is None:
+            _terminate_process(aplay)
+    _raise_if_cancelled(generation)
+    if aplay.returncode != 0:
+        raise subprocess.CalledProcessError(aplay.returncode, aplay_cmd)
 
 
 # ---------------------------------------------------------------------
@@ -1446,39 +1459,7 @@ def _convert_text_to_audio_piper(text: str) -> bytes:
     Raises:
         RuntimeError: If Piper is not available or conversion fails
     """
-    if not _has("piper"):
-        raise RuntimeError("piper binary not found on PATH")
-
-    if not os.path.isfile(PIPER_MODEL) or not os.path.isfile(PIPER_CONFIG):
-        raise RuntimeError(
-            f"Piper model/config not found:\n"
-            f"  MODEL={PIPER_MODEL}\n"
-            f"  CONFIG={PIPER_CONFIG}"
-        )
-
-    piper_cmd = [
-        "piper",
-        "-m", PIPER_MODEL,
-        "-c", PIPER_CONFIG,
-        "--output-raw",
-    ]
-
-    piper_proc = subprocess.Popen(
-        piper_cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    piper_input = (text.strip() + "\n").encode("utf-8")
-    stdout, stderr = piper_proc.communicate(input=piper_input)
-
-    if piper_proc.returncode != 0:
-        raise RuntimeError(
-            f"Piper failed (rc={piper_proc.returncode}): {stderr.decode(errors='ignore')}"
-        )
-
-    return stdout
+    return b"".join(chunk.audio_int16_bytes for chunk in _piper_voice().synthesize(text.strip()))
 
 
 def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None:

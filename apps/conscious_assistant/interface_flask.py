@@ -65,6 +65,7 @@ try:
     from coded_tools.unigo2.tts_go2 import duck_playback as tts_duck_playback
     from coded_tools.unigo2.tts_go2 import say as tts_say
     from coded_tools.unigo2.tts_go2 import stop_speaking as tts_stop_speaking
+    from coded_tools.unigo2.tts_go2 import warm_piper_in_background
     TTS_AVAILABLE = True
 except ImportError:
     logging.warning("TTS module not available - speech will be text-only")
@@ -72,6 +73,7 @@ except ImportError:
     tts_say = None
     tts_stop_speaking = None
     tts_duck_playback = None
+    warm_piper_in_background = None
 
     class SpeechInterrupted(RuntimeError):
         """Stand-in so the speech worker can catch barge-ins without TTS installed."""
@@ -621,6 +623,8 @@ def enqueue_speech(
 # Load the local recogniser now if it is the configured one, so the first press
 # of the mic button is not waiting on a model load.
 local_stt.warm_in_background()
+if warm_piper_in_background is not None:
+    warm_piper_in_background()
 
 # Start speech worker thread
 speech_thread = threading.Thread(target=speech_worker, daemon=True)

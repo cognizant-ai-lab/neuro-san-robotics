@@ -29,6 +29,7 @@ too: the real aplay prints its own "underrun!!!" lines if the pipe starves.
 """
 
 import argparse
+import importlib.util
 import logging
 import os
 import platform
@@ -274,7 +275,7 @@ def main() -> int:
 
         if args.engine == "piper" and not tts_go2._is_piper_available():
             print("piper is not runnable here, so there is nothing to measure.", file=sys.stderr)
-            print(f"  piper on PATH : {'yes' if shutil.which('piper') else 'NO  (uv pip install piper-tts)'}",
+            print(f"  piper module  : {'yes' if importlib.util.find_spec('piper') else 'NO  (uv pip install piper-tts)'}",
                   file=sys.stderr)
             print(f"  voice model   : {tts_go2.PIPER_MODEL} "
                   f"{'ok' if os.path.isfile(tts_go2.PIPER_MODEL) else 'MISSING (scripts/install_piper_voice.py)'}",
@@ -286,6 +287,9 @@ def main() -> int:
         print("TTS latency check")
         print(f"  engine {args.engine}   voice {voice} ({rate} Hz)   text {len(text)} chars, "
               f"{len(text.split())} words")
+
+        if args.engine == "piper":
+            tts_go2._piper_voice()  # the app loads the voice at start-up, so measure it warm
 
         start = time.time()
         progress = Progress(trace, start, rate, estimate_speech_s(text)) if sys.stderr.isatty() else None

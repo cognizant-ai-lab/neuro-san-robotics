@@ -4,6 +4,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import unittest
 import wave
 from unittest.mock import patch
@@ -231,126 +232,135 @@ class PiperSampleRateTests(unittest.TestCase):
         self.assertEqual(self.rate_passed_to_aplay(cmd), "16000")
 
     def test_direct_piper_speech_plays_at_the_voice_sample_rate(self):
+        aplay = FakeAplay()
         with (
-            patch.object(tts_go2, "PIPER_MODEL", "/voice.onnx"),
             patch.object(tts_go2, "PIPER_CONFIG", self.config),
-            patch.object(tts_go2, "_has", return_value=True),
-            patch.object(tts_go2.os.path, "isfile", return_value=True),
+            patch.object(tts_go2, "_PIPER_VOICE", FakeVoice([b"\x00\x00"])),
             patch.object(tts_go2, "_set_alsa_volume"),
-            patch.object(tts_go2.subprocess, "Popen", side_effect=FakePiperProcess()),
-            patch.object(tts_go2, "_run_playback") as run_playback,
+            patch.object(tts_go2.subprocess, "Popen", return_value=aplay) as popen,
         ):
             tts_go2._linux_say_via_piper("hello", alsa_device="plughw:1,0")
 
-        cmd = run_playback.call_args.args[0]
+        cmd = popen.call_args.args[0]
         self.assertEqual(cmd[0], "aplay")
         self.assertEqual(self.rate_passed_to_aplay(cmd), "16000")
 
 
-class FakePiperProcess:
-    """
-    A piper subprocess as the streaming path sees it: a stdin to write text to,
-    a stdout handle to hand to aplay, and an exit code once it is waited on.
-    Pass an instance as Popen's side_effect so it can see the stderr file the
-    caller provides and write its diagnostics there, as a real process would.
-    """
+class FakeAplay:
+    """aplay reading raw PCM from a pipe; records what was flushed to it and when."""
 
-    class _RecordingStdin(io.BytesIO):
-        """Remembers what was written, since BytesIO forgets once closed."""
+    class _Stdin:
+        def __init__(self):
+            self.pending, self.flushed, self.closed = b"", b"", False
+
+        def write(self, data):
+            self.pending += data
+
+        def flush(self):
+            self.flushed, self.pending = self.flushed + self.pending, b""
 
         def close(self):
-            self.written = self.getvalue()
-            super().close()
+            self.flush()
+            self.closed = True
 
-    def __init__(self, returncode=0, stderr_text="", still_running=False):
-        self.stdin = self._RecordingStdin()
-        self.stdout = io.BytesIO()      # aplay should be given exactly this handle
-        self.returncode = returncode
-        self._stderr_text = stderr_text
-        self._still_running = still_running
+    def __init__(self, returncode=0):
+        self.stdin = self._Stdin()
+        self.returncode = None
+        self._exit_code = returncode
         self.terminated = False
 
-    def __call__(self, cmd, **kwargs):
-        stderr = kwargs.get("stderr")
-        if hasattr(stderr, "write"):
-            stderr.write(self._stderr_text.encode())
-        return self
-
     def poll(self):
-        return None if self._still_running else self.returncode
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.returncode = self._exit_code
+        return self.returncode
 
     def terminate(self):
         self.terminated = True
-        self._still_running = False
+        self.returncode = -15
 
-    def wait(self, timeout=None):
-        if self._still_running:
-            raise AssertionError("waited on a piper that was still synthesising; terminate it first")
-        return self.returncode
-
-    def communicate(self, *args, **kwargs):
-        raise AssertionError("streaming path must not buffer piper's output with communicate()")
+    kill = terminate
 
 
-class PiperStreamsIntoAplayTests(unittest.TestCase):
+class FakeVoice:
+    """A loaded PiperVoice: yields one audio chunk per sentence, optionally running a hook first."""
+
+    def __init__(self, chunks, before_chunk=None):
+        self.chunks = chunks
+        self.before_chunk = before_chunk or (lambda index: None)
+        self.synthesised = 0
+
+    def synthesize(self, text):
+        for index, chunk in enumerate(self.chunks):
+            self.before_chunk(index)
+            self.synthesised += 1
+            yield types.SimpleNamespace(audio_int16_bytes=chunk)
+
+
+class PiperStaysLoadedTests(unittest.TestCase):
     """
-    Piper emits each sentence's audio as soon as it is synthesised. Handing its
-    stdout straight to aplay means the first sentence plays while the rest is
-    still being made, the same shape as the hosted streaming path. Buffering the
-    whole reply first kept the robot silent for the entire synthesis.
+    Spawning the piper CLI per utterance reloaded the voice every time: 2.7 s of
+    model load (plus process start) on the robot before the first sound, on
+    every reply (#5). The voice is loaded once and kept; each sentence goes to
+    aplay the moment it is synthesised.
     """
 
-    def speak(self, piper, run_playback=None):
-        run_playback = run_playback or patch.object(tts_go2, "_run_playback")
-        with (
-            patch.object(tts_go2, "PIPER_MODEL", "/voice.onnx"),
-            patch.object(tts_go2, "PIPER_CONFIG", "/voice.onnx.json"),
+    def setUp(self):
+        self.loads = 0
+        self.voice = FakeVoice([b"one", b"two"])
+        test = self
+
+        class PiperVoice:  # stands in for piper.PiperVoice
+            @staticmethod
+            def load(model_path, config_path=None):
+                test.loads += 1
+                return test.voice
+
+        fake_piper = types.ModuleType("piper")
+        fake_piper.PiperVoice = PiperVoice
+        for patcher in (
+            patch.dict(sys.modules, {"piper": fake_piper}),
+            patch.object(tts_go2, "_PIPER_VOICE", None),
             patch.object(tts_go2, "_piper_sample_rate", return_value=22050),
-            patch.object(tts_go2, "_has", return_value=True),
-            patch.object(tts_go2.os.path, "isfile", return_value=True),
             patch.object(tts_go2, "_set_alsa_volume"),
-            patch.object(tts_go2.subprocess, "Popen", side_effect=piper) as popen,
-            run_playback as playback,
+            patch.object(tts_go2.os.path, "isfile", return_value=True),
         ):
-            tts_go2._linux_say_via_piper("Hello there. How are you?", alsa_device="plughw:1,0")
-        return popen, playback
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.aplays = []
 
-    def test_aplay_reads_directly_from_pipers_stdout(self):
-        piper = FakePiperProcess()
-        _popen, playback = self.speak(piper)
+    def speak(self, text="Hello there. How are you?", aplay_exit=0):
+        def popen(cmd, **kwargs):
+            self.assertEqual(cmd[0], "aplay", "only aplay may be spawned; piper runs in-process")
+            self.assertIs(kwargs.get("stdin"), subprocess.PIPE)
+            self.aplays.append(FakeAplay(aplay_exit))
+            return self.aplays[-1]
 
-        kwargs = playback.call_args.kwargs
-        self.assertIs(kwargs.get("stdin"), piper.stdout)
-        self.assertNotIn("input", kwargs)
+        with patch.object(tts_go2.subprocess, "Popen", side_effect=popen):
+            tts_go2._linux_say_via_piper(text, alsa_device="plughw:1,0")
 
-    def test_the_text_is_written_to_piper_and_its_stdin_closed(self):
-        piper = FakePiperProcess()
-        self.speak(piper)
+    def test_the_voice_is_loaded_once_not_per_utterance(self):
+        self.speak()
+        self.speak()
+        self.assertEqual(self.loads, 1)
 
-        self.assertEqual(piper.stdin.written, b"Hello there. How are you?\n")
-        self.assertTrue(piper.stdin.closed)
+    def test_each_sentence_reaches_aplay_before_the_next_is_synthesised(self):
+        heard_before = {}
+        self.voice.before_chunk = lambda i: heard_before.setdefault(i, self.aplays[0].stdin.flushed)
+        self.speak()
+        self.assertEqual(heard_before[1], b"one")
+        self.assertEqual(self.aplays[0].stdin.flushed, b"onetwo")
+        self.assertTrue(self.aplays[0].stdin.closed)
 
-    def test_a_piper_failure_surfaces_with_its_stderr(self):
-        piper = FakePiperProcess(returncode=1, stderr_text="no such model")
-        with self.assertRaises(RuntimeError) as raised:
-            self.speak(piper)
-        self.assertIn("no such model", str(raised.exception))
-
-    def test_a_barge_in_is_reported_as_an_interruption_not_a_piper_error(self):
-        # aplay was killed mid-utterance, so piper died on a broken pipe too.
-        piper = FakePiperProcess(returncode=1, stderr_text="Broken pipe")
-        interrupted = patch.object(tts_go2, "_run_playback",
-                                   side_effect=tts_go2.SpeechInterrupted("barge-in"))
+    def test_a_barge_in_stops_synthesis_and_is_reported_as_an_interruption(self):
+        self.voice = FakeVoice([b"one", b"two", b"three"],
+                               before_chunk=lambda i: i == 1 and tts_go2._PLAYBACK.cancel())
         with self.assertRaises(tts_go2.SpeechInterrupted):
-            self.speak(piper, run_playback=interrupted)
+            self.speak()
+        self.assertTrue(self.aplays[0].terminated)
+        self.assertLess(self.voice.synthesised, 3, "kept synthesising after the user interrupted")
 
-    def test_a_barge_in_does_not_wait_for_piper_to_finish_the_sentence(self):
-        # Piper only notices aplay is gone on its next write, after the current
-        # sentence is synthesised. On a slow CPU that can be seconds the speech
-        # worker would otherwise spend blocked after the user has interrupted.
-        piper = FakePiperProcess(returncode=-15, still_running=True)
-        interrupted = patch.object(tts_go2, "_run_playback",
-                                   side_effect=tts_go2.SpeechInterrupted("barge-in"))
-        with self.assertRaises(tts_go2.SpeechInterrupted):
-            self.speak(piper, run_playback=interrupted)
-        self.assertTrue(piper.terminated)
+    def test_an_aplay_failure_surfaces(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.speak(aplay_exit=1)
