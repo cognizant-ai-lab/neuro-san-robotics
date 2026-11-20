@@ -104,6 +104,7 @@
         var isTranscribing = false;
         var AUTO_SEND = true;  // Auto-send transcription when recording stops
         var recordingStartTime = 0;  // Track when recording started
+        var releasedAt = 0;  // When the mic button was released
         var MIN_RECORDING_DURATION_MS = 300;  // Minimum recording duration in milliseconds
         var MIN_AUDIO_SIZE_BYTES = 1000;  // Minimum audio blob size in bytes
         var ambientPeerConnection = null;
@@ -327,7 +328,13 @@
                                         alert('Connection to ' + ROBOT_NAME + ' is not ready yet. Refresh the page and try again.');
                                         return;
                                     }
-                                    socket.emit('user_input', {data: userInput, skip_echo: true});
+                                    // An age, not a timestamp, so the browser's and
+                                    // the robot's clocks never have to agree (#13).
+                                    socket.emit('user_input', {
+                                        data: userInput,
+                                        skip_echo: true,
+                                        released_ms_ago: Math.max(0, Date.now() - releasedAt),
+                                    });
                                     document.getElementById('user-input').value = '';
                                     setInputDisabled(true);
                                 }
@@ -367,6 +374,7 @@
         // Stop recording
         function stopWhisperRecording() {
             if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                releasedAt = Date.now();  // end of speech, for turn timing
                 mediaRecorder.stop();
                 isRecording = false;
                 document.getElementById('floating-mic-button').classList.remove('recording');

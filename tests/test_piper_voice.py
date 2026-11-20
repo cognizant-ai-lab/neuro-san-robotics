@@ -26,7 +26,7 @@ def clear_piper_env(env):
 class VoiceNameTests(unittest.TestCase):
     def test_defaults_to_the_voice_the_robot_shipped_with(self):
         with clear_piper_env(piper_env()):
-            self.assertEqual(piper_voice.voice_name(), "en_GB-cori-high")
+            self.assertEqual(piper_voice.voice_name(), "en_GB-alan-medium")
 
     def test_env_var_picks_another_voice(self):
         with clear_piper_env(piper_env(GO2_PIPER_VOICE="en_GB-southern_english_female-low")):
@@ -45,7 +45,7 @@ class PathTests(unittest.TestCase):
 
     def test_directory_defaults_to_piper_models_under_home(self):
         with clear_piper_env(piper_env()):
-            expected = os.path.expanduser("~/piper_models/en_GB-cori-high.onnx")
+            expected = os.path.expanduser("~/piper_models/en_GB-alan-medium.onnx")
             self.assertEqual(piper_voice.model_path(), expected)
 
     def test_explicit_model_and_config_paths_win(self):

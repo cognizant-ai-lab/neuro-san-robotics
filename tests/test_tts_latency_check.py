@@ -131,5 +131,27 @@ class ProgressThreadTests(unittest.TestCase):
             self.assertTrue(stderr.getvalue().endswith("\r\x1b[K"), "line must be cleared at the end")
 
 
+class AplayWrapperTests(unittest.TestCase):
+    def test_device_listing_goes_to_the_real_aplay_and_leaves_stdin_alone(self):
+        # tts_go2 runs `aplay -l` to find the speaker; if the wrapper treated it as
+        # playback it would swallow the caller's stdin and log it as audio.
+        import os, subprocess
+        check = load_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            real_dir, wrap_dir = Path(tmp) / "real", Path(tmp) / "wrap"
+            real_dir.mkdir(), wrap_dir.mkdir()
+            fake = real_dir / "aplay"
+            fake.write_text('#!/bin/sh\necho "listed $@"\n')
+            fake.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": f"{real_dir}{os.pathsep}{os.environ['PATH']}"}):
+                check.install_wrapper(wrap_dir)
+                trace = Path(tmp) / "trace.txt"
+                trace.touch()
+                result = subprocess.run(["aplay", "-l"], input=b"not audio", capture_output=True,
+                                        env={**os.environ, "TTS_CHECK_TRACE": str(trace)})
+            self.assertEqual(result.stdout.decode().strip(), "listed -l")
+            self.assertEqual(trace.read_text(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

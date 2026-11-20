@@ -44,6 +44,7 @@ from coded_tools.unigo2 import openai_provider
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 from coded_tools.unigo2.agent_events import queue_agent_event
 from coded_tools.unigo2.agent_events import set_speech_epoch_source
+from coded_tools.unigo2 import turn_timing
 
 
 # TLS certificate paths used by both Flask and the native runtime callback.
@@ -146,6 +147,8 @@ _speech_epoch = 0
 _speech_active = False
 _active_speech_text = ""
 _active_speech_ended_at = 0.0
+# The voice turn whose reply is on the speaker, for its first-audio timestamp.
+_active_turn_id = None
 _duck_release_timer = None
 
 # How long after playback ends a transcript may still be the robot's own voice.
@@ -223,6 +226,7 @@ def receive_agent_output():
     source = str(payload.get("source", ""))
     observation = payload.get("observation")
     epoch = payload.get("epoch")
+    turn_id = payload.get("turn_id")
     if (
         not isinstance(thought, str)
         or not isinstance(say, str)
@@ -232,6 +236,9 @@ def receive_agent_output():
     # bool is an int subclass, but True is not an epoch.
     if epoch is not None and (not isinstance(epoch, int) or isinstance(epoch, bool)):
         return jsonify({"error": "epoch must be an integer"}), 400
+    if turn_id is not None and not isinstance(turn_id, str):
+        return jsonify({"error": "turn_id must be a string"}), 400
+    turn_timing.mark(turn_id, "ui_output")
 
     if heard.strip():
         socketio.emit("update_user_input", {"data": heard.strip()}, namespace="/chat")
@@ -250,7 +257,7 @@ def receive_agent_output():
         if superseded:
             logging.info("Discarding speech from a superseded turn: %s", say.strip()[:60])
         else:
-            enqueue_speech(say.strip(), emit_to_ui=True)
+            enqueue_speech(say.strip(), emit_to_ui=True, turn_id=turn_id)
     if isinstance(observation, dict):
         global latest_observation  # pylint: disable=global-statement
         latest_observation = observation
@@ -510,20 +517,22 @@ def cancel_speech(reason: str = "barge-in") -> None:
     )
 
 
-def _begin_utterance(text: str) -> None:
+def _begin_utterance(text: str, turn_id=None) -> None:
     """Record what is on the speaker so the self-echo filter can match it."""
-    global _speech_active, _active_speech_text  # pylint: disable=global-statement
+    global _speech_active, _active_speech_text, _active_turn_id  # pylint: disable=global-statement
     with _speech_state_lock:
         _speech_active = True
         _active_speech_text = text
+        _active_turn_id = turn_id
 
 
 def _end_utterance() -> None:
     """Close the speaking window, keeping the text for the echo tail."""
-    global _speech_active, _active_speech_ended_at  # pylint: disable=global-statement
+    global _speech_active, _active_speech_ended_at, _active_turn_id  # pylint: disable=global-statement
     with _speech_state_lock:
         _speech_active = False
         _active_speech_ended_at = time.monotonic()
+        _active_turn_id = None
 
 
 def speech_worker():
@@ -541,11 +550,13 @@ def speech_worker():
                 emit_to_ui = bool(job.get("emit_to_ui", False))
                 ui_text = str(job.get("ui_text", text))
                 job_epoch = int(job.get("epoch", 0))
+                job_turn_id = job.get("turn_id")
             else:
                 text = str(job)
                 emit_to_ui = False
                 ui_text = text
                 job_epoch = 0
+                job_turn_id = None
 
             with _speech_state_lock:
                 current_epoch = _speech_epoch
@@ -559,7 +570,7 @@ def speech_worker():
 
             if text:
                 speech_active = True
-                _begin_utterance(text)
+                _begin_utterance(text, job_turn_id)
                 emit_speech_state(True)
 
             logging.info("Speech worker: starting TTS job (%d chars)", len(text) if text else 0)
@@ -571,6 +582,7 @@ def speech_worker():
                 if not still_current:
                     logging.info("Speech worker: utterance cancelled before playback")
                     continue
+                turn_timing.mark(job_turn_id, "speak_start")
                 speak_text(text)
                 logging.info("Speech worker: TTS completed")
                 if emit_to_ui:
@@ -603,6 +615,7 @@ def enqueue_speech(
     *,
     emit_to_ui: bool = False,
     ui_text: str | None = None,
+    turn_id: str | None = None,
 ) -> None:
     """Queue speech playback, optionally syncing the UI to speech start."""
     if shutdown_event.is_set():
@@ -618,6 +631,7 @@ def enqueue_speech(
             "emit_to_ui": emit_to_ui,
             "ui_text": text if ui_text is None else ui_text,
             "epoch": epoch,
+            "turn_id": turn_id,
         }
     )
 
@@ -627,9 +641,18 @@ def enqueue_speech(
 local_stt.warm_in_background()
 if warm_piper_in_background is not None:
     warm_piper_in_background()
+
+
+def _on_audio_started(**details: object) -> None:
+    """The moment the robot is audible, for time-to-first-word measurements (#5, #13)."""
+    with _speech_state_lock:
+        turn_id = _active_turn_id
+    turn_timing.mark(turn_id, "audio", **details)
+    socketio.emit("speech_audio_started", {"turn_id": turn_id}, namespace="/chat")
+
+
 if set_audio_started_listener is not None:
-    # The moment the robot is audible, for time-to-first-word measurements (#5).
-    set_audio_started_listener(lambda: socketio.emit("speech_audio_started", {}, namespace="/chat"))
+    set_audio_started_listener(_on_audio_started)
 
 # Start speech worker thread
 speech_thread = threading.Thread(target=speech_worker, daemon=True)
@@ -816,6 +839,14 @@ def realtime_transcription_token():
     }
 
 
+def _age_seconds(json, key):
+    """Read a browser-sent age in ms as seconds; None if absent or malformed."""
+    try:
+        return max(0.0, float((json or {})[key]) / 1000.0)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 @socketio.on("user_input", namespace="/chat")
 def handle_user_input(json, *_):
     """
@@ -830,6 +861,12 @@ def handle_user_input(json, *_):
     if not user_input:
         return
     skip_echo = json.get("skip_echo", False)
+    # Push-to-talk sends how long ago the button was released; typed input
+    # has no end of speech and so no timed turn.
+    turn_id = None
+    released_ago = _age_seconds(json, "released_ms_ago")
+    if released_ago is not None:
+        turn_id = turn_timing.start("ptt", released_ago)
     # Only emit update_user_input if client hasn't already displayed it
     if not skip_echo:
         socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
@@ -842,7 +879,7 @@ def handle_user_input(json, *_):
         enqueue_speech(random.choice(ACKNOWLEDGMENT_PHRASES), emit_to_ui=True)
 
     def submit() -> None:
-        accepted = dispatch_agent_event(user_input, source="user")
+        accepted = dispatch_agent_event(user_input, source="user", turn_id=turn_id)
         if not accepted:
             logging.error("User event was not accepted by the Neuro SAN runtime")
         socketio.emit("processing_complete", {"interactive": True}, namespace="/chat")
@@ -903,10 +940,7 @@ def handle_ambient_transcript(json, *_):
     # Sent as an age rather than a timestamp so the browser's clock and the
     # robot's never have to agree. Absent on the hosted path, which answers
     # fast enough that arrival time is a good enough proxy.
-    try:
-        captured_ago = max(0.0, float((json or {}).get("captured_ms_ago", 0)) / 1000.0)
-    except (TypeError, ValueError):
-        captured_ago = 0.0
+    captured_ago = _age_seconds(json, "captured_ms_ago") or 0.0
 
     if is_self_echo(transcript, captured_ago):
         logging.info("Ignoring self-echo transcript: %s", transcript[:80])
@@ -926,7 +960,9 @@ def handle_ambient_transcript(json, *_):
         {"data": transcript},
         namespace="/chat",
     )
-    queue_agent_event(transcript, source="ambient")
+    # Hosted ambient sends no age and is out of scope for turn timing (#13).
+    turn_id = turn_timing.start("ambient", captured_ago) if "captured_ms_ago" in (json or {}) else None
+    queue_agent_event(transcript, source="ambient", turn_id=turn_id)
 
 
 cleaned_up = False
@@ -955,6 +991,7 @@ def cleanup(from_request=False):
         speech_thread.join(timeout=3.0)
 
     agent_runtime.stop()
+    turn_timing.flush()
 
     if from_request:
         try:

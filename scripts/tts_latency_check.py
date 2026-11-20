@@ -165,10 +165,15 @@ a, _rest = p.parse_known_args()
 trace_path, wav_path = os.environ["TTS_CHECK_TRACE"], os.environ.get("TTS_CHECK_WAV")
 silent = os.environ.get("TTS_CHECK_SILENT") == "1"
 
+me = os.path.dirname(os.path.abspath(__file__))
+real = shutil.which("aplay", path=os.pathsep.join(
+    d for d in os.environ["PATH"].split(os.pathsep) if os.path.abspath(d) != me))
+# Device listing (tts_go2 runs `aplay -l` to find the USB speaker) is not playback:
+# hand it to the real aplay untouched, or the wrapper would read our stdin as audio.
+if real and {"-l", "-L", "--list-devices", "--list-pcms"} & set(sys.argv[1:]):
+    os.execv(real, [real] + sys.argv[1:])
+
 def find_sink():
-    me = os.path.dirname(os.path.abspath(__file__))
-    path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep) if os.path.abspath(d) != me)
-    real = shutil.which("aplay", path=path)
     if real:
         return [real] + sys.argv[1:]
     if shutil.which("ffplay") and subprocess.run(["ffplay", "-version"], capture_output=True).returncode == 0:

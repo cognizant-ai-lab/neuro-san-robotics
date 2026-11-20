@@ -38,6 +38,8 @@ class UiOutputTool(CodedTool):
             # The epoch the dispatching turn was sent with; lets the UI drop
             # this speech if the user has since barged in.
             epoch=(sly_data or {}).get("speech_epoch"),
+            # Ties this output to the voice turn's timing line (#13).
+            turn_id=(sly_data or {}).get("turn_id"),
         )
         if delivered:
             return "Output delivered. End this event turn now; do not call ui_output again."

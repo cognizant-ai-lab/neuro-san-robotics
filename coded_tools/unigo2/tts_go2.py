@@ -9,7 +9,7 @@ TTS Engine Priority (configurable via GO2_TTS_ENGINE env var):
 
 Linux / Unitree Go2:
 - OpenAI TTS: True streaming via chunk transfer encoding (recommended)
-- Piper TTS: Neural, offline. Voice from GO2_PIPER_VOICE (default en_GB-cori-high)
+- Piper TTS: Neural, offline. Voice from GO2_PIPER_VOICE (default en_GB-alan-medium)
 - espeak-ng: Fallback via ALSA
 
 macOS:
@@ -312,22 +312,24 @@ def _raise_if_cancelled(generation: int) -> None:
 
 
 # Called on the speaking thread when an utterance's audio reaches the player,
-# so the app can report time to first spoken word (#5).
-_audio_started_listener: Optional[Callable[[], None]] = None
+# so the app can report time to first spoken word (#5). Piper also passes
+# first_sentence_phonemes, the length of the sentence it had to synthesise
+# first (#16); its chunks carry phonemes, not the sentence text.
+_audio_started_listener: Optional[Callable[..., None]] = None
 
 
-def set_audio_started_listener(listener: Optional[Callable[[], None]]) -> None:
+def set_audio_started_listener(listener: Optional[Callable[..., None]]) -> None:
     """Register what to call when audio starts playing; None removes it."""
     global _audio_started_listener  # pylint: disable=global-statement
     _audio_started_listener = listener
 
 
-def _notify_audio_started() -> None:
+def _notify_audio_started(**details: Any) -> None:
     listener = _audio_started_listener
     if listener is None:
         return
     try:
-        listener()
+        listener(**details)
     except Exception:  # reporting must never cost the user the speech
         logging.exception("GO2_TTS: audio-started listener failed")
 
@@ -1371,38 +1373,67 @@ def _linux_say_via_piper(
 
     logging.info("GO2_TTS: Piper -> aplay (%s) at %d%% volume", device, volume_percent)
 
-    # Piper yields one chunk per sentence. Each goes to aplay as soon as it
-    # exists, so the first sentence plays while the rest is still being made.
+    # Piper yields one chunk per sentence. A writer thread feeds aplay so the
+    # next sentence is synthesised while this one plays: writing to aplay's pipe
+    # blocks until little audio is left, and synthesising only then left the robot
+    # silent whenever a sentence took longer than ~2 s to make (#17).
+    bytes_per_s = 2 * _piper_sample_rate()  # 16-bit mono
     generation = _PLAYBACK.generation
     _raise_if_cancelled(generation)
     started = time.monotonic()
     aplay = _popen_playback(aplay_cmd, stdin=subprocess.PIPE)
-    try:
+    pending: "queue.Queue[Optional[bytes]]" = queue.Queue()
+
+    def feed_aplay() -> None:
         try:
-            for index, chunk in enumerate(voice.synthesize(text.strip())):
-                # A barge-in kills aplay; stop synthesising the rest of the reply.
-                # shortcut: the sentence being synthesised cannot be aborted, so the
-                # speech worker stays busy up to ~3 s after a barge-in (audio stops at
-                # once). Upgrade by synthesising in a separate thread if that delays replies.
-                _raise_if_cancelled(generation)
-                if index == 0:
-                    logging.info("GO2_TTS: first Piper audio after %.2fs", time.monotonic() - started)
-                    _notify_audio_started()
-                aplay.stdin.write(chunk.audio_int16_bytes)
+            while (audio := pending.get()) is not None:
+                aplay.stdin.write(audio)
                 aplay.stdin.flush()
-            aplay.stdin.close()
-        except BrokenPipeError:
+        except OSError:  # aplay is gone (barge-in or failure); its exit code tells which
+            pass
+
+    writer = threading.Thread(target=feed_aplay, name="piper-aplay-writer", daemon=True)
+    writer.start()
+    sentences = synth_total = audio_total = worst_rtf = 0.0
+    try:
+        chunk_requested_at = time.monotonic()
+        for index, chunk in enumerate(voice.synthesize(text.strip())):
+            synth_s = time.monotonic() - chunk_requested_at
+            # A barge-in kills aplay; stop synthesising the rest of the reply.
+            # shortcut: the sentence being synthesised cannot be aborted, so the
+            # speech worker stays busy up to ~3 s after a barge-in (audio stops at
+            # once). Upgrade by synthesising in a separate thread if that delays replies.
             _raise_if_cancelled(generation)
-            raise
+            audio_s = len(chunk.audio_int16_bytes) / bytes_per_s
+            rtf = synth_s / audio_s if audio_s else float("inf")
+            logging.info("GO2_TTS: Piper sentence %d: synth %.2fs, audio %.2fs, rtf %.2f",
+                         index, synth_s, audio_s, rtf)
+            sentences = index + 1
+            synth_total += synth_s
+            audio_total += audio_s
+            worst_rtf = max(worst_rtf, rtf)
+            if index == 0:
+                logging.info("GO2_TTS: first Piper audio after %.2fs", time.monotonic() - started)
+                _notify_audio_started(first_sentence_phonemes=len(chunk.phonemes))
+            pending.put(chunk.audio_int16_bytes)
+            chunk_requested_at = time.monotonic()
+        _raise_if_cancelled(generation)
+        logging.info("GO2_TTS: Piper answer: %d sentences, synth %.2fs, audio %.2fs, worst rtf %.2f",
+                     sentences, synth_total, audio_total, worst_rtf)
+        pending.put(None)
+        writer.join()
+        aplay.stdin.close()
         aplay.wait()
     finally:
         _PLAYBACK.unregister(aplay)
+        if aplay.poll() is None:  # interrupted: kill aplay first so a blocked write returns
+            _terminate_process(aplay)
+        pending.put(None)
+        writer.join()
         try:
             aplay.stdin.close()
         except OSError:  # aplay already gone after a barge-in
             pass
-        if aplay.poll() is None:
-            _terminate_process(aplay)
     _raise_if_cancelled(generation)
     if aplay.returncode != 0:
         raise subprocess.CalledProcessError(aplay.returncode, aplay_cmd)

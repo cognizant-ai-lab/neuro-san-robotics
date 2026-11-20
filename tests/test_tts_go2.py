@@ -252,8 +252,11 @@ class FakeAplay:
     class _Stdin:
         def __init__(self):
             self.pending, self.flushed, self.closed = b"", b"", False
+            self.on_write = None  # a test hook, e.g. to block like a full pipe
 
         def write(self, data):
+            if self.on_write:
+                self.on_write(data)
             self.pending += data
 
         def flush(self):
@@ -299,7 +302,7 @@ class FakeVoice:
         for index, chunk in enumerate(self.chunks):
             self.before_chunk(index)
             self.synthesised += 1
-            yield types.SimpleNamespace(audio_int16_bytes=chunk)
+            yield types.SimpleNamespace(audio_int16_bytes=chunk, phonemes=list(chunk.decode()))
 
 
 class PiperStaysLoadedTests(unittest.TestCase):
@@ -334,11 +337,12 @@ class PiperStaysLoadedTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.aplays = []
 
-    def speak(self, text="Hello there. How are you?", aplay_exit=0):
+    def speak(self, text="Hello there. How are you?", aplay_exit=0, on_write=None):
         def popen(cmd, **kwargs):
             self.assertEqual(cmd[0], "aplay", "only aplay may be spawned; piper runs in-process")
             self.assertIs(kwargs.get("stdin"), subprocess.PIPE)
             self.aplays.append(FakeAplay(aplay_exit))
+            self.aplays[-1].stdin.on_write = on_write
             return self.aplays[-1]
 
         with patch.object(tts_go2.subprocess, "Popen", side_effect=popen):
@@ -349,13 +353,22 @@ class PiperStaysLoadedTests(unittest.TestCase):
         self.speak()
         self.assertEqual(self.loads, 1)
 
-    def test_each_sentence_reaches_aplay_before_the_next_is_synthesised(self):
-        heard_before = {}
-        self.voice.before_chunk = lambda i: heard_before.setdefault(i, self.aplays[0].stdin.flushed)
-        self.speak()
-        self.assertEqual(heard_before[1], b"one")
+    def test_the_next_sentence_is_synthesised_while_aplay_takes_the_previous_one(self):
+        # aplay's pipe blocks a write until the sentence has nearly played; waiting
+        # for it before synthesising the next one left gaps mid-answer (#17).
+        all_made = threading.Event()
+        self.voice.before_chunk = lambda i: i == 1 and all_made.set()
+        overlapped = []
+        self.speak(on_write=lambda data: overlapped.append(all_made.wait(timeout=2)))
+        self.assertEqual(overlapped[0], True, "synthesis waited for aplay")
         self.assertEqual(self.aplays[0].stdin.flushed, b"onetwo")
         self.assertTrue(self.aplays[0].stdin.closed)
+
+    def test_aplay_dying_mid_answer_surfaces_as_a_failure(self):
+        def broken_pipe(data):
+            raise BrokenPipeError()
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.speak(aplay_exit=1, on_write=broken_pipe)
 
     def test_a_barge_in_stops_synthesis_and_is_reported_as_an_interruption(self):
         self.voice = FakeVoice([b"one", b"two", b"three"],
@@ -371,10 +384,61 @@ class PiperStaysLoadedTests(unittest.TestCase):
 
     def test_listeners_hear_when_the_first_audio_reaches_aplay(self):
         heard = []
-        tts_go2.set_audio_started_listener(lambda: heard.append(self.aplays[0].stdin.flushed))
+        tts_go2.set_audio_started_listener(lambda **_: heard.append(self.aplays[0].stdin.flushed))
         self.addCleanup(tts_go2.set_audio_started_listener, None)
         self.speak()
         self.assertEqual(heard, [b""], "fire once, right before the first sentence is written")
+
+    def test_listeners_hear_how_long_the_first_sentence_was(self):
+        heard = []
+        tts_go2.set_audio_started_listener(lambda **details: heard.append(details))
+        self.addCleanup(tts_go2.set_audio_started_listener, None)
+        self.speak()
+        self.assertEqual(heard, [{"first_sentence_phonemes": 3}], "b'one' -> 3 phonemes")
+
+
+class PiperSynthesisTimingTests(unittest.TestCase):
+    """
+    A sentence that takes longer to synthesise than the previous one takes to
+    play leaves the robot silent mid-answer (#17). Each sentence's synthesis
+    speed is logged (#19).
+    """
+
+    RATE = 1000  # samples/s, so one second of 16-bit mono audio is 2000 bytes
+
+    def setUp(self):
+        self.now = 0.0
+        for patcher in (
+            patch.object(tts_go2, "_piper_sample_rate", return_value=self.RATE),
+            patch.object(tts_go2, "_set_alsa_volume"),
+            patch.object(tts_go2.time, "monotonic", side_effect=lambda: self.now),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.aplay = FakeAplay()
+
+    def speak(self, chunks, synth_s=()):
+        """Speak `chunks`; chunk i takes synth_s[i] seconds of (fake) synthesis."""
+        def tick(index):
+            if index < len(synth_s):
+                self.now += synth_s[index]
+        with (
+            patch.object(tts_go2, "_PIPER_VOICE", FakeVoice(chunks, before_chunk=tick)),
+            patch.object(tts_go2.subprocess, "Popen", return_value=self.aplay),
+            self.assertLogs(level="INFO") as logs,
+        ):
+            tts_go2._linux_say_via_piper("text", alsa_device="plughw:1,0")
+        return [line for line in logs.output if "GO2_TTS: Piper " in line]
+
+    def test_each_sentence_logs_its_audio_duration_and_real_time_factor(self):
+        lines = self.speak([b"\0" * 2000, b"\0" * 1000], synth_s=[0.5, 1.0])
+        sentences = [line for line in lines if "Piper sentence" in line]
+        self.assertEqual(len(sentences), 2)
+        self.assertIn("sentence 0: synth 0.50s, audio 1.00s, rtf 0.50", sentences[0])
+        self.assertIn("sentence 1: synth 1.00s, audio 0.50s, rtf 2.00", sentences[1])
+        answer = [line for line in lines if "Piper answer" in line]
+        self.assertEqual(len(answer), 1)
+        self.assertIn("2 sentences, synth 1.50s, audio 1.50s, worst rtf 2.00", answer[0])
 
 
 class AudioStartedListenerTests(unittest.TestCase):

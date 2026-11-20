@@ -523,7 +523,7 @@ intelligible but markedly worse.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GO2_PIPER_VOICE` | `en_GB-cori-high` | Which voice, named as Piper publishes it: `<lang>-<speaker>-<quality>` |
+| `GO2_PIPER_VOICE` | `en_GB-alan-medium` | Which voice, named as Piper publishes it: `<lang>-<speaker>-<quality>` |
 | `GO2_PIPER_DIR` | `~/piper_models` | Where the `.onnx` and `.onnx.json` live |
 | `GO2_PIPER_MODEL`, `GO2_PIPER_CONFIG` | derived from the two above | Exact file paths, for a voice kept somewhere unusual |
 
@@ -541,8 +541,30 @@ works. The quality tiers trade naturalness for speed: `low` voices are
 are 22.05 kHz and sound better. The playback sample rate is read from the
 voice's own config, so mixing tiers is safe.
 
+The default `en_GB-alan-medium` was picked by ear for a lower, more neutral
+voice than the earlier `en_GB-cori-high` (#20). Being `medium`, it also
+synthesises at rtf ~0.1–0.2 on the robot against ~0.7–0.8 for cori-high.
+What remains is a gap of about 0.2–0.3 s when a one-word sentence ("Sure.")
+comes before a long one: the long one takes longer to make than the one word
+takes to play. That was judged acceptable; if not, the fix is splitting long
+sentences at commas before synthesis.
+
 `~/piper_models/` on the robot is `/home/unitree/piper_models` and on a laptop
 is under your own home directory, so the same setting works in both places.
+
+#### Piper synthesis speed
+
+Piper synthesises the next sentence while the current one plays. A
+mid-answer gap only happens if a sentence takes longer to make than the one
+before it takes to play.
+
+Every answer logs one line per sentence and one summary, which show whether
+synthesis keeps up (`rtf` above 1 means slower than real time):
+
+```text
+GO2_TTS: Piper sentence 1: synth 2.10s, audio 1.40s, rtf 1.50
+GO2_TTS: Piper answer: 3 sentences, synth 4.80s, audio 5.20s, worst rtf 1.50
+```
 
 #### Checking speech latency
 

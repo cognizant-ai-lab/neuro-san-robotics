@@ -205,7 +205,7 @@ class AmbientEventCoalescingTests(unittest.TestCase):
         # One worker task, and it will pick up the newest text.
         self.assertEqual(len(self.submitted), 1)
         self.assertEqual(
-            agent_events._PENDING_BY_SOURCE["ambient"], "second thing said"
+            agent_events._PENDING_BY_SOURCE["ambient"], ("second thing said", None)
         )
 
     def test_the_worker_dispatches_only_the_newest_text(self):
@@ -215,7 +215,7 @@ class AmbientEventCoalescingTests(unittest.TestCase):
         with patch.object(agent_events, "dispatch_agent_event") as dispatch:
             agent_events._dispatch_latest("ambient")
 
-        dispatch.assert_called_once_with("second thing said", source="ambient")
+        dispatch.assert_called_once_with("second thing said", source="ambient", turn_id=None)
 
     def test_a_claimed_slot_lets_the_next_transcript_queue_again(self):
         agent_events.queue_agent_event("first thing said", source="ambient")
