@@ -32,7 +32,9 @@ class RealtimeTranscriptionTests(unittest.TestCase):
         context = MagicMock()
         context.__enter__.return_value = response
 
-        with patch.object(realtime_transcription, "urlopen", return_value=context) as open_url:
+        with patch.dict(os.environ, {"GO2_AUDIO_PROVIDER": "openai"}), patch.object(
+            realtime_transcription, "urlopen", return_value=context
+        ) as open_url:
             result = realtime_transcription.request_realtime_session(
                 "secret-key",
                 "test-model",
