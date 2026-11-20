@@ -23,8 +23,6 @@ Environment:
   GO2_STT_DEVICE    "auto" (default), "cpu" or "cuda"
   GO2_STT_LANGUAGE  language hint, default "en"
   GO2_STT_BEAM_SIZE beam width, default 1 (greedy)
-  GO2_STT_THREADS   CPU threads for the decoder, default 0 (CTranslate2's
-                    own choice, which is 4)
 """
 
 import logging
@@ -55,26 +53,16 @@ def model_size() -> str:
     return os.environ.get("GO2_STT_MODEL", "").strip() or "base"
 
 
-def _positive_int(name: str, default: int) -> int:
-    """A positive integer from the environment, or the default if unset or nonsense."""
-    try:
-        value = int(os.environ.get(name, "").strip())
-    except ValueError:
-        return default
-    return value if value > 0 else default
-
-
 def beam_size() -> int:
     """
     Beam width. Greedy by default: utterances are short single commands, so
     beam search costs time without changing what comes back.
     """
-    return _positive_int("GO2_STT_BEAM_SIZE", 1)
-
-
-def cpu_threads() -> int:
-    """Decoder threads; 0 leaves it to CTranslate2, which already picks 4."""
-    return _positive_int("GO2_STT_THREADS", 0)
+    try:
+        value = int(os.environ.get("GO2_STT_BEAM_SIZE", "").strip())
+    except ValueError:
+        return 1
+    return value if value > 0 else 1
 
 
 def device() -> str:
@@ -150,7 +138,6 @@ def model():
                     # int8 on the CPU is the difference between usable and not;
                     # float16 is what the GPU path wants.
                     compute_type="int8" if where == "cpu" else "float16",
-                    cpu_threads=cpu_threads(),
                 )
                 logging.info("Local Whisper ready")
     return _model
@@ -177,8 +164,8 @@ def transcribe(audio_path: str, language: Optional[str] = None) -> str:
             audio_path,
             language=language or os.environ.get("GO2_STT_LANGUAGE", "").strip() or "en",
             beam_size=beam_size(),
-            # One short command per clip: no timestamps to align and no earlier
-            # text to carry over, and skipping both saves decoder work.
+            # One short command per clip: no timestamps to align, and no
+            # earlier 30 s window inside the clip whose text could help.
             without_timestamps=True,
             condition_on_previous_text=False,
         )

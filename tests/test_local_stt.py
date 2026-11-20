@@ -4,15 +4,14 @@ import io
 import os
 import threading
 import unittest
-import unittest.mock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from apps.conscious_assistant import interface_flask
 from coded_tools.unigo2 import local_stt
 
 
 STT_VARS = ("GO2_STT_ENGINE", "GO2_STT_MODEL", "GO2_STT_DEVICE", "GO2_STT_LANGUAGE",
-            "GO2_STT_BEAM_SIZE", "GO2_STT_THREADS")
+            "GO2_STT_BEAM_SIZE")
 
 
 def stt_env(**overrides):
@@ -61,21 +60,17 @@ class ConfigurationTests(unittest.TestCase):
         with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="5")):
             self.assertEqual(local_stt.beam_size(), 5)
 
-    def test_threads_default_to_the_library_choice(self):
-        with patch.dict(os.environ, stt_env()):
-            self.assertEqual(local_stt.cpu_threads(), 0)
-        with patch.dict(os.environ, stt_env(GO2_STT_THREADS="2")):
-            self.assertEqual(local_stt.cpu_threads(), 2)
-
     def test_a_nonsense_number_falls_back_to_the_default(self):
-        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="wat", GO2_STT_THREADS="-1")):
+        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="wat")):
             self.assertEqual(local_stt.beam_size(), 1)
-            self.assertEqual(local_stt.cpu_threads(), 0)
+        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="0")):
+            self.assertEqual(local_stt.beam_size(), 1)
 
     def test_transcribe_uses_the_cheap_decoding_settings(self):
-        whisper = unittest.mock.MagicMock()
+        whisper = MagicMock()
         whisper.transcribe.return_value = (iter([]), None)
-        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="3")), \
+        # A blank language must still mean English, not "" passed to Whisper.
+        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="3", GO2_STT_LANGUAGE="")), \
                 patch.object(local_stt, "model", return_value=whisper):
             local_stt.transcribe("clip.webm")
         whisper.transcribe.assert_called_once_with(

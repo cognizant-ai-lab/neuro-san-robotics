@@ -1,10 +1,10 @@
 """Tests for per-turn voice latency timing (#13): id propagation and the report maths."""
 
 import asyncio
-import re
-from pathlib import Path
 import queue
+import re
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from apps.conscious_assistant import interface_flask
