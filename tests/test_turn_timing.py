@@ -189,7 +189,6 @@ class FlaskTurnFlowTests(TurnTimingTestCase):
         events = [e for e in self.client.get_received("/chat") if e["name"] == "speech_audio_started"]
         self.assertEqual(events[0]["args"][0], {"turn_id": turn_id})
 
-
     def run_worker(self, job):
         self.speech_queue.put(job)
         self.speech_queue.put(None)

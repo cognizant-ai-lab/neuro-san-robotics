@@ -18,8 +18,10 @@ class FakeVoice:
 class BenchTests(unittest.TestCase):
     def test_one_line_per_reply_with_its_length_and_first_chunk_time(self):
         out = io.StringIO()
-        with patch.object(bench.tts_go2, "_piper_voice", return_value=FakeVoice()), \
-                contextlib.redirect_stdout(out):
+        with (
+            patch.object(bench.tts_go2, "_piper_voice", return_value=FakeVoice()),
+            contextlib.redirect_stdout(out),
+        ):
             bench.main(["Hi. There.", "Hello"])
 
         lines = out.getvalue().splitlines()

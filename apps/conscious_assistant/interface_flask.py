@@ -643,7 +643,7 @@ if warm_piper_in_background is not None:
     warm_piper_in_background()
 
 
-def _on_audio_started(**details) -> None:
+def _on_audio_started(**details: object) -> None:
     """The moment the robot is audible, for time-to-first-word measurements (#5, #13)."""
     with _speech_state_lock:
         turn_id = _active_turn_id

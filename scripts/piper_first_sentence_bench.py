@@ -2,12 +2,15 @@
 """Time how long Piper takes to synthesise a reply's first sentence (#16).
 
 Loads the configured Piper voice once (as the Flask app does) and, for each
-test reply, prints the first sentence's length and the time until Piper
-yields its first chunk -- the synthesis part of the turn_timing step
+test reply, prints its length and the time until Piper yields its first
+chunk -- the synthesis part of the turn_timing step
 ``speak_start -> audio``. Nothing is played; runs without the Flask app.
 
     GO2_TTS_ENGINE=piper python scripts/piper_first_sentence_bench.py
-    GO2_TTS_ENGINE=piper python scripts/piper_first_sentence_bench.py "Your own reply. Second."
+    GO2_TTS_ENGINE=piper python scripts/piper_first_sentence_bench.py "One sentence." "Another one."
+
+Pass one sentence per argument: chars counts the whole argument, phonemes only
+the first sentence Piper synthesised.
 
 The turn_timing line reports ``first_sentence_phonemes``; the phoneme column
 here maps it back to characters.

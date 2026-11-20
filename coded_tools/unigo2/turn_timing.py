@@ -44,7 +44,7 @@ def start(mode: str, ended_ago_s: float) -> str:
     return turn_id
 
 
-def mark(turn_id: str | None, step: str, **details) -> None:
+def mark(turn_id: str | None, step: str, **details: object) -> None:
     """Record the first time ``turn_id`` reached ``step``; audio closes the turn.
 
     ``details`` (e.g. ``first_sentence_phonemes``) are logged as extra fields.
