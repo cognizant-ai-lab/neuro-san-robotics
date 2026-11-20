@@ -28,6 +28,12 @@
         # Azure only. Ignored by the "openai" class, so it is safe to leave set.
         deployment_name = ${?AZURE_OPENAI_DEPLOYMENT_NAME}
         openai_api_version = ${?OPENAI_API_VERSION}
+
+        # GPT-6 on Azure only. Needs AGENT_LLM_CLASS="langchain_openai.AzureChatOpenAI":
+        # neuro-san's own "azure-openai" class silently drops both keys.
+        # See docs/env_variables_guide.md#gpt-6-on-azure
+        reasoning_effort = ${?AGENT_LLM_REASONING_EFFORT}
+        use_responses_api = ${?AGENT_LLM_USE_RESPONSES_API}
     }
     # A normal turn needs at most a few LLM/tool stages. Bound event work so a
     # stalled model call cannot retain the native event session indefinitely.

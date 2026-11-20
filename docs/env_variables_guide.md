@@ -353,15 +353,34 @@ az cognitiveservices account keys list --name <resource> --resource-group <rg> \
   --query key1 -o tsv
 ```
 
-#### Do not use GPT-5.6 or GPT-6 for the assistant
+#### GPT-6 on Azure
 
-GPT-5.6 (sol / terra / luna) and GPT-6 Astra serve tool calling only over the
-Responses API, which the bundled neuro-san does not speak. Every agent here
-calls tools on every turn, so those deployments fail outright.
+neuro-san's `azure-openai` class drops `reasoning_effort` and cannot use the
+Responses API. GPT-6 rejects tool calls over Chat Completions unless the effort
+is `none`, so every turn fails with `400`. Point the class at LangChain's
+`AzureChatOpenAI` instead: neuro-san then hands every `llm_config` key through.
 
-This is not a version to chase. neuro-san added Responses support in 0.7, which
-needs Python 3.12, and this robot is held at 3.11 by CycloneDDS. `gpt-5.1`
-through `gpt-5.5` are all fine.
+```shell
+export AGENT_LLM_CLASS="langchain_openai.AzureChatOpenAI"
+export AZURE_OPENAI_DEPLOYMENT_NAME="gpt-6-luna"
+export AGENT_LLM_MODEL_NAME="gpt-6-luna"
+export AGENT_LLM_REASONING_EFFORT="none"
+```
+
+`gpt-6.2-sol` has no `none` effort, so it only calls tools over the Responses
+API:
+
+```shell
+export AZURE_OPENAI_DEPLOYMENT_NAME="gpt-6.2-sol"
+export AGENT_LLM_MODEL_NAME="gpt-6.2-sol"
+export AGENT_LLM_USE_RESPONSES_API="true"
+unset AGENT_LLM_REASONING_EFFORT   # or low / medium / high
+```
+
+Both variables apply to the conscious assistant only. The class switch moves
+the `unigo2` network over too; its `gpt-5`/`gpt-4o` deployment works there
+unchanged. `gpt-5.1` also runs on this class, so switching back is just the
+deployment name.
 
 ---
 
