@@ -46,7 +46,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertNotIn("conscious_thinking_process", source)
         self.assertNotIn("conscious_thinker", source)
         self.assertNotIn("StreamingInputProcessor", source)
-        self.assertIn("dispatch_agent_event(user_input, source=\"user\")", source)
+        self.assertIn("dispatch_agent_event(user_input, source=\"user\", turn_id=turn_id)", source)
 
     def test_agent_output_is_an_explicit_tool_boundary(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
@@ -92,7 +92,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn("Decide if you would like to respond, or just listen", source)
         self.assertIn("Silence is always allowed and often preferred", source)
         self.assertIn("only the relevant addressed speech", source)
-        self.assertIn('queue_agent_event(transcript, source="ambient")', interface_source)
+        self.assertIn('queue_agent_event(transcript, source="ambient", turn_id=turn_id)', interface_source)
         self.assertNotIn("ambient_llm_filter", interface_source)
 
     def test_ambient_audio_uses_a_persistent_realtime_stream(self):
@@ -241,6 +241,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
             agent_events.dispatch_agent_event,
             "waypoint reached",
             source="navigation",
+            turn_id=None,
         )
 
     def test_event_bridge_consumes_the_full_native_acknowledgement(self):

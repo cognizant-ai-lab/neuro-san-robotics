@@ -32,6 +32,7 @@ class UiOutputToolTests(unittest.IsolatedAsyncioTestCase):
             say="",
             heard="",
             epoch=None,
+            turn_id=None,
         )
         self.assertIn("End this event turn now", result)
         self.assertIn("do not call ui_output again", result)

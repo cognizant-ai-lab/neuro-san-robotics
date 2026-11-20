@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 from urllib.request import Request
 from urllib.request import urlopen
 
+from coded_tools.unigo2 import turn_timing
+
 
 logger = logging.getLogger(__name__)
 _EVENT_DISPATCHER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-events")
@@ -29,7 +31,8 @@ _DEFAULT_AWARENESS_MAX_AGE_SECONDS = 6 * 60 * 60
 # to things the speaker has long since moved past.
 _COALESCED_SOURCES = frozenset({"ambient"})
 _PENDING_LOCK = threading.Lock()
-_PENDING_BY_SOURCE: dict[str, str] = {}
+# source -> (text, turn_id) of the event still waiting to be dispatched.
+_PENDING_BY_SOURCE: dict[str, tuple[str, str | None]] = {}
 
 # Reads the presentation layer's current speech epoch. The Flask app owns the
 # epoch and registers this, so this module stays free of Flask imports.
@@ -150,7 +153,7 @@ def _post_json(url: str, payload: dict[str, Any], *, token: str = "", timeout: f
         response.read()
 
 
-def dispatch_agent_event(text: str, *, source: str) -> bool:
+def dispatch_agent_event(text: str, *, source: str, turn_id: str | None = None) -> bool:
     """Wake the event-configured agent without waiting for its background work."""
     text = str(text).strip()
     if not text:
@@ -176,11 +179,17 @@ def dispatch_agent_event(text: str, *, source: str) -> bool:
         "user_message": {"type": "HUMAN", "text": event_text},
         "chat_filter": {"chat_filter_type": "MINIMAL"},
     }
+    # sly_data reaches the turn's coded tools, so ui_output can echo it back.
+    sly_data: dict[str, Any] = {}
     if _speech_epoch_source is not None:
         # Read now, not at queue time: a barge-in while this event waited in
         # the queue supersedes everything before it, including this turn.
-        # sly_data reaches the turn's coded tools, so ui_output can echo it back.
-        payload["sly_data"] = {"speech_epoch": _speech_epoch_source()}
+        sly_data["speech_epoch"] = _speech_epoch_source()
+    if turn_id:
+        sly_data["turn_id"] = turn_id
+    if sly_data:
+        payload["sly_data"] = sly_data
+    turn_timing.mark(turn_id, "dispatched")
     try:
         _post_json(endpoint, payload, timeout=5.0)
         return True
@@ -192,13 +201,13 @@ def dispatch_agent_event(text: str, *, source: str) -> bool:
 def _dispatch_latest(source: str) -> bool:
     """Dispatch the newest text queued for a coalescing source."""
     with _PENDING_LOCK:
-        text = _PENDING_BY_SOURCE.pop(source, "")
+        text, turn_id = _PENDING_BY_SOURCE.pop(source, ("", None))
     if not text:
         return False
-    return dispatch_agent_event(text, source=source)
+    return dispatch_agent_event(text, source=source, turn_id=turn_id)
 
 
-def queue_agent_event(text: str, *, source: str) -> None:
+def queue_agent_event(text: str, *, source: str, turn_id: str | None = None) -> None:
     """
     Queue an agent event without blocking a real-time producer.
 
@@ -212,17 +221,18 @@ def queue_agent_event(text: str, *, source: str) -> None:
         return
 
     if source not in _COALESCED_SOURCES:
-        _EVENT_DISPATCHER.submit(dispatch_agent_event, text, source=source)
+        _EVENT_DISPATCHER.submit(dispatch_agent_event, text, source=source, turn_id=turn_id)
         return
 
     with _PENDING_LOCK:
         superseded = _PENDING_BY_SOURCE.get(source)
-        _PENDING_BY_SOURCE[source] = text
+        _PENDING_BY_SOURCE[source] = (text, turn_id)
 
     if superseded is not None:
         # A task is already queued for this source and has not claimed its text
         # yet, so it will pick up the newer text when it runs.
-        logger.info("Superseded a queued %s event: %s", source, superseded[:60])
+        logger.info("Superseded a queued %s event: %s", source, superseded[0][:60])
+        turn_timing.merge(superseded[1], turn_id)
         return
 
     _EVENT_DISPATCHER.submit(_dispatch_latest, source)
@@ -235,6 +245,7 @@ def publish_ui_output(
     heard: str = "",
     source: str = "",
     epoch: int | None = None,
+    turn_id: str | None = None,
 ) -> bool:
     """Deliver agent-authored UI output to the local Flask presentation adapter.
 
@@ -255,6 +266,8 @@ def publish_ui_output(
     payload: dict[str, Any] = {"thought": thought, "say": say, "heard": heard, "source": source}
     if epoch is not None:
         payload["epoch"] = epoch
+    if turn_id:
+        payload["turn_id"] = turn_id
     try:
         _post_json(
             endpoint,
