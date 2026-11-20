@@ -1357,6 +1357,9 @@ def _linux_say_via_piper(
         try:
             for index, chunk in enumerate(voice.synthesize(text.strip())):
                 # A barge-in kills aplay; stop synthesising the rest of the reply.
+                # shortcut: the sentence being synthesised cannot be aborted, so the
+                # speech worker stays busy up to ~3 s after a barge-in (audio stops at
+                # once). Upgrade by synthesising in a separate thread if that delays replies.
                 _raise_if_cancelled(generation)
                 if index == 0:
                     logging.info("GO2_TTS: first Piper audio after %.2fs", time.monotonic() - started)
