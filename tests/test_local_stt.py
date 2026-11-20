@@ -4,13 +4,15 @@ import io
 import os
 import threading
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 from apps.conscious_assistant import interface_flask
 from coded_tools.unigo2 import local_stt
 
 
-STT_VARS = ("GO2_STT_ENGINE", "GO2_STT_MODEL", "GO2_STT_DEVICE", "GO2_STT_LANGUAGE")
+STT_VARS = ("GO2_STT_ENGINE", "GO2_STT_MODEL", "GO2_STT_DEVICE", "GO2_STT_LANGUAGE",
+            "GO2_STT_BEAM_SIZE", "GO2_STT_THREADS")
 
 
 def stt_env(**overrides):
@@ -51,6 +53,34 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(local_stt.model_size(), "base")
         with patch.dict(os.environ, stt_env(GO2_STT_MODEL="small")):
             self.assertEqual(local_stt.model_size(), "small")
+
+    def test_decoding_is_greedy_unless_asked(self):
+        """Utterances are short single commands; beam search only costs time."""
+        with patch.dict(os.environ, stt_env()):
+            self.assertEqual(local_stt.beam_size(), 1)
+        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="5")):
+            self.assertEqual(local_stt.beam_size(), 5)
+
+    def test_threads_default_to_the_library_choice(self):
+        with patch.dict(os.environ, stt_env()):
+            self.assertEqual(local_stt.cpu_threads(), 0)
+        with patch.dict(os.environ, stt_env(GO2_STT_THREADS="2")):
+            self.assertEqual(local_stt.cpu_threads(), 2)
+
+    def test_a_nonsense_number_falls_back_to_the_default(self):
+        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="wat", GO2_STT_THREADS="-1")):
+            self.assertEqual(local_stt.beam_size(), 1)
+            self.assertEqual(local_stt.cpu_threads(), 0)
+
+    def test_transcribe_uses_the_cheap_decoding_settings(self):
+        whisper = unittest.mock.MagicMock()
+        whisper.transcribe.return_value = (iter([]), None)
+        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="3")), \
+                patch.object(local_stt, "model", return_value=whisper):
+            local_stt.transcribe("clip.webm")
+        whisper.transcribe.assert_called_once_with(
+            "clip.webm", language="en", beam_size=3,
+            without_timestamps=True, condition_on_previous_text=False)
 
 
 class RouteSelectionTests(unittest.TestCase):

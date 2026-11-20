@@ -630,7 +630,24 @@ it stands in for.
 export GO2_STT_MODEL="base"    # tiny, base (default), small, medium
 export GO2_STT_DEVICE="auto"   # auto -> cpu, or "cuda"
 export GO2_STT_LANGUAGE="en"
+export GO2_STT_BEAM_SIZE="1"   # greedy (default); Whisper's own default is 5
+export GO2_STT_THREADS="0"     # 0 (default) leaves it to CTranslate2, which uses 4
 ```
+
+Decoding is greedy, without timestamps and without carrying text over from
+the previous clip. Each clip is one short command, so the extra work buys
+nothing. On the robot's 4-core CPU, Piper-spoken test commands took a median
+of 1.29 s with Whisper's defaults and 1.14 s with these settings. The only
+difference in the text was "two" coming back as "2".
+
+Model size is the bigger lever, but it is a tradeoff. `tiny` took 0.70 s on
+the same clips, with the same error rate on that clean synthetic speech.
+Real speech through a room microphone is harder, and `tiny` is known to slip
+more there, so `base` stays the default. Try `GO2_STT_MODEL="tiny"` if speed
+matters more than the odd misheard word. The `.en` variants were no faster.
+
+Leave `GO2_STT_THREADS` alone on the Orin. CTranslate2 already uses all 4
+cores, and 2 threads made each clip about 0.6 s slower.
 
 It defaults to the **CPU**. The Orin already carries YOLO under TensorRT and
 deepface, and on a 16 GB Orin NX memory is the binding constraint rather than

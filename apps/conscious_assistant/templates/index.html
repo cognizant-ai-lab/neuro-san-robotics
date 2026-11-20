@@ -467,7 +467,7 @@
         // replaced because that was slow and cut words in half, so a fallback
         // on a clock would undo that change rather than stand in for it.
         var localAmbient = null;
-        var LOCAL_AMBIENT_SILENCE_MS = 700;   // silence that ends an utterance
+        var LOCAL_AMBIENT_SILENCE_MS = 500;   // silence that ends an utterance; shorter cuts sentences at pauses
         var LOCAL_AMBIENT_MIN_SPEECH_MS = 250; // ignore coughs and door clicks
         var LOCAL_AMBIENT_RMS_THRESHOLD = 0.012;
         // How long after the robot stops to keep ignoring the room, so the tail

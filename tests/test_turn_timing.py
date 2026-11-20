@@ -1,6 +1,8 @@
 """Tests for per-turn voice latency timing (#13): id propagation and the report maths."""
 
 import asyncio
+import re
+from pathlib import Path
 import queue
 import unittest
 from unittest.mock import patch
@@ -238,6 +240,12 @@ class ReportTests(unittest.TestCase):
         self.assertEqual([t["turn_id"] for t in turns], ["a", "b", "c", "d", "e"])
         self.assertEqual(turns[0]["audio_ms"], 4000.0)
 
+    def test_hangover_matches_the_browser(self):
+        """The report subtracts the browser's silence wait; the two must agree."""
+        page = (Path(interface_flask.__file__).parent / "templates" / "index.html").read_text()
+        browser_ms = int(re.search(r"LOCAL_AMBIENT_SILENCE_MS = (\d+)", page).group(1))
+        self.assertEqual(report.AMBIENT_HANGOVER_MS, browser_ms)
+
     def test_p90_is_nearest_rank(self):
         self.assertEqual(report.p90([5]), 5)
         self.assertEqual(report.p90(list(range(1, 11))), 9)
@@ -248,8 +256,8 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(
             report.steps(turn),
             [
-                ("end-of-speech hangover", 700),
-                ("upload + STT", 2000),
+                ("end-of-speech hangover", 500),
+                ("upload + STT", 2200),
                 ("transcript -> dispatch", 100),
                 ("dispatch -> ui_output", 2000),
                 ("ui_output -> first audio", 600),
