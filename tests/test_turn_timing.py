@@ -45,6 +45,21 @@ class TurnLifecycleTests(TurnTimingTestCase):
         self.assertEqual(turn["reply"], "spoken")
         self.assertNotIn(turn_id, turn_timing._OPEN)
 
+    def test_speak_start_and_first_sentence_length_land_on_the_turn_line(self):
+        with patch.object(turn_timing.time, "monotonic", return_value=100.0):
+            turn_id = turn_timing.start("ptt", ended_ago_s=0)
+        for step, at in (("ui_output", 101.0), ("speak_start", 101.2)):
+            with patch.object(turn_timing.time, "monotonic", return_value=at):
+                turn_timing.mark(turn_id, step)
+        with patch.object(turn_timing.time, "monotonic", return_value=102.0):
+            lines = self.logged_lines(
+                lambda: turn_timing.mark(turn_id, "audio", first_sentence_phonemes=42)
+            )
+
+        self.assertRegex(lines[0], r"ui_output_ms=1000 speak_start_ms=1200 audio_ms=2000 ")
+        turn = report.parse(lines)[0]
+        self.assertEqual(turn["first_sentence_phonemes"], "42")
+
     def test_a_turn_without_audio_is_logged_as_no_reply_when_the_next_starts(self):
         silent = turn_timing.start("ambient", 0.7)
         turn_timing.mark(silent, "dispatched")
@@ -175,6 +190,34 @@ class FlaskTurnFlowTests(TurnTimingTestCase):
         self.assertEqual(events[0]["args"][0], {"turn_id": turn_id})
 
 
+    def run_worker(self, job):
+        self.speech_queue.put(job)
+        self.speech_queue.put(None)
+        patch.object(interface_flask, "emit_speech_state").start()
+        interface_flask.speech_worker()
+
+    def test_the_speech_worker_marks_speak_start_just_before_speaking(self):
+        turn_id = turn_timing.start("ptt", 0)
+        seen = []
+        with patch.object(interface_flask, "speak_text",
+                          lambda text: seen.append("speak_start" in turn_timing._OPEN[turn_id])):
+            interface_flask.enqueue_speech("hello", turn_id=turn_id)
+            self.run_worker(self.speech_queue.get_nowait())
+
+        self.assertEqual(seen, [True])
+
+    def test_speech_without_a_turn_plays_and_logs_no_timing(self):
+        spoken = []
+        with (
+            patch.object(interface_flask, "speak_text", spoken.append),
+            self.assertNoLogs(turn_timing.logger),
+        ):
+            interface_flask.enqueue_speech("passing thought")
+            self.run_worker(self.speech_queue.get_nowait())
+
+        self.assertEqual(spoken, ["passing thought"])
+
+
 class ReportTests(unittest.TestCase):
     LOG = [
         "INFO:coded_tools.unigo2.turn_timing:turn_timing turn_id=a mode=ptt transcript_ms=1000 "
@@ -186,11 +229,14 @@ class ReportTests(unittest.TestCase):
         "INFO:coded_tools.unigo2.turn_timing:turn_timing turn_id=d mode=ambient transcript_ms=2700 "
         "dispatched_ms=2800 ui_output_ms=4800 audio_ms=5400 coalesced=1 reply=spoken",
         "INFO:root:unrelated line",
+        "INFO:coded_tools.unigo2.turn_timing:turn_timing turn_id=e mode=ptt transcript_ms=1000 "
+        "dispatched_ms=1100 ui_output_ms=3000 speak_start_ms=3500 audio_ms=5000 "
+        "first_sentence_phonemes=40 coalesced=0 reply=spoken",
     ]
 
     def test_parse_reads_only_timing_lines(self):
         turns = report.parse(self.LOG)
-        self.assertEqual([t["turn_id"] for t in turns], ["a", "b", "c", "d"])
+        self.assertEqual([t["turn_id"] for t in turns], ["a", "b", "c", "d", "e"])
         self.assertEqual(turns[0]["audio_ms"], 4000.0)
 
     def test_p90_is_nearest_rank(self):
@@ -212,12 +258,22 @@ class ReportTests(unittest.TestCase):
             ],
         )
 
+    def test_speak_start_splits_the_wait_for_first_audio(self):
+        rows = dict(report.steps(report.parse(self.LOG)[4]))
+        self.assertEqual(rows["ui_output -> first audio"], 2000)
+        self.assertEqual(rows["  queue wait"], 500)
+        self.assertEqual(rows["  setup + 1st sentence"], 1500)
+
+    def test_old_lines_without_speak_start_have_no_split(self):
+        self.assertNotIn("  queue wait", dict(report.steps(report.parse(self.LOG)[0])))
+
     def test_ptt_table_excludes_no_reply_turns_from_the_maths(self):
         table = report.report(report.parse(self.LOG), "ptt")
 
-        self.assertIn("2 spoken, 1 no reply", table)
-        # median of 1000 and 2000; shares 25 % and 33 % -> median 29 %.
-        self.assertIn("end-of-speech + STT: median 1500 ms, 29% of total", table)
+        self.assertIn("3 spoken, 1 no reply", table)
+        # median of 1000, 2000, 1000; shares 25 %, 33 %, 20 % -> median 25 %.
+        self.assertIn("end-of-speech + STT: median 1000 ms, 25% of total", table)
+        self.assertRegex(table, r"queue wait\s+500\s+500")
         self.assertNotIn("hangover", table)
 
 

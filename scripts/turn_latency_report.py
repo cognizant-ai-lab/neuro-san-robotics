@@ -59,8 +59,13 @@ def steps(turn):
         ("transcript -> dispatch", turn["dispatched_ms"] - stt),
         ("dispatch -> ui_output", turn["ui_output_ms"] - turn["dispatched_ms"]),
         ("ui_output -> first audio", turn["audio_ms"] - turn["ui_output_ms"]),
-        ("total", turn["audio_ms"]),
     ]
+    if "speak_start_ms" in turn:  # logs from before #16 lack it
+        rows += [
+            ("  queue wait", turn["speak_start_ms"] - turn["ui_output_ms"]),
+            ("  setup + 1st sentence", turn["audio_ms"] - turn["speak_start_ms"]),
+        ]
+    rows.append(("total", turn["audio_ms"]))
     return rows
 
 
@@ -73,7 +78,8 @@ def report(turns, mode):
         return "\n".join(out)
 
     columns: dict[str, list[float]] = {}
-    for turn in spoken:
+    # Turns with the speak_start split first, so its rows sit above "total".
+    for turn in sorted(spoken, key=lambda t: "speak_start_ms" not in t):
         for name, ms in steps(turn):
             columns.setdefault(name, []).append(ms)
     out.append(f"{'step':<26}{'median ms':>10}{'p90 ms':>10}")

@@ -312,22 +312,24 @@ def _raise_if_cancelled(generation: int) -> None:
 
 
 # Called on the speaking thread when an utterance's audio reaches the player,
-# so the app can report time to first spoken word (#5).
-_audio_started_listener: Optional[Callable[[], None]] = None
+# so the app can report time to first spoken word (#5). Piper also passes
+# first_sentence_phonemes, the length of the sentence it had to synthesise
+# first (#16); its chunks carry phonemes, not the sentence text.
+_audio_started_listener: Optional[Callable[..., None]] = None
 
 
-def set_audio_started_listener(listener: Optional[Callable[[], None]]) -> None:
+def set_audio_started_listener(listener: Optional[Callable[..., None]]) -> None:
     """Register what to call when audio starts playing; None removes it."""
     global _audio_started_listener  # pylint: disable=global-statement
     _audio_started_listener = listener
 
 
-def _notify_audio_started() -> None:
+def _notify_audio_started(**details: Any) -> None:
     listener = _audio_started_listener
     if listener is None:
         return
     try:
-        listener()
+        listener(**details)
     except Exception:  # reporting must never cost the user the speech
         logging.exception("GO2_TTS: audio-started listener failed")
 
@@ -1387,7 +1389,7 @@ def _linux_say_via_piper(
                 _raise_if_cancelled(generation)
                 if index == 0:
                     logging.info("GO2_TTS: first Piper audio after %.2fs", time.monotonic() - started)
-                    _notify_audio_started()
+                    _notify_audio_started(first_sentence_phonemes=len(chunk.phonemes))
                 aplay.stdin.write(chunk.audio_int16_bytes)
                 aplay.stdin.flush()
             aplay.stdin.close()

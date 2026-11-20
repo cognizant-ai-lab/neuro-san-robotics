@@ -299,7 +299,7 @@ class FakeVoice:
         for index, chunk in enumerate(self.chunks):
             self.before_chunk(index)
             self.synthesised += 1
-            yield types.SimpleNamespace(audio_int16_bytes=chunk)
+            yield types.SimpleNamespace(audio_int16_bytes=chunk, phonemes=list(chunk.decode()))
 
 
 class PiperStaysLoadedTests(unittest.TestCase):
@@ -371,10 +371,17 @@ class PiperStaysLoadedTests(unittest.TestCase):
 
     def test_listeners_hear_when_the_first_audio_reaches_aplay(self):
         heard = []
-        tts_go2.set_audio_started_listener(lambda: heard.append(self.aplays[0].stdin.flushed))
+        tts_go2.set_audio_started_listener(lambda **_: heard.append(self.aplays[0].stdin.flushed))
         self.addCleanup(tts_go2.set_audio_started_listener, None)
         self.speak()
         self.assertEqual(heard, [b""], "fire once, right before the first sentence is written")
+
+    def test_listeners_hear_how_long_the_first_sentence_was(self):
+        heard = []
+        tts_go2.set_audio_started_listener(lambda **details: heard.append(details))
+        self.addCleanup(tts_go2.set_audio_started_listener, None)
+        self.speak()
+        self.assertEqual(heard, [{"first_sentence_phonemes": 3}], "b'one' -> 3 phonemes")
 
 
 class AudioStartedListenerTests(unittest.TestCase):

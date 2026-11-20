@@ -582,6 +582,7 @@ def speech_worker():
                 if not still_current:
                     logging.info("Speech worker: utterance cancelled before playback")
                     continue
+                turn_timing.mark(job_turn_id, "speak_start")
                 speak_text(text)
                 logging.info("Speech worker: TTS completed")
                 if emit_to_ui:
@@ -642,11 +643,11 @@ if warm_piper_in_background is not None:
     warm_piper_in_background()
 
 
-def _on_audio_started() -> None:
+def _on_audio_started(**details) -> None:
     """The moment the robot is audible, for time-to-first-word measurements (#5, #13)."""
     with _speech_state_lock:
         turn_id = _active_turn_id
-    turn_timing.mark(turn_id, "audio")
+    turn_timing.mark(turn_id, "audio", **details)
     socketio.emit("speech_audio_started", {"turn_id": turn_id}, namespace="/chat")
 
 

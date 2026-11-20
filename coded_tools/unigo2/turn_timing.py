@@ -19,7 +19,8 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
-STEPS = ("transcript", "dispatched", "ui_output", "audio")
+# speak_start: the speech worker took the turn's reply off the queue (#16).
+STEPS = ("transcript", "dispatched", "ui_output", "speak_start", "audio")
 
 _LOCK = threading.Lock()
 _OPEN: dict[str, dict] = {}
@@ -43,8 +44,11 @@ def start(mode: str, ended_ago_s: float) -> str:
     return turn_id
 
 
-def mark(turn_id: str | None, step: str) -> None:
-    """Record the first time ``turn_id`` reached ``step``; audio closes the turn."""
+def mark(turn_id: str | None, step: str, **details) -> None:
+    """Record the first time ``turn_id`` reached ``step``; audio closes the turn.
+
+    ``details`` (e.g. ``first_sentence_phonemes``) are logged as extra fields.
+    """
     if not turn_id:
         return
     with _LOCK:
@@ -52,6 +56,7 @@ def mark(turn_id: str | None, step: str) -> None:
         if turn is None or step in turn:
             return
         turn[step] = time.monotonic()
+        turn.setdefault("details", {}).update(details)
     if step == "audio":
         _close(turn_id, reply="spoken")
 
@@ -84,5 +89,6 @@ def _close(turn_id: str, *, reply: str) -> None:
     for step in STEPS:
         if step in turn:
             fields.append(f"{step}_ms={(turn[step] - turn['t0']) * 1000:.0f}")
+    fields += [f"{key}={value}" for key, value in turn.get("details", {}).items()]
     fields += [f"coalesced={turn['coalesced']}", f"reply={reply}"]
     logger.info("turn_timing %s", " ".join(fields))
