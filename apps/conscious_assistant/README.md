@@ -85,7 +85,6 @@ filter is what makes an open microphone safe.
 | `CONSCIOUS_SELF_ECHO_NOVEL_WORDS` | `2` | Consecutive words the robot never said that mark a real person |
 | `CONSCIOUS_BARGE_IN_MIN_WORDS` | `2` | Words required before a transcript may cut the robot off |
 | `CONSCIOUS_DUCK_RELEASE_SECONDS` | `2.5` | When to undo a duck no transcript confirmed |
-| `CONSCIOUS_SUPERSEDED_SPEECH_GRACE_SECONDS` | `1.5` | How long after a barge-in agent speech is treated as the interrupted turn's |
 | `CONSCIOUS_ACKNOWLEDGE_USER_INPUT` | `0` | Speak a filler phrase ("On it") before answering |
 | `GO2_TTS_DUCK_VOLUME` | `20` | Mixer percentage held while ducked |
 
