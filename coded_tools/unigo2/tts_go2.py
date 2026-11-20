@@ -9,7 +9,7 @@ TTS Engine Priority (configurable via GO2_TTS_ENGINE env var):
 
 Linux / Unitree Go2:
 - OpenAI TTS: True streaming via chunk transfer encoding (recommended)
-- Piper TTS: Neural, offline. Voice from GO2_PIPER_VOICE (default en_GB-cori-high)
+- Piper TTS: Neural, offline. Voice from GO2_PIPER_VOICE (default en_GB-alan-medium)
 - espeak-ng: Fallback via ALSA
 
 macOS:

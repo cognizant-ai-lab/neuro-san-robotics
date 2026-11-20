@@ -94,8 +94,8 @@ def report(model: Path, config: Path) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     parser.add_argument("--voice", default=None,
-                        help="Piper voice name, e.g. en_GB-cori-high "
-                             "(default: GO2_PIPER_VOICE, else en_GB-cori-high)")
+                        help="Piper voice name, e.g. en_GB-alan-medium "
+                             "(default: GO2_PIPER_VOICE, else en_GB-alan-medium)")
     parser.add_argument("--check", action="store_true",
                         help="report status and exit without downloading")
     parser.add_argument("--force", action="store_true",
