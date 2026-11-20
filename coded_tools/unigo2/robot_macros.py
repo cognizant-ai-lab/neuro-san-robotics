@@ -264,5 +264,7 @@ class RobotMacros(CodedTool):
     def _execute(action: str, args: Dict[str, Any]) -> str:
         go2 = Go2Macros()
         if not getattr(go2, "available", False):
+            # Logged so offline scenario runs (scripts/talk_driver.py) can see which action was chosen.
+            go2._log(f"robot_macros: skipped '{action}' (robot control unavailable)")
             return f"Skipped action '{action}' because robot control is unavailable"
         return _execute_single_action(go2, action, args)

@@ -43,6 +43,7 @@ from coded_tools.unigo2 import local_stt
 from coded_tools.unigo2 import openai_provider
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 from coded_tools.unigo2.agent_events import queue_agent_event
+from coded_tools.unigo2.agent_events import set_speech_epoch_source
 
 
 # TLS certificate paths used by both Flask and the native runtime callback.
@@ -64,6 +65,8 @@ try:
     from coded_tools.unigo2.tts_go2 import duck_playback as tts_duck_playback
     from coded_tools.unigo2.tts_go2 import say as tts_say
     from coded_tools.unigo2.tts_go2 import stop_speaking as tts_stop_speaking
+    from coded_tools.unigo2.tts_go2 import set_audio_started_listener
+    from coded_tools.unigo2.tts_go2 import warm_piper_in_background
     TTS_AVAILABLE = True
 except ImportError:
     logging.warning("TTS module not available - speech will be text-only")
@@ -71,6 +74,8 @@ except ImportError:
     tts_say = None
     tts_stop_speaking = None
     tts_duck_playback = None
+    warm_piper_in_background = None
+    set_audio_started_listener = None
 
     class SpeechInterrupted(RuntimeError):
         """Stand-in so the speech worker can catch barge-ins without TTS installed."""
@@ -141,7 +146,6 @@ _speech_epoch = 0
 _speech_active = False
 _active_speech_text = ""
 _active_speech_ended_at = 0.0
-_last_barge_in_at = 0.0
 _duck_release_timer = None
 
 # How long after playback ends a transcript may still be the robot's own voice.
@@ -167,18 +171,21 @@ DUCK_RELEASE_SECONDS = float(os.environ.get("CONSCIOUS_DUCK_RELEASE_SECONDS", "2
 # Words a transcript needs before it may cut the robot off, so a stray syllable
 # or a one-word mis-transcription does not truncate an answer.
 BARGE_IN_MIN_WORDS = int(os.environ.get("CONSCIOUS_BARGE_IN_MIN_WORDS", "2"))
-# Speech arriving this soon after a barge-in belongs to the turn that was
-# interrupted: the agent was already mid-answer when it got cut off, and its
-# POST lands almost immediately. A reply to what the user actually said needs
-# a round trip through the model and cannot come back this fast, so keeping
-# the window short is what stops this from swallowing the real answer.
-SUPERSEDED_SPEECH_GRACE_SECONDS = float(
-    os.environ.get("CONSCIOUS_SUPERSEDED_SPEECH_GRACE_SECONDS", "1.5")
-)
 # Output that does not belong to a conversational turn and so cannot be
 # superseded by one. A navigation outcome ("I arrived at the kitchen") is
 # authoritative and must survive a barge-in that happened to land near it.
 UNINTERRUPTIBLE_SPEECH_SOURCES = frozenset({"navigation"})
+
+
+def current_speech_epoch() -> int:
+    """Return the epoch new agent turns belong to."""
+    with _speech_state_lock:
+        return _speech_epoch
+
+
+# Every dispatched turn carries the epoch current when it was sent, so its
+# speech can be told apart from the speech of a turn a barge-in superseded.
+set_speech_epoch_source(current_speech_epoch)
 
 latest_observation = None
 scene_image_path = SceneObserver(enabled=False).latest_image_path()
@@ -215,12 +222,16 @@ def receive_agent_output():
     heard = payload.get("heard", "")
     source = str(payload.get("source", ""))
     observation = payload.get("observation")
+    epoch = payload.get("epoch")
     if (
         not isinstance(thought, str)
         or not isinstance(say, str)
         or not isinstance(heard, str)
     ):
         return jsonify({"error": "thought, say, and heard must be strings"}), 400
+    # bool is an int subclass, but True is not an epoch.
+    if epoch is not None and (not isinstance(epoch, int) or isinstance(epoch, bool)):
+        return jsonify({"error": "epoch must be an integer"}), 400
 
     if heard.strip():
         socketio.emit("update_user_input", {"data": heard.strip()}, namespace="/chat")
@@ -229,11 +240,12 @@ def receive_agent_output():
     if say.strip():
         # Thoughts stay in the UI log for context, but speech from a turn the
         # user already talked over must not reach the speaker.
+        # Speech without an epoch belongs to no turn and is treated as current.
         with _speech_state_lock:
             superseded = (
                 source not in UNINTERRUPTIBLE_SPEECH_SOURCES
-                and _last_barge_in_at > 0.0
-                and time.monotonic() - _last_barge_in_at <= SUPERSEDED_SPEECH_GRACE_SECONDS
+                and epoch is not None
+                and epoch < _speech_epoch
             )
         if superseded:
             logging.info("Discarding speech from a superseded turn: %s", say.strip()[:60])
@@ -461,13 +473,12 @@ def cancel_speech(reason: str = "barge-in") -> None:
     utterance still being synthesized, and the agent turn that produced them
     all check the epoch and drop themselves once it moves.
     """
-    global _speech_epoch, _last_barge_in_at  # pylint: disable=global-statement
+    global _speech_epoch  # pylint: disable=global-statement
 
     _cancel_duck_release()
     with _speech_state_lock:
         _speech_epoch += 1
         epoch = _speech_epoch
-        _last_barge_in_at = time.monotonic()
 
     dropped = 0
     while True:
@@ -614,6 +625,11 @@ def enqueue_speech(
 # Load the local recogniser now if it is the configured one, so the first press
 # of the mic button is not waiting on a model load.
 local_stt.warm_in_background()
+if warm_piper_in_background is not None:
+    warm_piper_in_background()
+if set_audio_started_listener is not None:
+    # The moment the robot is audible, for time-to-first-word measurements (#5).
+    set_audio_started_listener(lambda: socketio.emit("speech_audio_started", {}, namespace="/chat"))
 
 # Start speech worker thread
 speech_thread = threading.Thread(target=speech_worker, daemon=True)

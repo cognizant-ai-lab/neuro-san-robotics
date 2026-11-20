@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request
@@ -29,6 +30,19 @@ _DEFAULT_AWARENESS_MAX_AGE_SECONDS = 6 * 60 * 60
 _COALESCED_SOURCES = frozenset({"ambient"})
 _PENDING_LOCK = threading.Lock()
 _PENDING_BY_SOURCE: dict[str, str] = {}
+
+# Reads the presentation layer's current speech epoch. The Flask app owns the
+# epoch and registers this, so this module stays free of Flask imports.
+# shortcut: only the Flask process registers it, so events dispatched from the
+# native server (scene observations, the navigation fallback) go out untagged
+# and their speech counts as current; share the epoch via a file if they speak.
+_speech_epoch_source: Callable[[], int] | None = None
+
+
+def set_speech_epoch_source(source: Callable[[], int] | None) -> None:
+    """Register how dispatched turns learn the speech epoch they belong to."""
+    global _speech_epoch_source  # pylint: disable=global-statement
+    _speech_epoch_source = source
 
 
 def _navigation_awareness_path() -> Path:
@@ -162,6 +176,11 @@ def dispatch_agent_event(text: str, *, source: str) -> bool:
         "user_message": {"type": "HUMAN", "text": event_text},
         "chat_filter": {"chat_filter_type": "MINIMAL"},
     }
+    if _speech_epoch_source is not None:
+        # Read now, not at queue time: a barge-in while this event waited in
+        # the queue supersedes everything before it, including this turn.
+        # sly_data reaches the turn's coded tools, so ui_output can echo it back.
+        payload["sly_data"] = {"speech_epoch": _speech_epoch_source()}
     try:
         _post_json(endpoint, payload, timeout=5.0)
         return True
@@ -215,13 +234,15 @@ def publish_ui_output(
     say: str = "",
     heard: str = "",
     source: str = "",
+    epoch: int | None = None,
 ) -> bool:
     """Deliver agent-authored UI output to the local Flask presentation adapter.
 
-    ``source`` marks who authored the output. Speech from a turn the user has
-    already talked over is normally dropped, so an authoritative announcement
-    that does not belong to a conversational turn -- a navigation outcome, say
-    -- must identify itself to survive a barge-in.
+    ``epoch`` is the speech epoch of the turn that produced the output; speech
+    from an epoch a barge-in has since moved past is dropped. Output without
+    one belongs to no turn and is always spoken. ``source`` marks who authored
+    the output; an authoritative announcement such as a navigation outcome
+    survives a barge-in even when it carries an old epoch.
     """
     thought = str(thought).strip()
     say = str(say).strip()
@@ -231,10 +252,13 @@ def publish_ui_output(
 
     endpoint = os.environ.get("CONSCIOUS_UI_EVENT_ENDPOINT", "http://127.0.0.1:5001/api/agent-output")
     token = os.environ.get("CONSCIOUS_UI_EVENT_TOKEN", "")
+    payload: dict[str, Any] = {"thought": thought, "say": say, "heard": heard, "source": source}
+    if epoch is not None:
+        payload["epoch"] = epoch
     try:
         _post_json(
             endpoint,
-            {"thought": thought, "say": say, "heard": heard, "source": source},
+            payload,
             token=token,
             timeout=10.0,
         )

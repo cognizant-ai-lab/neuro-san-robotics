@@ -26,7 +26,6 @@ class SpeechStateTestCase(unittest.TestCase):
                 "_speech_active",
                 "_active_speech_text",
                 "_active_speech_ended_at",
-                "_last_barge_in_at",
             )
         }
         # The imported module runs a real speech worker against the real queue;
@@ -323,17 +322,59 @@ class BargeInSocketFlowTests(SpeechStateTestCase):
 
     def test_agent_speech_from_an_interrupted_turn_is_not_spoken(self):
         self.set_speaking("partway through an answer")
+        stale_epoch = interface_flask._speech_epoch
         self.client.emit("barge_in", {"confirmed": True}, namespace="/chat")
 
         # The agent finishes the turn the user already talked over.
         response = interface_flask.app.test_client().post(
-            "/api/agent-output", json={"say": "the rest of the stale answer"}
+            "/api/agent-output",
+            json={"say": "the rest of the stale answer", "epoch": stale_epoch},
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(self.speech_queue.empty())
+
+    def test_stale_speech_is_dropped_however_late_it_arrives(self):
+        self.set_speaking("partway through an answer")
+        stale_epoch = interface_flask._speech_epoch
+        self.client.emit("barge_in", {"confirmed": True}, namespace="/chat")
+
+        # A slow model can finish the interrupted turn long after the cut-off.
+        with patch.object(
+            interface_flask.time, "monotonic", return_value=time.monotonic() + 30.0
+        ):
+            response = interface_flask.app.test_client().post(
+                "/api/agent-output",
+                json={"say": "the rest of the stale answer", "epoch": stale_epoch},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.speech_queue.empty())
+
+    def test_untagged_speech_is_spoken_after_a_barge_in(self):
+        self.set_speaking("partway through an answer")
+        self.client.emit("barge_in", {"confirmed": True}, namespace="/chat")
+
+        # Output from no conversational turn has nothing to be superseded by.
+        response = interface_flask.app.test_client().post(
+            "/api/agent-output", json={"say": "battery is low"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.speech_queue.get_nowait()["text"], "battery is low")
+
+    def test_a_non_integer_epoch_is_rejected(self):
+        for epoch in ("3", 1.5, True):
+            with self.subTest(epoch=epoch):
+                response = interface_flask.app.test_client().post(
+                    "/api/agent-output", json={"say": "hello", "epoch": epoch}
+                )
+                self.assertEqual(response.status_code, 400)
+        self.assertTrue(self.speech_queue.empty())
+
     def test_speech_from_a_turn_interrupted_by_talking_is_dropped(self):
         self.set_speaking("the kitchen is down the hall")
+        stale_epoch = interface_flask._speech_epoch
 
         with patch.object(interface_flask, "queue_agent_event"):
             self.client.emit(
@@ -343,7 +384,8 @@ class BargeInSocketFlowTests(SpeechStateTestCase):
             )
         # The interrupted turn's in-flight output lands right after the cancel.
         response = interface_flask.app.test_client().post(
-            "/api/agent-output", json={"say": "past the main desk on your left"}
+            "/api/agent-output",
+            json={"say": "past the main desk on your left", "epoch": stale_epoch},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -351,11 +393,13 @@ class BargeInSocketFlowTests(SpeechStateTestCase):
 
     def test_speech_from_a_typed_turn_interruption_is_dropped(self):
         self.set_speaking("the kitchen is down the hall")
+        stale_epoch = interface_flask._speech_epoch
 
         with patch.object(interface_flask, "dispatch_agent_event", return_value=True):
             self.client.emit("user_input", {"data": "never mind"}, namespace="/chat")
         response = interface_flask.app.test_client().post(
-            "/api/agent-output", json={"say": "past the main desk on your left"}
+            "/api/agent-output",
+            json={"say": "past the main desk on your left", "epoch": stale_epoch},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -365,17 +409,33 @@ class BargeInSocketFlowTests(SpeechStateTestCase):
         self.set_speaking("the kitchen is down the hall")
         self.client.emit("barge_in", {"confirmed": True}, namespace="/chat")
 
-        # A real reply needs a model round trip, so it lands past the grace
-        # window. Suppressing that would be far worse than the stale line.
-        interface_flask._last_barge_in_at = time.monotonic() - (
-            interface_flask.SUPERSEDED_SPEECH_GRACE_SECONDS + 1.0
-        )
+        # The turn dispatched after the cut-off carries the new epoch, and its
+        # answer can come back within a second ("two plus two is four").
         response = interface_flask.app.test_client().post(
-            "/api/agent-output", json={"say": "okay, stopping here"}
+            "/api/agent-output",
+            json={"say": "okay, stopping here", "epoch": interface_flask._speech_epoch},
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.speech_queue.get_nowait()["text"], "okay, stopping here")
+
+    def test_a_typed_turn_is_dispatched_with_the_post_cancel_epoch(self):
+        self.set_speaking("the kitchen is down the hall")
+        before = interface_flask._speech_epoch
+
+        with (
+            patch.object(agent_events, "_post_json") as post,
+            patch.object(
+                interface_flask.socketio,
+                "start_background_task",
+                side_effect=lambda task: task(),
+            ),
+        ):
+            self.client.emit("user_input", {"data": "what is two plus two"}, namespace="/chat")
+
+        payload = post.call_args.args[1]
+        self.assertGreater(payload["sly_data"]["speech_epoch"], before)
+        self.assertEqual(payload["sly_data"]["speech_epoch"], interface_flask._speech_epoch)
 
 
 if __name__ == "__main__":

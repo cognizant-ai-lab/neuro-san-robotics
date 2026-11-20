@@ -35,6 +35,9 @@ class UiOutputTool(CodedTool):
             thought=thought,
             say=say,
             heard=heard,
+            # The epoch the dispatching turn was sent with; lets the UI drop
+            # this speech if the user has since barged in.
+            epoch=(sly_data or {}).get("speech_epoch"),
         )
         if delivered:
             return "Output delivered. End this event turn now; do not call ui_output again."
