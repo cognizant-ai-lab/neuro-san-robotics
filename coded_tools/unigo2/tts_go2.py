@@ -311,6 +311,27 @@ def _raise_if_cancelled(generation: int) -> None:
         raise SpeechInterrupted("playback cancelled by barge-in")
 
 
+# Called on the speaking thread when an utterance's audio reaches the player,
+# so the app can report time to first spoken word (#5).
+_audio_started_listener: Optional[Callable[[], None]] = None
+
+
+def set_audio_started_listener(listener: Optional[Callable[[], None]]) -> None:
+    """Register what to call when audio starts playing; None removes it."""
+    global _audio_started_listener  # pylint: disable=global-statement
+    _audio_started_listener = listener
+
+
+def _notify_audio_started() -> None:
+    listener = _audio_started_listener
+    if listener is None:
+        return
+    try:
+        listener()
+    except Exception:  # reporting must never cost the user the speech
+        logging.exception("GO2_TTS: audio-started listener failed")
+
+
 def _popen_playback(cmd: List[str], **kwargs: Any) -> subprocess.Popen:
     """Start a playback subprocess that stop_speaking() is able to terminate."""
     proc = subprocess.Popen(cmd, **kwargs)  # nosec B603 - fixed audio commands
@@ -348,6 +369,7 @@ def _run_playback(
         stderr=pipe if capture_output else None,
         text=text,
     )
+    _notify_audio_started()
     try:
         stdout, stderr = proc.communicate(input=input, timeout=timeout)
     finally:
@@ -668,10 +690,12 @@ def _openai_say_streaming(
 
             interrupted = False
             try:
-                for chunk in response.iter_bytes(chunk_size=4096):
+                for index, chunk in enumerate(response.iter_bytes(chunk_size=4096)):
                     if _PLAYBACK.generation != generation:
                         interrupted = True
                         break
+                    if index == 0:
+                        _notify_audio_started()
                     if aplay_proc.stdin:
                         # Apply volume gain to PCM audio
                         amplified_chunk = _prepare_openai_pcm_chunk(chunk, gain, device)
@@ -1363,6 +1387,7 @@ def _linux_say_via_piper(
                 _raise_if_cancelled(generation)
                 if index == 0:
                     logging.info("GO2_TTS: first Piper audio after %.2fs", time.monotonic() - started)
+                    _notify_audio_started()
                 aplay.stdin.write(chunk.audio_int16_bytes)
                 aplay.stdin.flush()
             aplay.stdin.close()

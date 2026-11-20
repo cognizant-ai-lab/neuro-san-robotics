@@ -3,6 +3,7 @@
 import unittest
 
 from scripts.talk_driver import check_turn
+from scripts.talk_driver import turn_reaction
 from scripts.talk_driver import turn_satisfied
 
 
@@ -35,6 +36,25 @@ class CheckTurnTest(unittest.TestCase):
         expect = {"speech_matches": "hi"}
         self.assertFalse(turn_satisfied(expect, [("update_thoughts", "x")], ""))
         self.assertTrue(turn_satisfied(expect, [("update_speech", "hi")], ""))
+
+
+
+class TurnReactionTest(unittest.TestCase):
+    """#5's target is time to the first spoken word; end of speech is only a fallback."""
+
+    def test_first_audio_is_the_reaction_when_the_app_reports_it(self):
+        inbox = {"replies": [("update_speech", "hi")], "first_at": 18.0, "audio_at": 13.3}
+        self.assertEqual(turn_reaction(inbox, 10.0), (3.3, "first word"))
+
+    def test_end_of_speech_without_audio(self):
+        # Simulation mode and CI have no speaker, so no audio event arrives.
+        inbox = {"replies": [("update_speech", "hi")], "first_at": 18.0, "audio_at": None}
+        self.assertEqual(turn_reaction(inbox, 10.0), (8.0, "end of speech"))
+
+    def test_audio_without_a_reply_is_not_a_reaction(self):
+        # Speech that never became a reply (e.g. cut off by a barge-in) answers nothing.
+        inbox = {"replies": [], "first_at": 0.0, "audio_at": 13.3}
+        self.assertEqual(turn_reaction(inbox, 10.0), (None, None))
 
 
 if __name__ == "__main__":

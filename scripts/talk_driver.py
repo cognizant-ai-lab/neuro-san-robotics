@@ -12,11 +12,15 @@ A scenario file (tests/scenarios/*.json) is {"name": ..., "turns": [...]}; each 
      "expect": {"reply": true,                      # false = robot must stay quiet
                 "speech_matches": "(?i)cail",       # regex over what it said
                 "log_matches": "skipped 'dance'",   # regex over server output (needs --start-server)
-                "max_reaction": 8}}                 # seconds from send to first reply
+                "max_reaction": 8}}                 # seconds from send to first reply (see below)
 
 Usage:
     python scripts/talk_driver.py tests/scenarios/*.json                 # app already running
     python scripts/talk_driver.py --start-server tests/scenarios/*.json  # launch it in simulation mode
+
+Reaction time is measured to the robot's first spoken word when the app reports
+it (`speech_audio_started`), else to the end of speech (`update_speech`, emitted
+after playback), e.g. in simulation without a speaker. Each result says which.
 
 Exits 1 if any expectation fails.
 """
@@ -55,6 +59,15 @@ def check_turn(expect, replies, log_text, reaction):
     if "log_matches" in expect and not re.search(expect["log_matches"], log_text):
         failures.append(f"server output does not match {expect['log_matches']!r}")
     return failures
+
+
+def turn_reaction(inbox, t0):
+    """Seconds from sending to the reply, and what that measures; (None, None) without a reply."""
+    if not inbox["replies"]:
+        return None, None
+    if inbox["audio_at"] is not None:
+        return round(inbox["audio_at"] - t0, 6), "first word"
+    return round(inbox["first_at"] - t0, 6), "end of speech"
 
 
 def turn_satisfied(expect, replies, log_text):
@@ -130,6 +143,7 @@ def run_turn(sio, inbox, turn, server, args):
     # Upgrade by tagging turns server-side if scenarios get flaky.
     with inbox["lock"]:
         inbox["replies"].clear()
+        inbox["audio_at"] = None
     mark = server.mark() if server else 0
     t0 = time.monotonic()
     sio.emit(VIA_EVENTS[turn.get("via", "user_input")], {"data": turn["say"]}, namespace="/chat")
@@ -146,11 +160,11 @@ def run_turn(sio, inbox, turn, server, args):
 
     with inbox["lock"]:
         replies = list(inbox["replies"])
-        reaction = inbox["first_at"] - t0 if replies else None
+        reaction, measured = turn_reaction(inbox, t0)
     log_text = server.output_since(mark) if server else ""
     if "log_matches" in expect and not server:
-        return ["log_matches needs --start-server"], reaction
-    return check_turn(expect, replies, log_text, reaction), reaction
+        return ["log_matches needs --start-server"], reaction, measured
+    return check_turn(expect, replies, log_text, reaction), reaction, measured
 
 
 def main() -> int:
@@ -172,7 +186,12 @@ def main() -> int:
         if server:
             server.wait_healthy(args.url, timeout=180)
 
-        inbox = {"lock": threading.Lock(), "replies": [], "first_at": 0.0}
+        inbox = {"lock": threading.Lock(), "replies": [], "first_at": 0.0, "audio_at": None}
+
+        def on_audio(*_):
+            with inbox["lock"]:
+                if inbox["audio_at"] is None:
+                    inbox["audio_at"] = time.monotonic()
 
         def on_reply(event):
             def handler(payload, *_):
@@ -185,14 +204,15 @@ def main() -> int:
         sio = socketio.Client(ssl_verify=False)  # robot uses a self-signed cert
         for event in REPLY_EVENTS:
             sio.on(event, on_reply(event), namespace="/chat")
+        sio.on("speech_audio_started", on_audio, namespace="/chat")
         sio.connect(args.url, namespaces=["/chat"])
         try:
             for path in args.scenarios:
                 scenario = json.loads(path.read_text())
                 print(f"== {scenario.get('name', path.stem)}", flush=True)
                 for turn in scenario["turns"]:
-                    failures, reaction = run_turn(sio, inbox, turn, server, args)
-                    timing = f"{reaction:.1f}s" if reaction is not None else "silent"
+                    failures, reaction, measured = run_turn(sio, inbox, turn, server, args)
+                    timing = f"{reaction:.1f}s {measured}" if reaction is not None else "silent"
                     print(f"  {'PASS' if not failures else 'FAIL'} [{timing}] {turn['say']!r}", flush=True)
                     for failure in failures:
                         print(f"      - {failure}", flush=True)

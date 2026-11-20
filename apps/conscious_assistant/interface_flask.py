@@ -65,6 +65,7 @@ try:
     from coded_tools.unigo2.tts_go2 import duck_playback as tts_duck_playback
     from coded_tools.unigo2.tts_go2 import say as tts_say
     from coded_tools.unigo2.tts_go2 import stop_speaking as tts_stop_speaking
+    from coded_tools.unigo2.tts_go2 import set_audio_started_listener
     from coded_tools.unigo2.tts_go2 import warm_piper_in_background
     TTS_AVAILABLE = True
 except ImportError:
@@ -74,6 +75,7 @@ except ImportError:
     tts_stop_speaking = None
     tts_duck_playback = None
     warm_piper_in_background = None
+    set_audio_started_listener = None
 
     class SpeechInterrupted(RuntimeError):
         """Stand-in so the speech worker can catch barge-ins without TTS installed."""
@@ -625,6 +627,9 @@ def enqueue_speech(
 local_stt.warm_in_background()
 if warm_piper_in_background is not None:
     warm_piper_in_background()
+if set_audio_started_listener is not None:
+    # The moment the robot is audible, for time-to-first-word measurements (#5).
+    set_audio_started_listener(lambda: socketio.emit("speech_audio_started", {}, namespace="/chat"))
 
 # Start speech worker thread
 speech_thread = threading.Thread(target=speech_worker, daemon=True)

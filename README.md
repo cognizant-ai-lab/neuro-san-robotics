@@ -596,8 +596,9 @@ python scripts/talk_driver.py tests/scenarios/*.json                  # against 
 
 Locally, scenario turns write to the agent's memory store like any other conversation.
 
-Reaction times measure the **end** of speech, not the start: the app emits `update_speech`
-only after TTS has finished speaking the reply, so longer answers report slower reactions.
+Reaction times measure the robot's **first spoken word** (`speech_audio_started`) when it has a
+speaker. Without one (simulation, CI) they fall back to the **end** of speech, because the app emits
+`update_speech` only after TTS has finished. Each result line says which one it measured.
 
 ---
 

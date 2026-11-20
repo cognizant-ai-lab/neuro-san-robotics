@@ -276,6 +276,10 @@ class FakeAplay:
         self.returncode = self._exit_code
         return self.returncode
 
+    def communicate(self, input=None, timeout=None):
+        self.wait()
+        return None, None
+
     def terminate(self):
         self.terminated = True
         self.returncode = -15
@@ -364,3 +368,28 @@ class PiperStaysLoadedTests(unittest.TestCase):
     def test_an_aplay_failure_surfaces(self):
         with self.assertRaises(subprocess.CalledProcessError):
             self.speak(aplay_exit=1)
+
+    def test_listeners_hear_when_the_first_audio_reaches_aplay(self):
+        heard = []
+        tts_go2.set_audio_started_listener(lambda: heard.append(self.aplays[0].stdin.flushed))
+        self.addCleanup(tts_go2.set_audio_started_listener, None)
+        self.speak()
+        self.assertEqual(heard, [b""], "fire once, right before the first sentence is written")
+
+
+class AudioStartedListenerTests(unittest.TestCase):
+    def test_subprocess_engines_report_audio_when_playback_starts(self):
+        heard = []
+        tts_go2.set_audio_started_listener(lambda: heard.append(True))
+        self.addCleanup(tts_go2.set_audio_started_listener, None)
+        with patch.object(tts_go2.subprocess, "Popen", return_value=FakeAplay()):
+            tts_go2._run_playback(["espeak-ng", "hi"])
+        self.assertEqual(heard, [True])
+
+    def test_a_failing_listener_does_not_stop_speech(self):
+        def broken():
+            raise RuntimeError("socket gone")
+        tts_go2.set_audio_started_listener(broken)
+        self.addCleanup(tts_go2.set_audio_started_listener, None)
+        with patch.object(tts_go2.subprocess, "Popen", return_value=FakeAplay()):
+            tts_go2._run_playback(["espeak-ng", "hi"])
