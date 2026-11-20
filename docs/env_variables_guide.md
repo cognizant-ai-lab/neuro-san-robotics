@@ -544,25 +544,18 @@ voice's own config, so mixing tiers is safe.
 `~/piper_models/` on the robot is `/home/unitree/piper_models` and on a laptop
 is under your own home directory, so the same setting works in both places.
 
-#### Holding audio back to avoid mid-answer gaps
+#### Piper synthesis speed
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `GO2_PIPER_PREBUFFER_S` | `0` | Seconds of synthesised audio to hold before playback starts. Invalid or negative values mean `0` |
-
-Each sentence plays as soon as Piper has made it. If a later sentence takes
-longer to synthesise than the one before it takes to play, the robot falls
-silent mid-answer. A hold-back gives synthesis a head start: nothing plays
-until this much audio exists (or the whole answer is done), then playback
-streams as usual. It adds up to that many seconds to the time to first word,
-so raise it only as far as the logs say is needed.
+Piper synthesises the next sentence while the current one plays. A
+mid-answer gap only happens if a sentence takes longer to make than the one
+before it takes to play.
 
 Every answer logs one line per sentence and one summary, which show whether
 synthesis keeps up (`rtf` above 1 means slower than real time):
 
 ```text
 GO2_TTS: Piper sentence 1: synth 2.10s, audio 1.40s, rtf 1.50
-GO2_TTS: Piper answer: 3 sentences, synth 4.80s, audio 5.20s, worst rtf 1.50, prebuffer 0.00s
+GO2_TTS: Piper answer: 3 sentences, synth 4.80s, audio 5.20s, worst rtf 1.50
 ```
 
 #### Checking speech latency
