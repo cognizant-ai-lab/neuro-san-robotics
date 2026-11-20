@@ -384,6 +384,98 @@ class PiperStaysLoadedTests(unittest.TestCase):
         self.assertEqual(heard, [{"first_sentence_phonemes": 3}], "b'one' -> 3 phonemes")
 
 
+class PiperSynthesisTimingTests(unittest.TestCase):
+    """
+    A sentence that takes longer to synthesise than the previous one takes to
+    play leaves the robot silent mid-answer (#17). Each sentence's synthesis
+    speed is logged, and GO2_PIPER_PREBUFFER_S can hold audio back so slow
+    sentences have a head start (#19).
+    """
+
+    RATE = 1000  # samples/s, so one second of 16-bit mono audio is 2000 bytes
+
+    def setUp(self):
+        self.now = 0.0
+        for patcher in (
+            patch.object(tts_go2, "_piper_sample_rate", return_value=self.RATE),
+            patch.object(tts_go2, "_set_alsa_volume"),
+            patch.object(tts_go2.time, "monotonic", side_effect=lambda: self.now),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.aplay = FakeAplay()
+
+    def speak(self, chunks, synth_s=(), prebuffer=None, before_chunk=None):
+        """Speak `chunks`; chunk i takes synth_s[i] seconds of (fake) synthesis."""
+        def tick(index):
+            if index < len(synth_s):
+                self.now += synth_s[index]
+            if before_chunk:
+                before_chunk(index)
+        env = {} if prebuffer is None else {"GO2_PIPER_PREBUFFER_S": prebuffer}
+        with (
+            patch.dict(tts_go2.os.environ, env),
+            patch.object(tts_go2, "_PIPER_VOICE", FakeVoice(chunks, before_chunk=tick)),
+            patch.object(tts_go2.subprocess, "Popen", return_value=self.aplay),
+            self.assertLogs(level="INFO") as logs,
+        ):
+            tts_go2._linux_say_via_piper("text", alsa_device="plughw:1,0")
+        return [line for line in logs.output if "GO2_TTS: Piper " in line]
+
+    def record_writes(self):
+        """Note how many bytes aplay had been given before each chunk was synthesised."""
+        seen = []
+        return seen, lambda index: seen.append(len(self.aplay.stdin.flushed))
+
+    def test_each_sentence_logs_its_audio_duration_and_real_time_factor(self):
+        lines = self.speak([b"\0" * 2000, b"\0" * 1000], synth_s=[0.5, 1.0])
+        sentences = [line for line in lines if "Piper sentence" in line]
+        self.assertEqual(len(sentences), 2)
+        self.assertIn("sentence 0: synth 0.50s, audio 1.00s, rtf 0.50", sentences[0])
+        self.assertIn("sentence 1: synth 1.00s, audio 0.50s, rtf 2.00", sentences[1])
+        answer = [line for line in lines if "Piper answer" in line]
+        self.assertEqual(len(answer), 1)
+        self.assertIn("2 sentences, synth 1.50s, audio 1.50s, worst rtf 2.00, prebuffer 0.00s", answer[0])
+
+    def test_without_hold_back_each_sentence_is_written_as_soon_as_it_exists(self):
+        for prebuffer in (None, "0", "soon", "-1"):
+            with self.subTest(prebuffer=prebuffer):
+                self.aplay = FakeAplay()
+                seen, before = self.record_writes()
+                heard = []
+                tts_go2.set_audio_started_listener(lambda **d: heard.append((len(self.aplay.stdin.flushed), d)))
+                self.addCleanup(tts_go2.set_audio_started_listener, None)
+                self.speak([b"ab", b"cd", b"ef"], prebuffer=prebuffer, before_chunk=before)
+                self.assertEqual(seen, [0, 2, 4])
+                self.assertEqual(self.aplay.stdin.flushed, b"abcdef")
+                self.assertEqual(heard, [(0, {"first_sentence_phonemes": 2})])
+
+    def test_hold_back_writes_nothing_until_enough_audio_is_held(self):
+        seen, before = self.record_writes()
+        heard = []
+        tts_go2.set_audio_started_listener(lambda **d: heard.append((len(self.aplay.stdin.flushed), d)))
+        self.addCleanup(tts_go2.set_audio_started_listener, None)
+        half_second = b"\0" * 1000
+        self.speak([half_second] * 4, prebuffer="1.0", before_chunk=before)
+        self.assertEqual(seen, [0, 0, 2000, 3000], "first write once 1.0 s is held, then stream")
+        self.assertEqual(len(self.aplay.stdin.flushed), 4000)
+        self.assertEqual(heard, [(0, {"first_sentence_phonemes": 1000})],
+                         "audio-started fires once, at the first write, about the first sentence")
+
+    def test_an_answer_shorter_than_the_hold_back_plays_once_synthesis_ends(self):
+        self.speak([b"ab", b"cd"], prebuffer="1.0")
+        self.assertEqual(self.aplay.stdin.flushed, b"abcd")
+        self.assertTrue(self.aplay.stdin.closed)
+
+    def test_a_barge_in_during_hold_back_plays_nothing(self):
+        def barge_in(index):
+            if index == 1:
+                tts_go2._PLAYBACK.cancel()
+        with self.assertRaises(tts_go2.SpeechInterrupted):
+            self.speak([b"ab", b"cd"], prebuffer="1.0", before_chunk=barge_in)
+        self.assertEqual(self.aplay.stdin.flushed, b"")
+
+
 class AudioStartedListenerTests(unittest.TestCase):
     def test_subprocess_engines_report_audio_when_playback_starts(self):
         heard = []
