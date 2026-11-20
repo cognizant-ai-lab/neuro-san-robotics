@@ -220,3 +220,20 @@ unitree_sdk2_python/
 
 # local set env
 setmyenv.sh
+
+# Microsoft azure related local packages
+packages.microsoft.gpg
+
+# LiDAR check snapshots. Default to ~/lidar_checks, but NAV_LIDAR_CHECK_DIR
+# can point them inside the repo.
+lidar_checks/
+lidar-*.png
+
+# scripts/tts_latency_check.py output
+tts_check_heard.wav
+
+# local db
+nss_local.db
+
+# local memory
+:memory:.ses

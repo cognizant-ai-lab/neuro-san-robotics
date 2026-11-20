@@ -39,6 +39,8 @@ from scripts import setup_tls_certs as tls_certs
 from apps.conscious_assistant.realtime_transcription import request_realtime_session
 from apps.conscious_assistant.robot_identity import robot_name
 from apps.conscious_assistant.scene_observer import SceneObserver
+from coded_tools.unigo2 import local_stt
+from coded_tools.unigo2 import openai_provider
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 from coded_tools.unigo2.agent_events import queue_agent_event
 
@@ -347,13 +349,19 @@ def _normalize_for_echo(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9\s]", " ", text.lower()).split())
 
 
-def is_self_echo(transcript: str) -> bool:
+def is_self_echo(transcript: str, captured_ago: float = 0.0) -> bool:
     """
     Return whether a transcript is the robot hearing its own voice.
 
     Only transcripts captured while the robot was speaking (plus a short tail
     for room latency) are candidates, so ordinary conversation is never
     suppressed just because it repeats a word the robot happened to use.
+
+    `captured_ago` is how long before now the audio was heard, in seconds. It
+    matters because a recogniser running on the robot takes seconds to return,
+    by which time the robot has stopped speaking and arrival time says nothing
+    about whether this was echo. The hosted recogniser answers while the audio
+    is still streaming, so it leaves this at zero and behaves as it always did.
     """
     with _speech_state_lock:
         spoken = _active_speech_text
@@ -362,7 +370,9 @@ def is_self_echo(transcript: str) -> bool:
 
     if not spoken:
         return False
-    if not speaking and time.monotonic() - ended_at > SELF_ECHO_TAIL_SECONDS:
+    # Judge against when the words were said, not when the transcript landed.
+    heard_at = time.monotonic() - max(0.0, captured_ago)
+    if not speaking and heard_at - ended_at > SELF_ECHO_TAIL_SECONDS:
         return False
 
     heard_words = _normalize_for_echo(transcript).split()
@@ -601,6 +611,10 @@ def enqueue_speech(
     )
 
 
+# Load the local recogniser now if it is the configured one, so the first press
+# of the mic button is not waiting on a model load.
+local_stt.warm_in_background()
+
 # Start speech worker thread
 speech_thread = threading.Thread(target=speech_worker, daemon=True)
 speech_thread.start()
@@ -634,10 +648,12 @@ def transcribe_audio():
     Expects a multipart/form-data POST with an 'audio' file.
     Returns JSON with 'text' field containing the transcription.
     """
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if not openai_api_key:
+    # A site running GO2_STT_ENGINE="local" has no hosted key by design.
+    if local_stt.engine() != "local" and not openai_provider.realtime_api_key():
         return jsonify({
-            "error": "OpenAI API key not configured. Set OPENAI_API_KEY env var."
+            "error": "Speech API key not configured. Set OPENAI_API_KEY, or "
+                     "AZURE_OPENAI_API_KEY when running against Azure. "
+                     'Or set GO2_STT_ENGINE="local" to transcribe on the robot.'
         }), 503
 
     if "audio" not in request.files:
@@ -679,13 +695,20 @@ def transcribe_audio():
         audio_file.save(temp_file.name)
         temp_file.close()
 
+        # GO2_STT_ENGINE="local" skips the hosted call outright. A site whose
+        # region has no whisper deployment wants that: on "auto" every press
+        # would otherwise wait out a doomed request before falling back.
+        if local_stt.engine() == "local":
+            return jsonify({"text": local_stt.transcribe(temp_file.name)})
+
         try:
-            from openai import OpenAI
-            client = OpenAI(api_key=openai_api_key)
+            client = openai_provider.create_client()
 
             with open(temp_file.name, "rb") as f:
                 transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
+                    model=openai_provider.deployment_for(
+                        "GO2_AZURE_TRANSCRIBE_DEPLOYMENT", "whisper-1"
+                    ),
                     file=f,
                     language="en"  # Optimize for English
                 )
@@ -693,6 +716,15 @@ def transcribe_audio():
             return jsonify({"text": transcript.text})
 
         except Exception:
+            # On "auto", a hosted failure is recoverable if a local recogniser
+            # is installed. Naming "openai" explicitly means the caller wants
+            # the failure, so that path falls through to the handler below.
+            if local_stt.engine() == "auto" and local_stt.available():
+                logging.warning("Hosted transcription failed; using local Whisper")
+                try:
+                    return jsonify({"text": local_stt.transcribe(temp_file.name)})
+                except Exception:
+                    logging.exception("Local transcription failed too")
             # Keep the traceback on the robot's own log. The browser is a
             # public surface on the robot's network, so it only learns that
             # the call failed, never which host, path or key was involved.
@@ -707,21 +739,38 @@ def transcribe_audio():
                 logging.exception("Failed to delete transcription temp file")
 
 
+@app.route("/api/speech-config")
+def speech_config():
+    """
+    Tell the browser how to listen before it opens a microphone.
+
+    Without this the browser would negotiate a WebRTC session against a
+    recogniser the deployment may not have, wait for it to fail, and only then
+    consider a local fallback -- with the microphone already live.
+    """
+    return jsonify({
+        "ambient_mode": local_stt.ambient_mode(
+            bool(openai_provider.realtime_api_key())
+        ),
+    })
+
+
 @app.route("/api/realtime/transcription-token", methods=["POST"])
 def realtime_transcription_token():
     """Mint a short-lived token for a browser transcription WebRTC session."""
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if not openai_api_key:
+    speech_api_key = openai_provider.realtime_api_key()
+    if not speech_api_key:
         return jsonify({
-            "error": "OpenAI API key not configured. Set OPENAI_API_KEY env var."
+            "error": "Speech API key not configured. Set OPENAI_API_KEY, or "
+                     "AZURE_OPENAI_API_KEY when running against Azure."
         }), 503
 
-    model = os.environ.get(
-        "CONSCIOUS_AMBIENT_TRANSCRIPTION_MODEL",
-        "gpt-4o-transcribe",
+    model = openai_provider.deployment_for(
+        "GO2_AZURE_REALTIME_DEPLOYMENT",
+        os.environ.get("CONSCIOUS_AMBIENT_TRANSCRIPTION_MODEL", "gpt-4o-transcribe"),
     )
     try:
-        session = request_realtime_session(openai_api_key, model)
+        session = request_realtime_session(speech_api_key, model)
     except OSError:
         logging.exception("Could not reach realtime transcription service")
         return jsonify({"error": "Realtime transcription service is unavailable"}), 502
@@ -741,9 +790,13 @@ def realtime_transcription_token():
         "Realtime transcription session created (request_id=%s)",
         session.request_id or "unavailable",
     )
+    # The browser posts its WebRTC offer to whichever provider minted the
+    # credential. Sent as a header so the credential body is forwarded exactly
+    # as it arrived, rather than being parsed and re-serialised here.
     return session.payload, session.status, {
         "Content-Type": session.content_type or "application/json",
         "Cache-Control": "no-store",
+        "X-Realtime-Calls-Url": openai_provider.realtime_urls()["calls"],
     }
 
 
@@ -831,7 +884,15 @@ def handle_ambient_transcript(json, *_):
     if not transcript:
         return
 
-    if is_self_echo(transcript):
+    # Sent as an age rather than a timestamp so the browser's clock and the
+    # robot's never have to agree. Absent on the hosted path, which answers
+    # fast enough that arrival time is a good enough proxy.
+    try:
+        captured_ago = max(0.0, float((json or {}).get("captured_ms_ago", 0)) / 1000.0)
+    except (TypeError, ValueError):
+        captured_ago = 0.0
+
+    if is_self_echo(transcript, captured_ago):
         logging.info("Ignoring self-echo transcript: %s", transcript[:80])
         duck_speech(False)
         return

@@ -87,11 +87,46 @@ def host_ip() -> str | None:
     return (os.environ.get("ROBOT_HOST_IP") or "").strip() or detect_host_ip()
 
 
-def build_sans(ip: str | None = None, extra: list[str] | None = None) -> list[str]:
+# A robot that moves between a handful of networks should accumulate their
+# addresses rather than trade one for the next. Bounded so that a network
+# handing out a fresh lease every day cannot grow the cert without limit; the
+# oldest addresses fall off the end first.
+MAX_REMEMBERED_IPS = 12
+
+
+def _cap_ips(sans: list[str], limit: int = MAX_REMEMBERED_IPS) -> list[str]:
+    """Keep every name but only the first `limit` addresses, in order."""
+    kept: list[str] = []
+    addresses = 0
+    for san in sans:
+        if san.startswith("IP:"):
+            if addresses >= limit:
+                continue
+            addresses += 1
+        kept.append(san)
+    return kept
+
+
+def build_sans(
+    ip: str | None = None,
+    extra: list[str] | None = None,
+    include_existing: bool = True,
+) -> list[str]:
     """Assemble the SAN list, most stable name first.
 
-    The mDNS name leads because it survives an address change; the IP is a
+    The mDNS name leads because it survives an address change; an IP is a
     convenience that goes stale. Duplicates are dropped, order preserved.
+
+    Two addresses are covered rather than one: whatever ROBOT_HOST_IP says, and
+    wherever this host actually is right now. They differ whenever the robot
+    moved after setmyenv.sh was sourced, and covering only the configured one
+    produced a cert for an address the robot no longer had -- while
+    cert_status() compared against that same stale value and reported the cert
+    fine.
+
+    Addresses already in the cert are carried forward, so a robot that moves
+    between a few known networks ends up with a cert covering all of them and
+    stops regenerating. Pass include_existing=False to start over.
     """
     if ip is None:
         ip = host_ip()
@@ -101,8 +136,11 @@ def build_sans(ip: str | None = None, extra: list[str] | None = None) -> list[st
 
     hostname = socket.gethostname()
     sans = [f"DNS:{hostname}.local", f"DNS:{hostname}", "DNS:localhost"]
-    if ip:
-        sans.append(f"IP:{ip}")
+
+    # Current addresses first, so they survive the cap when older ones do not.
+    for address in (ip, detect_host_ip()):
+        if address:
+            sans.append(f"IP:{address}")
     sans.append("IP:127.0.0.1")
 
     for item in extra:
@@ -115,7 +153,12 @@ def build_sans(ip: str | None = None, extra: list[str] | None = None) -> list[st
             except ValueError:
                 sans.append(f"DNS:{item}")
 
-    return list(dict.fromkeys(sans))
+    if include_existing:
+        known = read_cert_sans()
+        sans.extend(sorted(san for san in known if san.startswith("DNS:")))
+        sans.extend(sorted(san for san in known if san.startswith("IP:")))
+
+    return _cap_ips(list(dict.fromkeys(sans)))
 
 
 # ---------------------------------------------------------------------
@@ -289,6 +332,10 @@ def main() -> int:
         "--check", action="store_true",
         help="Report status, exit non-zero if a refresh is needed; change nothing",
     )
+    parser.add_argument(
+        "--fresh", action="store_true",
+        help="Drop addresses remembered from previous networks and start over",
+    )
     args = parser.parse_args()
 
     ip = args.ip or host_ip()
@@ -299,7 +346,7 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    sans = build_sans(ip=ip, extra=args.san)
+    sans = build_sans(ip=ip, extra=args.san, include_existing=not args.fresh)
     print(f"cert dir : {cert_dir()}")
     print(f"host ip  : {ip or '(none)'}")
     print(f"SANs     : {', '.join(sans)}")

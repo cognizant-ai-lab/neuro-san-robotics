@@ -320,6 +320,53 @@ The conscious assistant's native event and periodic execution require
 `neuro-san==0.6.76` or later. Older releases can acknowledge an event without
 continuing the agent work, so the application refuses to start with them.
 
+### Environment variables
+
+`.env.example` is the template you copy to `setmyenv.sh`. It is deliberately
+short; every variable in it, and the reasoning behind it, is documented in
+[docs/env_variables_guide.md](docs/env_variables_guide.md).
+
+```shell
+cp .env.example setmyenv.sh
+# edit setmyenv.sh, add your API key, then:
+source setmyenv.sh
+```
+
+Upgrading an existing robot? Nothing above the "new in this version" line in
+the template has changed, and every setting below it defaults to how the robot
+already behaves.
+
+### Install the offline TTS voice
+
+`requirements.txt` installs the Piper binary but not the voice it speaks with,
+and the voice is a ~114 MB download rather than a Python package, so it has to
+be fetched separately:
+
+```shell
+python scripts/install_piper_voice.py
+
+# Report what is installed without downloading anything
+python scripts/install_piper_voice.py --check
+```
+
+Piper is what the robot speaks with whenever the hosted text-to-speech API is
+unreachable, unconfigured, or not offered in the deployment's region. Skip this
+and that fallback drops through to `espeak-ng`, which is intelligible but
+markedly worse. `setmyenv.sh` warns at startup while the voice is missing.
+
+Sites with no hosted TTS at all should also set `GO2_TTS_ENGINE="piper"`, so
+the robot speaks immediately instead of waiting out a doomed API call before
+every utterance.
+
+To measure how quickly the robot starts speaking and whether playback stays
+smooth, run `scripts/tts_latency_check.py`; see
+[docs/env_variables_guide.md](docs/env_variables_guide.md#checking-speech-latency).
+
+The default voice is `en_GB-cori-high`. To use another from the
+[Piper voice samples](https://rhasspy.github.io/piper-samples/) page, set
+`GO2_PIPER_VOICE` in `setmyenv.sh` and re-run the installer; see
+[docs/env_variables_guide.md](docs/env_variables_guide.md#piper-the-offline-voice).
+
 ### Set up Unitree's SDK
 
 See https://github.com/unitreerobotics/unitree_sdk2_python for more details.

@@ -9,7 +9,7 @@ TTS Engine Priority (configurable via GO2_TTS_ENGINE env var):
 
 Linux / Unitree Go2:
 - OpenAI TTS: True streaming via chunk transfer encoding (recommended)
-- Piper TTS: Neural, offline, British female voice - en_GB-cori-high
+- Piper TTS: Neural, offline. Voice from GO2_PIPER_VOICE (default en_GB-cori-high)
 - espeak-ng: Fallback via ALSA
 
 macOS:
@@ -58,6 +58,18 @@ from typing import Any, Callable, Dict, List, Optional
 
 from neuro_san.interfaces.coded_tool import CodedTool
 
+# neuro-san loads this file as "unigo2.tts_go2" with coded_tools/ as the root,
+# while the Flask app imports it as "coded_tools.unigo2.tts_go2". Both spellings
+# have to work, and the CLI at the bottom of this file runs it as a script.
+try:
+    from coded_tools.unigo2 import openai_provider
+    from coded_tools.unigo2 import piper_voice
+    from coded_tools.unigo2 import tts_engines
+except ImportError:  # pragma: no cover - depends on which root is on sys.path
+    from unigo2 import openai_provider
+    from unigo2 import piper_voice
+    from unigo2 import tts_engines
+
 
 # ---------------------------------------------------------------------
 # Configuration (override via env vars if needed)
@@ -79,16 +91,10 @@ OPENAI_VOLUME_GAIN = float(os.environ.get("GO2_OPENAI_VOLUME_GAIN", "3.0"))
 OPENAI_PCM_RATE = 24_000
 ONBOARD_PCM_RATE = 48_000
 
-# Piper TTS configuration
-PIPER_MODEL = os.environ.get(
-    "GO2_PIPER_MODEL",
-    "/home/unitree/piper_models/en_GB-cori-high.onnx",
-)
-
-PIPER_CONFIG = os.environ.get(
-    "GO2_PIPER_CONFIG",
-    "/home/unitree/piper_models/en_GB-cori-high.onnx.json",
-)
+# Piper TTS configuration. The voice, its paths and its sample rate are all
+# resolved by piper_voice so the installer and env scripts agree with us.
+PIPER_MODEL = piper_voice.model_path()
+PIPER_CONFIG = piper_voice.config_path()
 
 ONBOARD_ALSA_DEVICE = os.environ.get(
     "GO2_ONBOARD_TTS_DEVICE",
@@ -352,8 +358,28 @@ def _run_playback(
 # OpenAI TTS with True Streaming
 # ---------------------------------------------------------------------
 
+def _style_kwargs(instructions: str) -> Dict[str, Any]:
+    """
+    Return the `instructions` kwarg only when there is something to say with it.
+
+    Style guidance is a gpt-4o-mini-tts feature. The older tts / tts-hd
+    deployments -- which in some Azure regions are the only text-to-speech
+    models on offer -- reject the parameter outright. Sending it unconditionally
+    would fail every request there, and because the engine defaults to "auto"
+    that failure is swallowed and the robot drops to espeak with only a warning.
+    Setting GO2_OPENAI_INSTRUCTIONS="" makes this call tts-compatible.
+    """
+    cleaned = (instructions or "").strip()
+    return {"instructions": cleaned} if cleaned else {}
+
+
 def _is_openai_available() -> bool:
-    """Check if OpenAI TTS is available (API key set)."""
+    """Check if hosted TTS is available (credentials for the active provider)."""
+    if openai_provider.use_azure():
+        return bool(
+            os.environ.get("AZURE_OPENAI_ENDPOINT")
+            and (os.environ.get("AZURE_OPENAI_API_KEY") or os.environ.get("AZURE_OPENAI_AD_TOKEN"))
+        )
     return bool(os.environ.get("OPENAI_API_KEY"))
 
 
@@ -567,12 +593,11 @@ def _openai_say_streaming(
         alsa_device: ALSA device for Linux (default from env var)
         volume: Volume level 0.0-1.0 (default 1.0)
     """
-    try:
-        from openai import OpenAI
-    except ImportError:
-        raise RuntimeError("openai package not installed. Run: pip install openai")
-
-    client = OpenAI(timeout=OPENAI_TIMEOUT_SECONDS, max_retries=0)
+    client = openai_provider.create_client(
+        timeout=OPENAI_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    model = openai_provider.deployment_for("GO2_AZURE_TTS_DEPLOYMENT", model)
     system = platform.system()
     device = alsa_device or _RESOLVED_ALSA_DEVICE
     generation = _PLAYBACK.generation
@@ -597,8 +622,8 @@ def _openai_say_streaming(
         model=model,
         voice=voice,
         input=text,
-        instructions=instructions,
         response_format="pcm",
+        **_style_kwargs(instructions),
     ) as response:
         if system == "Linux":
             output_rate = ONBOARD_PCM_RATE if _is_onboard_audio_device(device) else OPENAI_PCM_RATE
@@ -740,12 +765,12 @@ async def _openai_say_streaming_async(
 
     Uses the async OpenAI client for better integration with async code.
     """
-    try:
-        from openai import AsyncOpenAI
-    except ImportError:
-        raise RuntimeError("openai package not installed. Run: pip install openai")
-
-    client = AsyncOpenAI(timeout=OPENAI_TIMEOUT_SECONDS, max_retries=0)
+    client = openai_provider.create_client(
+        want_async=True,
+        timeout=OPENAI_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    model = openai_provider.deployment_for("GO2_AZURE_TTS_DEPLOYMENT", model)
     system = platform.system()
     device = alsa_device or _RESOLVED_ALSA_DEVICE
     generation = _PLAYBACK.generation
@@ -768,8 +793,8 @@ async def _openai_say_streaming_async(
         model=model,
         voice=voice,
         input=text,
-        instructions=instructions,
         response_format="pcm",
+        **_style_kwargs(instructions),
     ) as response:
         if system == "Linux":
             output_rate = ONBOARD_PCM_RATE if _is_onboard_audio_device(device) else OPENAI_PCM_RATE
@@ -907,6 +932,11 @@ async def _openai_say_streaming_async(
             raise RuntimeError(f"OpenAI TTS not supported on OS={system}")
 
     logging.info("GO2_TTS: OpenAI async streaming complete")
+
+
+def _piper_sample_rate() -> int:
+    """Rate of the PCM Piper emits, read from the installed voice's config."""
+    return piper_voice.sample_rate(PIPER_CONFIG)
 
 
 def _is_piper_available() -> bool:
@@ -1286,7 +1316,7 @@ def _linux_say_via_piper(
     aplay_cmd = [
         "aplay",
         "-D", device,
-        "-r", "22050",
+        "-r", str(_piper_sample_rate()),
         "-f", "S16_LE",
         "-c", "1",  # Mono output (Piper outputs mono audio)
         "-t", "raw",
@@ -1294,28 +1324,47 @@ def _linux_say_via_piper(
 
     logging.info("GO2_TTS: Piper -> aplay (%s) at %d%% volume", device, volume_percent)
 
-    # IMPORTANT: newline + communicate()
-    piper_proc = subprocess.Popen(
-        piper_cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    piper_input = (text.strip() + "\n").encode("utf-8")
-
-    stdout, stderr = piper_proc.communicate(input=piper_input)
+    # Piper synthesises sentence by sentence and, with --output-raw, flushes
+    # each sentence's audio to stdout as soon as it exists. Handing that pipe
+    # straight to aplay means the first sentence plays while the rest is still
+    # being made: the same shape as the hosted streaming path, with no text
+    # chunking on our side and Piper's own prosody left alone. Buffering the
+    # whole reply first, as this used to, kept the robot silent for the entire
+    # synthesis.
+    #
+    # stderr goes to a file rather than a pipe: nobody is reading it while we
+    # block on aplay, and a full pipe would stall Piper.
+    with tempfile.TemporaryFile() as piper_stderr:
+        piper_proc = subprocess.Popen(  # nosec B603 - fixed command, text via stdin
+            piper_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=piper_stderr,
+        )
+        try:
+            # One utterance is far smaller than the pipe buffer, so this write
+            # cannot block. Closing stdin is what tells Piper the text is done.
+            piper_proc.stdin.write((text.strip() + "\n").encode("utf-8"))
+            piper_proc.stdin.close()
+            _run_playback(aplay_cmd, stdin=piper_proc.stdout, check=True)
+        finally:
+            # Drop our end of the pipe so Piper cannot block on a write once
+            # aplay is gone. After a normal run Piper has already exited; if it
+            # is still going, aplay was killed by a barge-in and Piper is in the
+            # middle of a sentence it would only abandon on its next write. On
+            # a slow CPU that is seconds of the speech worker sitting here
+            # after the user has already interrupted, so end it now.
+            piper_proc.stdout.close()
+            if piper_proc.poll() is None:
+                piper_proc.terminate()
+            piper_proc.wait()
+            piper_stderr.seek(0)
+            stderr = piper_stderr.read()
 
     if piper_proc.returncode != 0:
         raise RuntimeError(
             f"Piper failed (rc={piper_proc.returncode}): {stderr.decode(errors='ignore')}"
         )
-
-    _run_playback(
-        aplay_cmd,
-        input=stdout,
-        check=True,
-    )
 
 
 # ---------------------------------------------------------------------
@@ -1392,7 +1441,7 @@ def _convert_text_to_audio_piper(text: str) -> bytes:
         text: Text to convert (should already be sanitized)
 
     Returns:
-        Raw audio bytes (22050 Hz, 16-bit signed LE, mono)
+        Raw audio bytes (16-bit signed LE, mono, at the voice's sample rate)
 
     Raises:
         RuntimeError: If Piper is not available or conversion fails
@@ -1437,7 +1486,7 @@ def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None
     Play raw audio bytes via aplay.
 
     Args:
-        audio_data: Raw audio bytes (22050 Hz, 16-bit signed LE, mono)
+        audio_data: Raw audio bytes (16-bit signed LE, mono, at the voice's sample rate)
         alsa_device: ALSA device to use (default from env var)
     """
     device = alsa_device or _RESOLVED_ALSA_DEVICE
@@ -1445,7 +1494,7 @@ def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None
     aplay_cmd = [
         "aplay",
         "-D", device,
-        "-r", "22050",
+        "-r", str(_piper_sample_rate()),
         "-f", "S16_LE",
         "-c", "1",
         "-t", "raw",
@@ -1457,6 +1506,58 @@ def _play_audio_bytes(audio_data: bytes, alsa_device: str | None = None) -> None
 # ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
+
+
+def _speak_via_piper(text: str, *, volume: float = 1.0,
+                     alsa_device: str | None = None, **_unused: Any) -> None:
+    """Adapter so the registry can call Piper with a uniform signature."""
+    _linux_say_via_piper(text, volume=volume, alsa_device=alsa_device)
+
+
+def _speak_via_espeak(text: str, *, rate: int = 150, volume: float = 1.0,
+                      voice: str = "en-gb+f3", alsa_device: str | None = None,
+                      **_unused: Any) -> None:
+    """Adapter so the registry can call espeak-ng with a uniform signature."""
+    _linux_say_via_espeak(
+        text, rate=rate, volume=volume, voice=voice, alsa_device=alsa_device,
+    )
+
+
+def _speak_via_mac_say(text: str, *, rate: int = 150, **_unused: Any) -> None:
+    """Adapter so the registry can call macOS `say` with a uniform signature."""
+    _mac_say_via_subprocess(text, rate)
+
+
+def _register_offline_engines() -> None:
+    """
+    Put the offline engines in the registry, best-sounding first.
+
+    Adding another -- pocket-tts, say -- is one more call here plus its two
+    functions, rather than an edit to the availability gates, the Linux chain
+    and the fallback gate all at once, which is what it used to take.
+    """
+    register = tts_engines.REGISTRY.register
+    register(tts_engines.TtsEngine(
+        name="piper",
+        available=_is_piper_available,
+        speak=_speak_via_piper,
+        description="Piper neural voice, offline (needs scripts/install_piper_voice.py)",
+    ))
+    register(tts_engines.TtsEngine(
+        name="say",
+        available=lambda: platform.system() == "Darwin" and _has("say"),
+        speak=_speak_via_mac_say,
+        description="macOS built-in `say`",
+    ))
+    register(tts_engines.TtsEngine(
+        name="espeak",
+        available=lambda: _has("espeak-ng"),
+        speak=_speak_via_espeak,
+        description="espeak-ng, always-available last resort",
+    ))
+
+
+_register_offline_engines()
 
 
 def _say_single_chunk(
@@ -1471,31 +1572,21 @@ def _say_single_chunk(
 
     This function handles the actual TTS for one chunk of text.
     It does NOT sanitize text - caller should sanitize before calling.
+
+    Which engine speaks, and in what order they are tried, comes from the
+    registry rather than from a chain written out here; see tts_engines.py.
     """
-    system = platform.system()
-
-    if system == "Linux":
-        try:
-            _linux_say_via_piper(text, volume=volume, alsa_device=alsa_device)
-            return
-        except SpeechInterrupted:
-            raise
-        except Exception:
-            logging.exception("Piper failed, falling back to espeak-ng")
-            _linux_say_via_espeak(
-                text,
-                rate=rate,
-                volume=volume,
-                voice=voice,
-                alsa_device=alsa_device,
-            )
-            return
-
-    if system == "Darwin":
-        _mac_say_via_subprocess(text, rate)
-        return
-
-    raise RuntimeError(f"TTS not supported on OS={system}")
+    # SpeechInterrupted is a barge-in, not an engine fault: the registry must
+    # re-raise it rather than try the next engine, which would restart the
+    # utterance the user just talked over.
+    tts_engines.REGISTRY.speak(
+        text,
+        passthrough=(SpeechInterrupted,),
+        rate=rate,
+        volume=volume,
+        voice=voice,
+        alsa_device=alsa_device,
+    )
 
 
 def say_streaming(

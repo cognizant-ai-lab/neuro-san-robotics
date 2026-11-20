@@ -447,7 +447,156 @@
             }
         }
 
+        // --- Local ambient listening -----------------------------------
+        //
+        // Used when the deployment has no hosted realtime recogniser. The
+        // microphone stays open exactly as it does for the hosted path; the
+        // difference is that speech is detected here and each utterance is
+        // posted to /api/transcribe, which falls back to Whisper on the robot.
+        //
+        // Segmented on silence rather than on a timer. An earlier version of
+        // ambient listening posted a recording every five seconds and was
+        // replaced because that was slow and cut words in half, so a fallback
+        // on a clock would undo that change rather than stand in for it.
+        var localAmbient = null;
+        var LOCAL_AMBIENT_SILENCE_MS = 700;   // silence that ends an utterance
+        var LOCAL_AMBIENT_MIN_SPEECH_MS = 250; // ignore coughs and door clicks
+        var LOCAL_AMBIENT_RMS_THRESHOLD = 0.012;
+        // How long after the robot stops to keep ignoring the room, so the tail
+        // of its own utterance and the speaker ringing out are not picked up.
+        var LOCAL_AMBIENT_SPEAK_TAIL_MS = 400;
+
+        function startLocalAmbient(stream) {
+            var context = new (window.AudioContext || window.webkitAudioContext)();
+            var analyser = context.createAnalyser();
+            analyser.fftSize = 1024;
+            context.createMediaStreamSource(stream).connect(analyser);
+            var samples = new Float32Array(analyser.fftSize);
+
+            var state = {
+                context: context, recorder: null, chunks: [],
+                speechStartedAt: 0, lastVoiceAt: 0, stopped: false, timer: null,
+                // Set while the robot is speaking, so an utterance already in
+                // progress is thrown away rather than transcribed.
+                discard: false, mutedUntil: 0,
+            };
+
+            function finishUtterance() {
+                var recorder = state.recorder;
+                state.recorder = null;
+                if (!recorder || recorder.state === 'inactive') { return; }
+                recorder.stop();
+            }
+
+            function beginUtterance() {
+                state.chunks = [];
+                var recorder = new MediaRecorder(stream);
+                recorder.ondataavailable = function(event) {
+                    if (event.data && event.data.size > 0) { state.chunks.push(event.data); }
+                };
+                recorder.onstop = function() {
+                    var spoken = state.lastVoiceAt - state.speechStartedAt;
+                    var blob = new Blob(state.chunks, {type: 'audio/webm'});
+                    var discarded = state.discard;
+                    state.chunks = [];
+                    state.discard = false;
+                    if (!discarded && spoken >= LOCAL_AMBIENT_MIN_SPEECH_MS && blob.size > 1000) {
+                        // lastVoiceAt, not now: transcribing locally takes long
+                        // enough that the server cannot tell from arrival time
+                        // whether this audio was captured while the robot was
+                        // still talking.
+                        transcribeLocalAmbient(blob, state.lastVoiceAt);
+                    }
+                };
+                recorder.start();
+                state.recorder = recorder;
+                state.speechStartedAt = Date.now();
+            }
+
+            state.timer = setInterval(function() {
+                if (state.stopped) { return; }
+
+                // Stand down while the robot talks, and while the mic button
+                // is in use.
+                //
+                // Talking: its own voice is in the room, and transcribing on
+                // the robot is too slow to sort that out afterwards. The
+                // transcript lands seconds later looking like somebody spoke,
+                // so it simply does not listen until the robot has finished.
+                // Interrupting mid-sentence is a hosted-path feature; here it
+                // waits its turn.
+                //
+                // Mic button: both paths post to the same route and the robot
+                // decodes one clip at a time, so an ambient utterance queued
+                // here is one the person is waiting behind. It would also
+                // transcribe the same speech twice.
+                if (isSpeaking || isRecording || isTranscribing) {
+                    if (state.recorder) {
+                        state.discard = true;
+                        finishUtterance();
+                    }
+                    state.mutedUntil = Date.now() + LOCAL_AMBIENT_SPEAK_TAIL_MS;
+                    return;
+                }
+                if (Date.now() < state.mutedUntil) { return; }
+
+                analyser.getFloatTimeDomainData(samples);
+                var sum = 0;
+                for (var i = 0; i < samples.length; i += 1) { sum += samples[i] * samples[i]; }
+                var rms = Math.sqrt(sum / samples.length);
+                var now = Date.now();
+
+                if (rms >= LOCAL_AMBIENT_RMS_THRESHOLD) {
+                    state.lastVoiceAt = now;
+                    if (!state.recorder) { beginUtterance(); }
+                } else if (state.recorder && now - state.lastVoiceAt >= LOCAL_AMBIENT_SILENCE_MS) {
+                    finishUtterance();
+                }
+            }, 50);
+
+            return state;
+        }
+
+        async function transcribeLocalAmbient(blob, capturedAt) {
+            try {
+                var form = new FormData();
+                form.append('audio', blob, 'ambient.webm');
+                var response = await fetch('/api/transcribe', {method: 'POST', body: form});
+                if (!response.ok) {
+                    console.warn('Local ambient transcription failed:', response.status);
+                    return;
+                }
+                var text = ((await response.json()).text || '').trim();
+                // The server applies the same self-echo filter it uses for the
+                // hosted path, but that filter asks "was the robot speaking
+                // when this was heard". Transcribing on the robot takes seconds,
+                // so it is told how old the audio is rather than being left to
+                // assume the transcript just arrived. Sent as an age rather
+                // than a timestamp so the two clocks never have to agree.
+                if (text && socket.connected) {
+                    socket.emit('ambient_transcript', {
+                        data: text,
+                        captured_ms_ago: Math.max(0, Date.now() - capturedAt),
+                    });
+                }
+            } catch (err) {
+                console.warn('Local ambient transcription error:', err);
+            }
+        }
+
+        function stopLocalAmbient() {
+            if (!localAmbient) { return; }
+            localAmbient.stopped = true;
+            if (localAmbient.timer) { clearInterval(localAmbient.timer); }
+            if (localAmbient.recorder && localAmbient.recorder.state !== 'inactive') {
+                localAmbient.recorder.stop();
+            }
+            if (localAmbient.context) { localAmbient.context.close().catch(function() {}); }
+            localAmbient = null;
+        }
+
         function teardownAmbientTransport() {
+            stopLocalAmbient();
             if (ambientDataChannel) {
                 ambientDataChannel.onclose = null;
                 ambientDataChannel.close();
@@ -504,6 +653,31 @@
             ambientStream.getAudioTracks().forEach(function(track) {
                 track.enabled = true;
             });
+
+            // Ask before negotiating: a deployment whose region carries no
+            // realtime recogniser should listen locally rather than open a
+            // WebRTC session that cannot succeed, with the mic already live.
+            var mode = 'realtime';
+            try {
+                var configResponse = await fetch('/api/speech-config');
+                if (configResponse.ok) {
+                    mode = (await configResponse.json()).ambient_mode || 'realtime';
+                }
+            } catch (err) {
+                console.warn('Could not read speech config; assuming realtime:', err);
+            }
+
+            if (mode === 'unavailable') {
+                throw new Error('No speech recogniser is configured for ambient listening');
+            }
+            if (mode === 'local') {
+                console.info('Ambient listening locally; utterances transcribed on the robot');
+                localAmbient = startLocalAmbient(ambientStream);
+                ambientConnecting = false;
+                updateAmbientListeningControl();
+                return;
+            }
+
             ambientPeerConnection = new RTCPeerConnection();
             ambientStream.getTracks().forEach(function(track) {
                 ambientPeerConnection.addTrack(track, ambientStream);
@@ -551,7 +725,13 @@
                     throw new Error('Token creation returned no ephemeral key');
                 }
 
-                response = await fetch('https://api.openai.com/v1/realtime/calls', {
+                // The server tells us which provider minted this credential, so
+                // an Azure-hosted robot offers to its own resource rather than
+                // to api.openai.com. Older responses omit it.
+                var callsUrl = tokenResponse.headers.get('X-Realtime-Calls-Url')
+                    || 'https://api.openai.com/v1/realtime/calls';
+
+                response = await fetch(callsUrl, {
                     method: 'POST',
                     headers: {
                         'Authorization': 'Bearer ' + tokenData.value,
