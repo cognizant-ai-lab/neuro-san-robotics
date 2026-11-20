@@ -627,10 +627,29 @@ Whisper, via `faster-whisper`, the same model family as the hosted `whisper-1`
 it stands in for.
 
 ```shell
-export GO2_STT_MODEL="base"    # tiny, base (default), small, medium
+export GO2_STT_MODEL="tiny"    # tiny (default), base, small, medium
 export GO2_STT_DEVICE="auto"   # auto -> cpu, or "cuda"
 export GO2_STT_LANGUAGE="en"
+export GO2_STT_BEAM_SIZE="1"   # greedy (default); Whisper's own default is 5
 ```
+
+Decoding is greedy and without timestamps. Each clip is one short command, so
+the extra work buys nothing. On the robot's 4-core CPU, Piper-spoken test
+commands took a median of 1.29 s with Whisper's defaults and 1.14 s with these
+settings. The only difference in the text was "two" coming back as "2".
+
+`tiny` is the default because model size is the bigger lever. In live voice
+turns on the robot, `base` took 1.1-1.4 s per clip and `tiny` 0.7-0.9 s. That
+brought the time from end of speech to transcript from 1.3 s to 0.85 s with
+push-to-talk and from 2.0 s to 1.4 s with ambient listening. The cost is
+accuracy at a distance: push-to-talk transcripts stayed clean, while ambient
+listening through the room microphone misheard the odd word, especially names
+("Helles" came back as "hellous"). Set `GO2_STT_MODEL="base"` if accuracy
+matters more than speed. The `.en` variants were no faster.
+
+There is no thread setting: CTranslate2 already uses all 4 of the Orin's
+cores. The `pthread_setaffinity_np` errors in the log come from Piper's
+onnxruntime, not from Whisper, and do not slow transcription.
 
 It defaults to the **CPU**. The Orin already carries YOLO under TensorRT and
 deepface, and on a 16 GB Orin NX memory is the binding constraint rather than

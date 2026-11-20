@@ -20,7 +20,7 @@ import sys
 
 # Matches LOCAL_AMBIENT_SILENCE_MS in templates/index.html: ambient's t0 is the
 # last loud frame, and the browser waits this long before it stops recording.
-AMBIENT_HANGOVER_MS = 700
+AMBIENT_HANGOVER_MS = 500
 
 _LINE = re.compile(r"turn_timing (.*)$")
 

@@ -19,9 +19,10 @@ Environment:
                     local  -- skip the hosted call entirely, which is what a
                               site with no hosted recogniser wants: it avoids
                               a doomed request in front of every utterance
-  GO2_STT_MODEL     whisper size: tiny, base (default), small, medium
+  GO2_STT_MODEL     whisper size: tiny (default), base, small, medium
   GO2_STT_DEVICE    "auto" (default), "cpu" or "cuda"
   GO2_STT_LANGUAGE  language hint, default "en"
+  GO2_STT_BEAM_SIZE beam width, default 1 (greedy)
 """
 
 import logging
@@ -48,8 +49,24 @@ def engine() -> str:
 
 
 def model_size() -> str:
-    """Which Whisper size to run."""
-    return os.environ.get("GO2_STT_MODEL", "").strip() or "base"
+    """
+    Which Whisper size to run. tiny by default: base took 1.1-1.4 s per clip on
+    the robot's CPU against 0.7-0.9 s, and was the one step keeping a voice turn
+    above 1.5 s from end of speech to transcript (#15).
+    """
+    return os.environ.get("GO2_STT_MODEL", "").strip() or "tiny"
+
+
+def beam_size() -> int:
+    """
+    Beam width. Greedy by default: utterances are short single commands, so
+    beam search costs time without changing what comes back.
+    """
+    try:
+        value = int(os.environ.get("GO2_STT_BEAM_SIZE", "").strip())
+    except ValueError:
+        return 1
+    return value if value > 0 else 1
 
 
 def device() -> str:
@@ -149,7 +166,12 @@ def transcribe(audio_path: str, language: Optional[str] = None) -> str:
             logging.info("Local transcription waited %.1fs for the model", waited)
         segments, _info = whisper.transcribe(
             audio_path,
-            language=language or os.environ.get("GO2_STT_LANGUAGE", "en"),
+            language=language or os.environ.get("GO2_STT_LANGUAGE", "").strip() or "en",
+            beam_size=beam_size(),
+            # One short command per clip: no timestamps to align, and no
+            # earlier 30 s window inside the clip whose text could help.
+            without_timestamps=True,
+            condition_on_previous_text=False,
         )
         # The generator is consumed inside the lock: that is where the decoding
         # actually happens, so releasing early would not serialise anything.
