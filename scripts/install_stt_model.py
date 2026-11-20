@@ -31,7 +31,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Pre-fetch the offline speech model")
     parser.add_argument("--model", default=None,
-                        help="whisper size: tiny, base (default), small, medium")
+                        help="whisper size: tiny (default), base, small, medium")
     parser.add_argument("--check", action="store_true",
                         help="report whether the weights are cached, without fetching")
     args = parser.parse_args()

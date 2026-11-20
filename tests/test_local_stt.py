@@ -47,9 +47,10 @@ class ConfigurationTests(unittest.TestCase):
         with patch.dict(os.environ, stt_env(GO2_STT_DEVICE="cuda")):
             self.assertEqual(local_stt.device(), "cuda")
 
-    def test_model_size_defaults_to_base(self):
+    def test_model_size_defaults_to_tiny(self):
+        """base missed 1.5 s end-of-speech + STT on the robot; tiny made it (#15)."""
         with patch.dict(os.environ, stt_env()):
-            self.assertEqual(local_stt.model_size(), "base")
+            self.assertEqual(local_stt.model_size(), "tiny")
         with patch.dict(os.environ, stt_env(GO2_STT_MODEL="small")):
             self.assertEqual(local_stt.model_size(), "small")
 

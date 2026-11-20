@@ -19,7 +19,7 @@ Environment:
                     local  -- skip the hosted call entirely, which is what a
                               site with no hosted recogniser wants: it avoids
                               a doomed request in front of every utterance
-  GO2_STT_MODEL     whisper size: tiny, base (default), small, medium
+  GO2_STT_MODEL     whisper size: tiny (default), base, small, medium
   GO2_STT_DEVICE    "auto" (default), "cpu" or "cuda"
   GO2_STT_LANGUAGE  language hint, default "en"
   GO2_STT_BEAM_SIZE beam width, default 1 (greedy)
@@ -49,8 +49,12 @@ def engine() -> str:
 
 
 def model_size() -> str:
-    """Which Whisper size to run."""
-    return os.environ.get("GO2_STT_MODEL", "").strip() or "base"
+    """
+    Which Whisper size to run. tiny by default: base took 1.1-1.4 s per clip on
+    the robot's CPU against 0.7-0.9 s, and was the one step keeping a voice turn
+    above 1.5 s from end of speech to transcript (#15).
+    """
+    return os.environ.get("GO2_STT_MODEL", "").strip() or "tiny"
 
 
 def beam_size() -> int:
