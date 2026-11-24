@@ -11,7 +11,7 @@ swap that leaves a hard-coded 22050 behind comes out fast and high-pitched.
 
 Environment:
   GO2_PIPER_VOICE   voice name as Piper publishes it, "<lang>-<speaker>-<quality>".
-                    Default "en_GB-cori-high".
+                    Default "en_GB-alan-medium".
   GO2_PIPER_DIR     directory holding the .onnx and .onnx.json. Default ~/piper_models
   GO2_PIPER_MODEL   explicit path to the .onnx; overrides the two above
   GO2_PIPER_CONFIG  explicit path to the .onnx.json; overrides the two above
@@ -22,7 +22,7 @@ import logging
 import os
 from typing import Optional
 
-DEFAULT_VOICE = "en_GB-cori-high"
+DEFAULT_VOICE = "en_GB-alan-medium"
 DEFAULT_DIR = "~/piper_models"
 
 # Every voice the robot has shipped with so far was a 22.05 kHz tier. Used
@@ -39,7 +39,7 @@ def _env(name: str) -> str:
 
 
 def voice_name() -> str:
-    """The configured voice, e.g. "en_GB-cori-high"."""
+    """The configured voice, e.g. "en_GB-alan-medium"."""
     return _env("GO2_PIPER_VOICE") or DEFAULT_VOICE
 
 
@@ -71,7 +71,7 @@ def download_url(name: str, extension: str) -> str:
     if len(parts) != 3 or not all(parts):
         raise ValueError(
             f"Piper voice {name!r} is not of the form <lang>-<speaker>-<quality>, "
-            f"e.g. en_GB-cori-high"
+            f"e.g. en_GB-alan-medium"
         )
     lang, speaker, quality = parts
     family = lang.split("_")[0]

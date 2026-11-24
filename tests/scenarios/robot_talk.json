@@ -1,0 +1,11 @@
+{
+  "name": "robot talk (no movement requests, safe on the real robot)",
+  "turns": [
+    {"say": "What is your name? Answer in one sentence and stay where you are.", "via": "user_input",
+     "expect": {"reply": true}},
+    {"say": "Tell me a short joke. Do not move.", "via": "user_input",
+     "expect": {"reply": true}},
+    {"say": "What is two plus two? Do not move.", "via": "user_input",
+     "expect": {"reply": true}}
+  ]
+}

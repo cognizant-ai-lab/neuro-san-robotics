@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from neuro_san.internals.run_context.langchain.llms.default_llm_factory import DefaultLlmFactory
+
 from apps.conscious_assistant import interface_flask
 from apps.conscious_assistant import realtime_transcription
 from coded_tools.unigo2 import openai_provider
@@ -24,7 +26,8 @@ PROVIDER_VARS = (
     "GO2_AZURE_TTS_DEPLOYMENT", "GO2_AZURE_TRANSCRIBE_DEPLOYMENT",
     "GO2_AZURE_REALTIME_DEPLOYMENT", "AGENT_LLM_CLASS", "AGENT_LLM_MODEL_NAME",
     "AGENT_LLM_MODEL_NAME_LIGHT", "AZURE_OPENAI_DEPLOYMENT_NAME",
-    "AZURE_OPENAI_DEPLOYMENT_NAME_LIGHT",
+    "AZURE_OPENAI_DEPLOYMENT_NAME_LIGHT", "AGENT_LLM_REASONING_EFFORT",
+    "AGENT_LLM_USE_RESPONSES_API",
 )
 
 AZURE_ENV = {
@@ -257,6 +260,26 @@ class AgentLlmConfigTests(unittest.TestCase):
         self.assertEqual(
             config["conscious_agent"], {"class": "openai", "model_name": "gpt-5.2"}
         )
+
+    def test_gpt6_settings_reach_the_azure_chat_model(self):
+        """neuro-san's own azure-openai class drops both; GPT-6 then 400s every tool call."""
+        env = dict(
+            AGENT_LLM_CLASS="langchain_openai.AzureChatOpenAI",
+            AZURE_OPENAI_DEPLOYMENT_NAME="gpt-6.2-sol",
+            OPENAI_API_VERSION="2025-04-01-preview",
+            AGENT_LLM_REASONING_EFFORT="low",
+            AGENT_LLM_USE_RESPONSES_API="true",
+        )
+        config = self.resolve(**env)["conscious_agent"]
+        auth = {"AZURE_OPENAI_ENDPOINT": "https://acme.openai.azure.com", "AZURE_OPENAI_API_KEY": "k"}
+        with patch.dict(os.environ, auth):
+            factory = DefaultLlmFactory()
+            factory.load()
+            llm = factory.create_llm(config).get_model()
+        self.assertEqual(type(llm).__name__, "AzureChatOpenAI")
+        self.assertEqual(llm.deployment_name, "gpt-6.2-sol")
+        self.assertEqual(llm.reasoning_effort, "low")
+        self.assertIs(llm.use_responses_api, True)
 
     def test_registries_do_not_use_include(self):
         """

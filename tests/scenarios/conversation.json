@@ -1,0 +1,11 @@
+{
+  "name": "conversation basics",
+  "turns": [
+    {"say": "Hello, what's your name?", "via": "user_input",
+     "expect": {"reply": true, "speech_matches": "(?i)cail", "max_reaction": 10}},
+    {"say": "Tell me a short joke.", "via": "user_input",
+     "expect": {"reply": true, "max_reaction": 10}},
+    {"say": "Please do a little dance for me.", "via": "user_input",
+     "expect": {"reply": true, "log_matches": "robot_macros: skipped 'dance\\d?'"}}
+  ]
+}

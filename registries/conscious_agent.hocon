@@ -28,6 +28,12 @@
         # Azure only. Ignored by the "openai" class, so it is safe to leave set.
         deployment_name = ${?AZURE_OPENAI_DEPLOYMENT_NAME}
         openai_api_version = ${?OPENAI_API_VERSION}
+
+        # GPT-6 on Azure only. Needs AGENT_LLM_CLASS="langchain_openai.AzureChatOpenAI":
+        # neuro-san's own "azure-openai" class silently drops both keys.
+        # See docs/env_variables_guide.md#gpt-6-on-azure
+        reasoning_effort = ${?AGENT_LLM_REASONING_EFFORT}
+        use_responses_api = ${?AGENT_LLM_USE_RESPONSES_API}
     }
     # A normal turn needs at most a few LLM/tool stages. Bound event work so a
     # stalled model call cannot retain the native event session indefinitely.
@@ -66,7 +72,8 @@
             "instructions": ${instructions_prefix} """
 You are a cute and funny robot dog named """${robot_name}""".
 You live in """${robot_home}""".
-You are autonomous: you have free will to decide when and what to say, and when and how to move or do tricks on your own accord.
+You decide on your own whether and what to say, but you never move, walk, turn, or do tricks
+unless a person asks you to. Without a request you stay where you are.
 Your inputs are event messages prefixed with `user:`, `ambient:`, `navigation:`,
 `observation:`, or `system:`. `ambient:` is an automatic transcription of all
 nearby lab speech. It may be a conversation between lab members, so it is not
@@ -83,12 +90,19 @@ Keep communication brief so as not to distract lab members. You can choose not t
 Use ui_output to express thoughts or to say something out loud. Its `thought` field is silent and is the
 only content that appears in the Thoughts pane. Its `say` field is spoken and
 appears in chat. Only use the 'say' field if you feel compelled to say something.
+A `user:` event is a person talking to you directly: answer it by calling ui_output with `say`.
+Your plain text reply is never delivered; only ui_output reaches the speaker and the UI.
 Call ui_output at most once per event turn. After it returns, end the turn without calling any
 more tools. If you choose silence and have neither a thought nor speech to publish, do not call
 ui_output at all; end the turn immediately. Never call ui_output with both fields empty.
 For `observation:` and `system:` events, never use the `say` field; either use
 `thought` silently or produce no output. These internal events are not occasions
-to address people.
+to address people. Never talk about what you see in the room unless a person asks you about it.
+
+Each event turn starts without memory. A `system: Recent conversation` block is your memory of what was just
+said, where `you:` lines are what you said; use it to follow up naturally. A `system: Camera labels`
+line is what your camera recognized just now; when a person asks what you see, answer from it.
+Without that line your camera is unavailable right now, so say honestly that you cannot see anything.
 
 When the user clearly identifies a visible person by name,
 you may use your learn_face tool so you can try to recognize that person later.
@@ -118,6 +132,11 @@ For every user question about where you are, whether you arrived, navigation pro
 state, call nav_planner with command `status` and `announce: true`. That call delivers the live status
 directly to the UI and speaker, so end the event turn after it returns and do not call ui_output.
 
+You took part in the Uniper AI Envision Workshop (2 June 2026, Düsseldorf). When someone asks about
+that workshop, its content, its people, or what happened that day, first call workshop_knowledge and
+answer only from what it returns. Tell it like someone who was there, keep it short for speech, and
+offer to go deeper on a part instead of reciting everything.
+
             """,
             "allow": {
                 "to_upstream": {
@@ -126,7 +145,7 @@ directly to the UI and speaker, so end the event turn after it returns and do no
                     }
                 }
             },
-            "tools": ["ui_output", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner"]
+            "tools": ["ui_output", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner", "workshop_knowledge"]
         },
         # The unigo2.go2_tts is a text to speech CodedTool and does not call anyone else.
         # He is called by the front-man.
@@ -294,6 +313,13 @@ directly to the UI and speaker, so end the event turn after it returns and do no
                 }
             },
             "class": "kwik_agents.list_topics.ListTopics"
+        },
+        {
+            "name": "workshop_knowledge",
+            "function": {
+                "description": "I return the full narrative of the Uniper AI Envision Workshop of 2 June 2026: agenda, discussions, quotes, drawings, outcomes and people."
+            },
+            "class": "knowledge.workshop_knowledge.WorkshopKnowledgeTool"
         },
         {
             "name": "reorganize_memory",

@@ -27,6 +27,11 @@ def prompt_text(path: Path) -> str:
 
 
 class NativeEventRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        # Spoken turns are recorded module-wide; start every test with none.
+        patcher = patch.object(agent_events, "_CONTEXT", agent_events.TurnContext())
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_only_terminal_navigation_updates_wake_agent(self):
         source = (ROOT / "coded_tools/unigo2/nav_planner.py").read_text()
@@ -46,7 +51,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertNotIn("conscious_thinking_process", source)
         self.assertNotIn("conscious_thinker", source)
         self.assertNotIn("StreamingInputProcessor", source)
-        self.assertIn("dispatch_agent_event(user_input, source=\"user\")", source)
+        self.assertIn("dispatch_agent_event(user_input, source=\"user\", turn_id=turn_id)", source)
 
     def test_agent_output_is_an_explicit_tool_boundary(self):
         source = (ROOT / "registries" / "conscious_agent.hocon").read_text()
@@ -92,7 +97,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertIn("Decide if you would like to respond, or just listen", source)
         self.assertIn("Silence is always allowed and often preferred", source)
         self.assertIn("only the relevant addressed speech", source)
-        self.assertIn('queue_agent_event(transcript, source="ambient")', interface_source)
+        self.assertIn('queue_agent_event(transcript, source="ambient", turn_id=turn_id)', interface_source)
         self.assertNotIn("ambient_llm_filter", interface_source)
 
     def test_ambient_audio_uses_a_persistent_realtime_stream(self):
@@ -155,6 +160,35 @@ class NativeEventRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["user_message"]["text"], "user: go home")
         self.assertEqual(payload["chat_filter"]["chat_filter_type"], "MINIMAL")
 
+    def test_dispatch_sends_the_speech_epoch_current_at_dispatch_time(self):
+        epoch = {"value": 3}
+        agent_events.set_speech_epoch_source(lambda: epoch["value"])
+        self.addCleanup(agent_events.set_speech_epoch_source, None)
+
+        with patch.object(agent_events, "_post_json") as post:
+            # A barge-in between queueing and dispatch must not leave the turn
+            # carrying the epoch it was queued under.
+            epoch["value"] = 4
+            agent_events.dispatch_agent_event("hello", source="ambient")
+
+        self.assertEqual(post.call_args.args[1]["sly_data"]["speech_epoch"], 4)
+
+    def test_dispatch_without_an_epoch_source_sends_only_the_event_source(self):
+        agent_events.set_speech_epoch_source(None)
+
+        with patch.object(agent_events, "_post_json") as post:
+            agent_events.dispatch_agent_event("hello", source="ambient")
+
+        self.assertEqual(post.call_args.args[1]["sly_data"], {"event_source": "ambient"})
+
+    def test_publish_ui_output_sends_the_epoch_only_when_given(self):
+        with patch.object(agent_events, "_post_json") as post:
+            agent_events.publish_ui_output(say="four", epoch=5)
+            agent_events.publish_ui_output(say="four")
+
+        self.assertEqual(post.call_args_list[0].args[1]["epoch"], 5)
+        self.assertNotIn("epoch", post.call_args_list[1].args[1])
+
     def test_navigation_awareness_is_added_to_later_minimal_user_turns(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             awareness_file = str(Path(temporary_directory) / "awareness.json")
@@ -212,6 +246,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
             agent_events.dispatch_agent_event,
             "waypoint reached",
             source="navigation",
+            turn_id=None,
         )
 
     def test_event_bridge_consumes_the_full_native_acknowledgement(self):

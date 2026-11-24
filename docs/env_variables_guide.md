@@ -353,15 +353,34 @@ az cognitiveservices account keys list --name <resource> --resource-group <rg> \
   --query key1 -o tsv
 ```
 
-#### Do not use GPT-5.6 or GPT-6 for the assistant
+#### GPT-6 on Azure
 
-GPT-5.6 (sol / terra / luna) and GPT-6 Astra serve tool calling only over the
-Responses API, which the bundled neuro-san does not speak. Every agent here
-calls tools on every turn, so those deployments fail outright.
+neuro-san's `azure-openai` class drops `reasoning_effort` and cannot use the
+Responses API. GPT-6 rejects tool calls over Chat Completions unless the effort
+is `none`, so every turn fails with `400`. Point the class at LangChain's
+`AzureChatOpenAI` instead: neuro-san then hands every `llm_config` key through.
 
-This is not a version to chase. neuro-san added Responses support in 0.7, which
-needs Python 3.12, and this robot is held at 3.11 by CycloneDDS. `gpt-5.1`
-through `gpt-5.5` are all fine.
+```shell
+export AGENT_LLM_CLASS="langchain_openai.AzureChatOpenAI"
+export AZURE_OPENAI_DEPLOYMENT_NAME="gpt-6-luna"
+export AGENT_LLM_MODEL_NAME="gpt-6-luna"
+export AGENT_LLM_REASONING_EFFORT="none"
+```
+
+`gpt-6.2-sol` has no `none` effort, so it only calls tools over the Responses
+API:
+
+```shell
+export AZURE_OPENAI_DEPLOYMENT_NAME="gpt-6.2-sol"
+export AGENT_LLM_MODEL_NAME="gpt-6.2-sol"
+export AGENT_LLM_USE_RESPONSES_API="true"
+unset AGENT_LLM_REASONING_EFFORT   # or low / medium / high
+```
+
+Both variables apply to the conscious assistant only. The class switch moves
+the `unigo2` network over too; its `gpt-5`/`gpt-4o` deployment works there
+unchanged. `gpt-5.1` also runs on this class, so switching back is just the
+deployment name.
 
 ---
 
@@ -523,7 +542,7 @@ intelligible but markedly worse.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GO2_PIPER_VOICE` | `en_GB-cori-high` | Which voice, named as Piper publishes it: `<lang>-<speaker>-<quality>` |
+| `GO2_PIPER_VOICE` | `en_GB-alan-medium` | Which voice, named as Piper publishes it: `<lang>-<speaker>-<quality>` |
 | `GO2_PIPER_DIR` | `~/piper_models` | Where the `.onnx` and `.onnx.json` live |
 | `GO2_PIPER_MODEL`, `GO2_PIPER_CONFIG` | derived from the two above | Exact file paths, for a voice kept somewhere unusual |
 
@@ -541,8 +560,30 @@ works. The quality tiers trade naturalness for speed: `low` voices are
 are 22.05 kHz and sound better. The playback sample rate is read from the
 voice's own config, so mixing tiers is safe.
 
+The default `en_GB-alan-medium` was picked by ear for a lower, more neutral
+voice than the earlier `en_GB-cori-high` (#20). Being `medium`, it also
+synthesises at rtf ~0.1–0.2 on the robot against ~0.7–0.8 for cori-high.
+What remains is a gap of about 0.2–0.3 s when a one-word sentence ("Sure.")
+comes before a long one: the long one takes longer to make than the one word
+takes to play. That was judged acceptable; if not, the fix is splitting long
+sentences at commas before synthesis.
+
 `~/piper_models/` on the robot is `/home/unitree/piper_models` and on a laptop
 is under your own home directory, so the same setting works in both places.
+
+#### Piper synthesis speed
+
+Piper synthesises the next sentence while the current one plays. A
+mid-answer gap only happens if a sentence takes longer to make than the one
+before it takes to play.
+
+Every answer logs one line per sentence and one summary, which show whether
+synthesis keeps up (`rtf` above 1 means slower than real time):
+
+```text
+GO2_TTS: Piper sentence 1: synth 2.10s, audio 1.40s, rtf 1.50
+GO2_TTS: Piper answer: 3 sentences, synth 4.80s, audio 5.20s, worst rtf 1.50
+```
 
 #### Checking speech latency
 
@@ -605,10 +646,29 @@ Whisper, via `faster-whisper`, the same model family as the hosted `whisper-1`
 it stands in for.
 
 ```shell
-export GO2_STT_MODEL="base"    # tiny, base (default), small, medium
+export GO2_STT_MODEL="tiny"    # tiny (default), base, small, medium
 export GO2_STT_DEVICE="auto"   # auto -> cpu, or "cuda"
 export GO2_STT_LANGUAGE="en"
+export GO2_STT_BEAM_SIZE="1"   # greedy (default); Whisper's own default is 5
 ```
+
+Decoding is greedy and without timestamps. Each clip is one short command, so
+the extra work buys nothing. On the robot's 4-core CPU, Piper-spoken test
+commands took a median of 1.29 s with Whisper's defaults and 1.14 s with these
+settings. The only difference in the text was "two" coming back as "2".
+
+`tiny` is the default because model size is the bigger lever. In live voice
+turns on the robot, `base` took 1.1-1.4 s per clip and `tiny` 0.7-0.9 s. That
+brought the time from end of speech to transcript from 1.3 s to 0.85 s with
+push-to-talk and from 2.0 s to 1.4 s with ambient listening. The cost is
+accuracy at a distance: push-to-talk transcripts stayed clean, while ambient
+listening through the room microphone misheard the odd word, especially names
+("Helles" came back as "hellous"). Set `GO2_STT_MODEL="base"` if accuracy
+matters more than speed. The `.en` variants were no faster.
+
+There is no thread setting: CTranslate2 already uses all 4 of the Orin's
+cores. The `pthread_setaffinity_np` errors in the log come from Piper's
+onnxruntime, not from Whisper, and do not slow transcription.
 
 It defaults to the **CPU**. The Orin already carries YOLO under TensorRT and
 deepface, and on a 16 GB Orin NX memory is the binding constraint rather than

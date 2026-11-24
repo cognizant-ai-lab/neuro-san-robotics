@@ -4,13 +4,14 @@ import io
 import os
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from apps.conscious_assistant import interface_flask
 from coded_tools.unigo2 import local_stt
 
 
-STT_VARS = ("GO2_STT_ENGINE", "GO2_STT_MODEL", "GO2_STT_DEVICE", "GO2_STT_LANGUAGE")
+STT_VARS = ("GO2_STT_ENGINE", "GO2_STT_MODEL", "GO2_STT_DEVICE", "GO2_STT_LANGUAGE",
+            "GO2_STT_BEAM_SIZE")
 
 
 def stt_env(**overrides):
@@ -46,11 +47,36 @@ class ConfigurationTests(unittest.TestCase):
         with patch.dict(os.environ, stt_env(GO2_STT_DEVICE="cuda")):
             self.assertEqual(local_stt.device(), "cuda")
 
-    def test_model_size_defaults_to_base(self):
+    def test_model_size_defaults_to_tiny(self):
+        """base missed 1.5 s end-of-speech + STT on the robot; tiny made it (#15)."""
         with patch.dict(os.environ, stt_env()):
-            self.assertEqual(local_stt.model_size(), "base")
+            self.assertEqual(local_stt.model_size(), "tiny")
         with patch.dict(os.environ, stt_env(GO2_STT_MODEL="small")):
             self.assertEqual(local_stt.model_size(), "small")
+
+    def test_decoding_is_greedy_unless_asked(self):
+        """Utterances are short single commands; beam search only costs time."""
+        with patch.dict(os.environ, stt_env()):
+            self.assertEqual(local_stt.beam_size(), 1)
+        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="5")):
+            self.assertEqual(local_stt.beam_size(), 5)
+
+    def test_a_nonsense_number_falls_back_to_the_default(self):
+        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="wat")):
+            self.assertEqual(local_stt.beam_size(), 1)
+        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="0")):
+            self.assertEqual(local_stt.beam_size(), 1)
+
+    def test_transcribe_uses_the_cheap_decoding_settings(self):
+        whisper = MagicMock()
+        whisper.transcribe.return_value = (iter([]), None)
+        # A blank language must still mean English, not "" passed to Whisper.
+        with patch.dict(os.environ, stt_env(GO2_STT_BEAM_SIZE="3", GO2_STT_LANGUAGE="")), \
+                patch.object(local_stt, "model", return_value=whisper):
+            local_stt.transcribe("clip.webm")
+        whisper.transcribe.assert_called_once_with(
+            "clip.webm", language="en", beam_size=3,
+            without_timestamps=True, condition_on_previous_text=False)
 
 
 class RouteSelectionTests(unittest.TestCase):

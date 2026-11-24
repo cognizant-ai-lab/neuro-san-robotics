@@ -8,6 +8,8 @@ from typing import Dict
 
 from neuro_san.interfaces.coded_tool import CodedTool
 
+from coded_tools.unigo2.agent_events import SILENT_SOURCES
+from coded_tools.unigo2.agent_events import event_source
 from coded_tools.unigo2.agent_events import publish_ui_output
 
 
@@ -24,6 +26,8 @@ class UiOutputTool(CodedTool):
             or not isinstance(heard, str)
         ):
             return "thought, say, and heard must be strings. End this event turn now."
+        if event_source(sly_data) in SILENT_SOURCES:
+            say = ""
         if not thought.strip() and not say.strip():
             return (
                 "Silence selected. End this event turn now without calling "
@@ -35,6 +39,11 @@ class UiOutputTool(CodedTool):
             thought=thought,
             say=say,
             heard=heard,
+            # The epoch the dispatching turn was sent with; lets the UI drop
+            # this speech if the user has since barged in.
+            epoch=(sly_data or {}).get("speech_epoch"),
+            # Ties this output to the voice turn's timing line (#13).
+            turn_id=(sly_data or {}).get("turn_id"),
         )
         if delivered:
             return "Output delivered. End this event turn now; do not call ui_output again."

@@ -29,6 +29,7 @@ too: the real aplay prints its own "underrun!!!" lines if the pipe starves.
 """
 
 import argparse
+import importlib.util
 import logging
 import os
 import platform
@@ -164,10 +165,15 @@ a, _rest = p.parse_known_args()
 trace_path, wav_path = os.environ["TTS_CHECK_TRACE"], os.environ.get("TTS_CHECK_WAV")
 silent = os.environ.get("TTS_CHECK_SILENT") == "1"
 
+me = os.path.dirname(os.path.abspath(__file__))
+real = shutil.which("aplay", path=os.pathsep.join(
+    d for d in os.environ["PATH"].split(os.pathsep) if os.path.abspath(d) != me))
+# Device listing (tts_go2 runs `aplay -l` to find the USB speaker) is not playback:
+# hand it to the real aplay untouched, or the wrapper would read our stdin as audio.
+if real and {"-l", "-L", "--list-devices", "--list-pcms"} & set(sys.argv[1:]):
+    os.execv(real, [real] + sys.argv[1:])
+
 def find_sink():
-    me = os.path.dirname(os.path.abspath(__file__))
-    path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep) if os.path.abspath(d) != me)
-    real = shutil.which("aplay", path=path)
     if real:
         return [real] + sys.argv[1:]
     if shutil.which("ffplay") and subprocess.run(["ffplay", "-version"], capture_output=True).returncode == 0:
@@ -274,7 +280,7 @@ def main() -> int:
 
         if args.engine == "piper" and not tts_go2._is_piper_available():
             print("piper is not runnable here, so there is nothing to measure.", file=sys.stderr)
-            print(f"  piper on PATH : {'yes' if shutil.which('piper') else 'NO  (uv pip install piper-tts)'}",
+            print(f"  piper module  : {'yes' if importlib.util.find_spec('piper') else 'NO  (uv pip install piper-tts)'}",
                   file=sys.stderr)
             print(f"  voice model   : {tts_go2.PIPER_MODEL} "
                   f"{'ok' if os.path.isfile(tts_go2.PIPER_MODEL) else 'MISSING (scripts/install_piper_voice.py)'}",
@@ -286,6 +292,9 @@ def main() -> int:
         print("TTS latency check")
         print(f"  engine {args.engine}   voice {voice} ({rate} Hz)   text {len(text)} chars, "
               f"{len(text.split())} words")
+
+        if args.engine == "piper":
+            tts_go2._piper_voice()  # the app loads the voice at start-up, so measure it warm
 
         start = time.time()
         progress = Progress(trace, start, rate, estimate_speech_s(text)) if sys.stderr.isatty() else None

@@ -1,0 +1,54 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: "0 5 * * *"  # nightly voice/LLM scenarios
+  workflow_dispatch:
+
+jobs:
+  unit:
+    # Mocked robot and OpenAI: free and fast, runs on every change.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        # CPU torch first so ultralytics doesn't pull the multi-GB CUDA build.
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt python-socketio[client]
+      - name: Unit tests
+        run: PYTHONPATH=. python -m unittest discover -s tests -v
+
+  scenarios:
+    # Real LLM + agent tools against the app in simulation mode; costs OpenAI calls,
+    # so only nightly, on demand, or on PRs labelled run-voice-eval.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'run-voice-eval')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      TALK_DRIVER_VERBOSE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt python-socketio[client]
+      - name: Conversation scenarios
+        run: python scripts/talk_driver.py --start-server tests/scenarios/*.json
