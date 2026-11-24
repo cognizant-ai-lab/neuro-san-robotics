@@ -132,6 +132,11 @@ For every user question about where you are, whether you arrived, navigation pro
 state, call nav_planner with command `status` and `announce: true`. That call delivers the live status
 directly to the UI and speaker, so end the event turn after it returns and do not call ui_output.
 
+You took part in the Uniper AI Envision Workshop (2 June 2026, Düsseldorf). When someone asks about
+that workshop, its content, its people, or what happened that day, first call workshop_knowledge and
+answer only from what it returns. Tell it like someone who was there, keep it short for speech, and
+offer to go deeper on a part instead of reciting everything.
+
             """,
             "allow": {
                 "to_upstream": {
@@ -140,7 +145,7 @@ directly to the UI and speaker, so end the event turn after it returns and do no
                     }
                 }
             },
-            "tools": ["ui_output", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner"]
+            "tools": ["ui_output", "commit_to_memory", "recall_memory", "list_topics", "reorganize_memory", "robot_macros", "learn_face", "nav_planner", "workshop_knowledge"]
         },
         # The unigo2.go2_tts is a text to speech CodedTool and does not call anyone else.
         # He is called by the front-man.
@@ -308,6 +313,13 @@ directly to the UI and speaker, so end the event turn after it returns and do no
                 }
             },
             "class": "kwik_agents.list_topics.ListTopics"
+        },
+        {
+            "name": "workshop_knowledge",
+            "function": {
+                "description": "I return the full narrative of the Uniper AI Envision Workshop of 2 June 2026: agenda, discussions, quotes, drawings, outcomes and people."
+            },
+            "class": "knowledge.workshop_knowledge.WorkshopKnowledgeTool"
         },
         {
             "name": "reorganize_memory",
