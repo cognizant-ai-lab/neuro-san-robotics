@@ -153,6 +153,16 @@ def _post_json(url: str, payload: dict[str, Any], *, token: str = "", timeout: f
         response.read()
 
 
+# Internal events must never make the robot speak or move on its own.
+SILENT_SOURCES = ("observation", "system")
+MOTIONLESS_SOURCES = ("observation", "system", "navigation")
+
+
+def event_source(sly_data: dict[str, Any] | None) -> str:
+    """Return the source of the event that started this turn ("" when unknown)."""
+    return str((sly_data or {}).get("event_source", ""))
+
+
 def dispatch_agent_event(text: str, *, source: str, turn_id: str | None = None) -> bool:
     """Wake the event-configured agent without waiting for its background work."""
     text = str(text).strip()
@@ -180,15 +190,15 @@ def dispatch_agent_event(text: str, *, source: str, turn_id: str | None = None) 
         "chat_filter": {"chat_filter_type": "MINIMAL"},
     }
     # sly_data reaches the turn's coded tools, so ui_output can echo it back.
-    sly_data: dict[str, Any] = {}
+    # event_source lets the coded tools enforce what internal events may do.
+    sly_data: dict[str, Any] = {"event_source": source}
     if _speech_epoch_source is not None:
         # Read now, not at queue time: a barge-in while this event waited in
         # the queue supersedes everything before it, including this turn.
         sly_data["speech_epoch"] = _speech_epoch_source()
     if turn_id:
         sly_data["turn_id"] = turn_id
-    if sly_data:
-        payload["sly_data"] = sly_data
+    payload["sly_data"] = sly_data
     turn_timing.mark(turn_id, "dispatched")
     try:
         _post_json(endpoint, payload, timeout=5.0)

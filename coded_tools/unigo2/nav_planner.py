@@ -59,6 +59,8 @@ class NavPlannerTool(CodedTool):
         Returns:
             Human-readable status string for the conscious agent.
         """
+        from coded_tools.unigo2.agent_events import MOTIONLESS_SOURCES
+        from coded_tools.unigo2.agent_events import event_source
         from coded_tools.unigo2.agent_events import route_navigation_status
         from coded_tools.unigo2.nav_core import NavCore, NavState
 
@@ -72,6 +74,11 @@ class NavPlannerTool(CodedTool):
                 "Please specify a navigation command: navigate_to, set_location, "
                 "move_forward, turn, stop, resume, or status."
             )
+
+        source = event_source(sly_data)
+        moving = {"navigate_to", "move_forward", "move_until_obstacle", "turn", "resume", "continue"}
+        if source in MOTIONLESS_SOURCES and command in moving:
+            return f"Refused: no movement on a {source} event. Move only when a person asks. End this event turn."
 
         nav = NavCore.get_instance()
 

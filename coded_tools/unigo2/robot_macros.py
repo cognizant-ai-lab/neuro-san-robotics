@@ -15,6 +15,8 @@ from typing import Dict
 import logging
 import asyncio
 from neuro_san.interfaces.coded_tool import CodedTool
+from coded_tools.unigo2.agent_events import MOTIONLESS_SOURCES
+from coded_tools.unigo2.agent_events import event_source
 from coded_tools.unigo2.go2_macros import Go2Macros
 
 
@@ -240,6 +242,9 @@ class RobotMacros(CodedTool):
             return "Don't understand non-string actions"
 
         action_lower = action.lower()
+        source = event_source(sly_data)
+        if source in MOTIONLESS_SOURCES and action_lower != "stop_move":
+            return f"Refused: no movement on a {source} event. Move only when a person asks. End this event turn."
 
         # Validate the action before touching robot control.
         known_actions = {

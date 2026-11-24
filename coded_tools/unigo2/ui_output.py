@@ -8,6 +8,8 @@ from typing import Dict
 
 from neuro_san.interfaces.coded_tool import CodedTool
 
+from coded_tools.unigo2.agent_events import SILENT_SOURCES
+from coded_tools.unigo2.agent_events import event_source
 from coded_tools.unigo2.agent_events import publish_ui_output
 
 
@@ -24,6 +26,8 @@ class UiOutputTool(CodedTool):
             or not isinstance(heard, str)
         ):
             return "thought, say, and heard must be strings. End this event turn now."
+        if event_source(sly_data) in SILENT_SOURCES:
+            say = ""
         if not thought.strip() and not say.strip():
             return (
                 "Silence selected. End this event turn now without calling "

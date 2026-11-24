@@ -166,15 +166,15 @@ class NativeEventRuntimeTests(unittest.TestCase):
             epoch["value"] = 4
             agent_events.dispatch_agent_event("hello", source="ambient")
 
-        self.assertEqual(post.call_args.args[1]["sly_data"], {"speech_epoch": 4})
+        self.assertEqual(post.call_args.args[1]["sly_data"]["speech_epoch"], 4)
 
-    def test_dispatch_without_an_epoch_source_sends_no_sly_data(self):
+    def test_dispatch_without_an_epoch_source_sends_only_the_event_source(self):
         agent_events.set_speech_epoch_source(None)
 
         with patch.object(agent_events, "_post_json") as post:
             agent_events.dispatch_agent_event("hello", source="ambient")
 
-        self.assertNotIn("sly_data", post.call_args.args[1])
+        self.assertEqual(post.call_args.args[1]["sly_data"], {"event_source": "ambient"})
 
     def test_publish_ui_output_sends_the_epoch_only_when_given(self):
         with patch.object(agent_events, "_post_json") as post:
