@@ -27,6 +27,11 @@ def prompt_text(path: Path) -> str:
 
 
 class NativeEventRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        # Spoken turns are recorded module-wide; start every test with none.
+        patcher = patch.object(agent_events, "_CONTEXT", agent_events.TurnContext())
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_only_terminal_navigation_updates_wake_agent(self):
         source = (ROOT / "coded_tools/unigo2/nav_planner.py").read_text()

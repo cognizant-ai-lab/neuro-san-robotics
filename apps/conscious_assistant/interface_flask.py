@@ -43,6 +43,8 @@ from coded_tools.unigo2 import local_stt
 from coded_tools.unigo2 import openai_provider
 from coded_tools.unigo2.agent_events import dispatch_agent_event
 from coded_tools.unigo2.agent_events import queue_agent_event
+from coded_tools.unigo2.agent_events import remember_conversation
+from coded_tools.unigo2.agent_events import remember_observation
 from coded_tools.unigo2.agent_events import set_speech_epoch_source
 from coded_tools.unigo2 import turn_timing
 
@@ -242,6 +244,7 @@ def receive_agent_output():
 
     if heard.strip():
         socketio.emit("update_user_input", {"data": heard.strip()}, namespace="/chat")
+        remember_conversation("user", heard)
     if thought.strip():
         socketio.emit("update_thoughts", {"data": thought.strip()}, namespace="/chat")
     if say.strip():
@@ -258,9 +261,11 @@ def receive_agent_output():
             logging.info("Discarding speech from a superseded turn: %s", say.strip()[:60])
         else:
             enqueue_speech(say.strip(), emit_to_ui=True, turn_id=turn_id)
+            remember_conversation("you", say)
     if isinstance(observation, dict):
         global latest_observation  # pylint: disable=global-statement
         latest_observation = observation
+        remember_observation(observation.get("objects"))
         emit_observation_update(observation)
 
     return jsonify({"ok": True})

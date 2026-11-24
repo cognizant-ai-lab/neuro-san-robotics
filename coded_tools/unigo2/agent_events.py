@@ -8,6 +8,7 @@ import os
 import ssl
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,78 @@ _PENDING_BY_SOURCE: dict[str, tuple[str, str | None]] = {}
 # native server (scene observations, the navigation fallback) go out untagged
 # and their speech counts as current; share the epoch via a file if they speak.
 _speech_epoch_source: Callable[[], int] | None = None
+
+
+class TurnContext:
+    """Recent conversation and camera labels, so each stateless event turn can see them.
+
+    Event turns never return a chat_context to us, so we keep this ourselves.
+    """
+
+    MAX_ENTRIES = 10
+    IDLE_EXPIRY_SECONDS = 5 * 60
+    OBSERVATION_MAX_AGE_SECONDS = 60
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._entries: deque[tuple[str, str]] = deque(maxlen=self.MAX_ENTRIES)
+        self._last_at = 0.0
+        self._observation: tuple[list[str], float] | None = None
+
+    def remember_observation(self, labels: Any) -> None:
+        """Keep the newest camera labels; anything but a list counts as none."""
+        labels = [str(label) for label in labels] if isinstance(labels, list) else []
+        with self._lock:
+            self._observation = (labels, time.monotonic())
+
+    def camera_line(self) -> str:
+        """Return the camera labels line, or "" when there is no fresh observation."""
+        with self._lock:
+            if self._observation is None:
+                return ""
+            labels, seen_at = self._observation
+        age = time.monotonic() - seen_at
+        if age > self.OBSERVATION_MAX_AGE_SECONDS:
+            return ""  # the observer stopped; better no camera than a stale one
+        return f"system: Camera labels {age:.0f} s ago: {', '.join(labels) or 'nothing recognized'}"
+
+    def remember(self, speaker: str, text: str) -> None:
+        """Append one spoken line; a long silence first forgets the old conversation."""
+        text = str(text).strip()
+        if not text:
+            return
+        with self._lock:
+            self._expire()
+            self._entries.append((speaker, text))
+            self._last_at = time.monotonic()
+
+    def conversation_block(self) -> str:
+        """Return the recent conversation block, or "" when there is none."""
+        with self._lock:
+            self._expire()
+            if not self._entries:
+                return ""
+            lines = [f"  {speaker}: {text}" for speaker, text in self._entries]
+        return "system: Recent conversation (oldest first, authoritative):\n" + "\n".join(lines)
+
+    def _expire(self) -> None:
+        if time.monotonic() - self._last_at > self.IDLE_EXPIRY_SECONDS:
+            self._entries.clear()
+
+
+# shortcut: in-memory and only the Flask process records into it, so a restart
+# forgets the conversation; persist it if conversations must survive restarts.
+_CONTEXT = TurnContext()
+
+
+def remember_conversation(speaker: str, text: str) -> None:
+    """Record one spoken line ("user" or "you") for later turns."""
+    _CONTEXT.remember(speaker, text)
+
+
+def remember_observation(labels: Any) -> None:
+    """Record the newest camera labels for later spoken turns."""
+    _CONTEXT.remember_observation(labels)
 
 
 def set_speech_epoch_source(source: Callable[[], int] | None) -> None:
@@ -180,6 +253,13 @@ def dispatch_agent_event(text: str, *, source: str, turn_id: str | None = None) 
                 "\nsystem: Current navigation awareness (authoritative): "
                 f"{awareness}"
             )
+    if source in ("user", "ambient"):
+        for context in (_CONTEXT.conversation_block(), _CONTEXT.camera_line()):
+            if context:
+                event_text += "\n" + context
+    if source == "user":
+        # After rendering, so the turn is not repeated in its own context.
+        remember_conversation("user", text)
 
     endpoint = os.environ.get(
         "CONSCIOUS_AGENT_EVENT_ENDPOINT",
